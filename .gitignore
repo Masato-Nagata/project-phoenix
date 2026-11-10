@@ -68,6 +68,7 @@ web_modules/
 # dotenv environment variable files
 .env
 .env.*
+*.env
 !.env.example
 
 # parcel-bundler cache (https://parceljs.org/)
@@ -147,3 +148,17 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# Private keys and credentials
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+
+# Kiro generated task execution metadata (history and session ids; checkbox state lives in tasks.md)
+.kiro/specs/**/tasks.meta.json
