@@ -1,0 +1,19 @@
+# Root build context ignore file (used by infra/discovery/runtime.Dockerfile, build context = repository root).
+# Deny everything, then allow only what the runtime build needs.
+# legacy/ is built with its own context (./legacy) and is not affected by this file.
+*
+!package.json
+!package-lock.json
+!.npmrc
+!tsconfig.base.json
+!tsconfig.json
+!packages/
+!packages/**
+# Never include, even under packages/:
+packages/**/node_modules
+packages/**/dist
+**/.env
+**/*.env
+**/*.pem
+**/*.key
+**/.git

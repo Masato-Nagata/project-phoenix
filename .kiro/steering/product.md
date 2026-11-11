@@ -37,7 +37,7 @@ The MVP demonstrates the full modernization pipeline on a small, self-contained 
 ## Success Criteria
 
 1. The legacy sample app starts and responds correctly inside Docker.
-2. The AI-generated specification document covers all major business rules of the sample app, each with a cited source location (file + line); AI-inferred claims are explicitly distinguished from source-verified facts.
+2. The AI-generated specification document covers all major business rules of the sample app, each with a cited source location (file + line); AI-inferred claims are explicitly distinguished from source evidence (verified citations), experiment evidence (observed behavior), and human approval.
 3. The modernized PHP 8.4 app passes the compatibility verification suite: for every test case, the legacy output and the modern output match exactly.
 4. The verifier detects and reports any mismatch between legacy and modern outputs — a deliberate divergence introduced during testing must appear as a failure in the report.
 5. The React UI displays analysis results, the restored spec (with citations), and the verification report without manual data wrangling.

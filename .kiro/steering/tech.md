@@ -13,8 +13,10 @@
 ### Backend
 | Layer | Choice | Notes |
 |-------|--------|-------|
-| Runtime | Node.js | LTS version at implementation time |
-| Language | TypeScript | Strict mode; compiled with tsc or tsx |
+| Runtime | Node.js | Active LTS line (26.x at the discovery-loop M0); exact version and container image digest in `docs/version-pinning.json`. Node.js runs only inside pinned containers, never installed on the host |
+| Language | TypeScript | Strict mode; compiled with tsc (exact version in `docs/version-pinning.json`) |
+| Tests | Vitest + fast-check | Unit, integration, and property-based tests; exact versions pinned |
+| Schema validation | Ajv (JSON Schema 2020-12) | AI output and stored records are validated before use |
 | HTTP framework | Fastify | Type-safe plugins; JSON schema validation built-in |
 | Database (platform) | SQLite | Pipeline metadata and verification results; accessed via a thin repository layer |
 
@@ -34,8 +36,9 @@
 ### Infrastructure
 | Concern | Choice |
 |---------|--------|
-| Monorepo | npm workspaces |
-| Containerization | Docker / Docker Compose |
+| Monorepo | npm workspaces (exact versions, committed lockfile, `npm ci` only) |
+| Containerization | Docker / Docker Compose (base Compose file plus separately approved override files) |
+| Host-side tooling | PowerShell 7 (Launcher, approval command, isolation tests); no Node.js on the host |
 | CI (MVP) | None — local execution only |
 | Secret management | `.env` files excluded from Git; no secrets in sample data |
 
@@ -43,7 +46,7 @@
 - All AI calls are routed through a single provider-abstraction layer (`packages/ai-client`).
 - MVP implements two providers:
   - **Mock Provider** — returns deterministic canned responses; used for local development and unit tests without any external dependency.
-  - **Real AI Provider** — one concrete LLM provider selected at the `ai-client` Spec stage (e.g., AWS Bedrock, OpenAI, or Anthropic API).
+  - **Real AI Provider** — one concrete provider. The first candidate is Kiro CLI in headless mode (Kiro_CLI_Provider), run only inside an isolated AI_Sandbox container (discovery-loop spec, M6/M7). Building that environment, connecting to it, and sending any payload to it each require a separate explicit human approval. Other providers (e.g., AWS Bedrock, OpenAI, Anthropic API) remain possible behind the same interface.
 - The abstraction interface must support swapping the provider via configuration without changing any caller code.
 - The Mock Provider must be usable as a drop-in replacement so the full pipeline can be exercised offline.
 
@@ -92,7 +95,7 @@ A core design principle is the clear separation of AI inference from determinist
 | Pipeline state transitions | Deterministic (program) | Reproducibility requires explicit control flow |
 | Dangerous operations (delete, deploy) | Human approval required | See `safety.md` |
 
-**Rule:** AI output is always labeled as a proposal or inference until confirmed by a passing test or explicit human approval. The distinction between AI-inferred facts and source-verified facts must be represented in the data model.
+**Rule:** AI output is always labeled as a proposal or inference until confirmed by a passing test or explicit human approval. The data model keeps origin (who produced it), evidence (`source` citation checks and `experiment` observations), and human approval separate (see `structure.md`); source or experiment evidence never establishes business-specification correctness on its own.
 
 ---
 

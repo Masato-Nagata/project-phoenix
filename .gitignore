@@ -162,3 +162,12 @@ id_ed25519.*
 
 # Kiro generated task execution metadata (history and session ids; checkbox state lives in tasks.md)
 .kiro/specs/**/tasks.meta.json
+
+# AI_Discovery_Loop raw Run records and per-Run working areas (discovery-loop spec R12.12). A human may commit selected records explicitly.
+# discovery/approvals/ is an audit record and is intentionally NOT ignored.
+discovery/runs/
+discovery/channel/
+# Per-Run lease and lock files (host-side Launcher), and the generated audit configuration, which holds canary and fingerprint values and must never be committed.
+discovery/leases/
+discovery/locks/
+discovery/config/

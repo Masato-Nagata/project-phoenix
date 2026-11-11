@@ -1,0 +1,22 @@
+{
+  "name": "@phoenix/discovery-loop",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./report": {
+      "types": "./dist/report/index.d.ts",
+      "default": "./dist/report/index.js"
+    }
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1"
+  }
+}

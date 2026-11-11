@@ -6,7 +6,7 @@ The legacy PHP 5.6 / MySQL 5.7 system runs exclusively inside Docker containers 
 
 ### Required Constraints
 - **No external network access.** The legacy container must have no route to the internet. Use Docker's `internal: true` network flag or an explicit `--network none` setting.
-- **No host filesystem access beyond designated volumes.** Mount only the directories explicitly required (source code, SQL). Do not mount the host home directory, `.ssh`, or any directory outside `legacy/`.
+- **No host filesystem access beyond designated volumes.** Mount only the directories explicitly required (source code, SQL). Do not mount the host home directory, `.ssh`, or any directory outside `legacy/` into the legacy containers. Containers of the AI_Discovery_Loop follow the complete mount lists of the discovery-loop design; any mount not on those lists is a violation.
 - **Read-only source mount.** The legacy source directory is mounted read-only inside the container. The pipeline must never write back to `legacy/src/`.
 - **Non-root container user.** The container process must run as an unprivileged user, not `root`.
 - **Resource limits.** Set CPU and memory limits in `docker-compose.yml` to prevent runaway processes.
@@ -23,8 +23,8 @@ AI output is treated as a proposal until independently verified.
 
 ### Spec Restoration
 - Every business-rule claim in an AI-generated spec document must include a citation: `{ file: string; line: number }`.
-- Citations are verified by the `analyzer` module against the actual source index. An unverifiable citation must be flagged as `origin: "ai-inferred"` rather than `origin: "source-verified"`.
-- The data model must represent this distinction explicitly. Never promote `"ai-inferred"` to `"source-verified"` without programmatic confirmation.
+- Citations are verified by the `analyzer` module against the actual source index. The content keeps `origin: "ai-inferred"`; verification adds `source` evidence (`supported`, `contradicted`, or `mixed`). An unverifiable citation never produces `supported` source evidence.
+- The data model must represent this distinction explicitly. Never record `supported` source evidence without programmatic confirmation, never treat source or experiment evidence as business-specification correctness, and never let an AI create or change a human approval record.
 
 ### Code Generation (Modernizer)
 - AI-generated PHP 8.x code is written to `modern/src/` as a proposal.
@@ -47,8 +47,10 @@ The following operations require explicit user confirmation before Kiro proceeds
 | Overwriting or deleting files in `legacy/` | Irreversible corruption of the reference system | User must type explicit confirmation |
 | Applying generated code to `modern/src/` in bulk | May introduce unreviewed logic | User reviews diff and approves |
 | Running the compatibility test suite against a new modern build | Triggers container execution | User confirms before each full run |
-| Modifying `infra/docker-compose.yml` network or volume settings | Could break isolation | User approves the specific change |
-| Any `git commit`, `git push`, or `git merge` | Affects shared history | User executes manually; Kiro never runs these |
+| Modifying `infra/docker-compose.yml` network or volume settings, creating or applying any Compose override file, or creating Docker networks | Could break isolation | User approves the specific change; applying an override is a separate approval from writing it |
+| Pulling or building container images, running containers, or `npm ci` / `npm install` | Downloads external code; changes local state | User approves each operation |
+| Sending any payload to an external AI service | Transmits project content to a third party | User approves the provider and the exact Source_Bundle hashes |
+| Any `git commit`, `git push`, or `git merge` | Affects shared history | Kiro runs it only when the user explicitly instructs that specific operation; otherwise the user executes it. Force pushes, history rewrites, and pushes to `main` need an explicit instruction naming that action |
 | Deleting any directory or running recursive delete commands | Irreversible | User must explicitly request and confirm |
 | Changing authentication or access control configuration | Security impact | User approves after reviewing the change |
 

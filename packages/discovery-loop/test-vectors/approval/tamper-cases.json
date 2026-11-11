@@ -1,0 +1,248 @@
+{
+  "format": "phoenix-approval-vectors/1",
+  "description": "Store texts that a verifier must accept or reject. Mismatch kinds: modified (line not canonical or not valid, or hash does not match content), missing (absent sequence numbers or absent anchored head), chain_break (prev_hash mismatch, or sequence number repeats or goes backwards). Findings are listed once per (seq, kind), sorted by seq, then modified < missing < chain_break. Truncation of the tail is detected only with an anchor.",
+  "cases": [
+    {
+      "name": "positive-control-unmodified",
+      "storeText": "{\"approver\":\"Alice Example\",\"decision\":\"approved\",\"hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"rationale\":\"Matches observed behavior.\",\"recorded_by\":\"human\",\"seq\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-01T12:00:00.000+09:00\",\"type\":\"approval\"}\n{\"approver\":\"Bob Example\",\"decision\":\"approved\",\"hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"prev_hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"rationale\":\"Containers allowed for M1.\",\"recorded_by\":\"kiro-development-agent\",\"seq\":2,\"target\":{\"gate_id\":\"container-runtime\",\"kind\":\"gate\"},\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"approval\"}\n{\"approver\":\"Alice Example\",\"decision\":\"rejected\",\"hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"prev_hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"rationale\":\"Quote \\\" backslash \\\\ slash / tab\\t newline\\n cr\\r control \\u0001\\u001f del  accents é 日本語 emoji 😀 angle <&> end\",\"recorded_by\":\"human\",\"seq\":3,\"supersedes\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-03T00:00:00.5-05:30\",\"type\":\"approval\"}\n{\"attempted_seq\":1,\"hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"prev_hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"reason\":\"modify request refused\",\"seq\":4,\"type\":\"store_rejection\"}\n{\"approver\":\"Carol Example\",\"decision\":\"needs_changes\",\"hash\":\"063127c22380e0d9df228a9e5cbf064c97692a89cf9c58a7f1606517a124a2bd\",\"prev_hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"rationale\":\"More Experiments needed.\",\"recorded_by\":\"human\",\"seq\":5,\"target\":{\"kind\":\"run\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-04T10:20:30+00:00\",\"type\":\"approval\"}\n",
+      "expectedOk": true,
+      "expectedMismatches": [],
+      "expectedRuleViolations": []
+    },
+    {
+      "name": "empty-store",
+      "storeText": "",
+      "expectedOk": true,
+      "expectedMismatches": [],
+      "expectedRuleViolations": []
+    },
+    {
+      "name": "content-modified-without-rehash",
+      "storeText": "{\"approver\":\"Alice Example\",\"decision\":\"approved\",\"hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"rationale\":\"Matches observed behavior.\",\"recorded_by\":\"human\",\"seq\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-01T12:00:00.000+09:00\",\"type\":\"approval\"}\n{\"approver\":\"Bob Example\",\"decision\":\"approved\",\"hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"prev_hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"rationale\":\"Containers allowed for M9.\",\"recorded_by\":\"kiro-development-agent\",\"seq\":2,\"target\":{\"gate_id\":\"container-runtime\",\"kind\":\"gate\"},\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"approval\"}\n{\"approver\":\"Alice Example\",\"decision\":\"rejected\",\"hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"prev_hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"rationale\":\"Quote \\\" backslash \\\\ slash / tab\\t newline\\n cr\\r control \\u0001\\u001f del  accents é 日本語 emoji 😀 angle <&> end\",\"recorded_by\":\"human\",\"seq\":3,\"supersedes\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-03T00:00:00.5-05:30\",\"type\":\"approval\"}\n{\"attempted_seq\":1,\"hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"prev_hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"reason\":\"modify request refused\",\"seq\":4,\"type\":\"store_rejection\"}\n{\"approver\":\"Carol Example\",\"decision\":\"needs_changes\",\"hash\":\"063127c22380e0d9df228a9e5cbf064c97692a89cf9c58a7f1606517a124a2bd\",\"prev_hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"rationale\":\"More Experiments needed.\",\"recorded_by\":\"human\",\"seq\":5,\"target\":{\"kind\":\"run\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-04T10:20:30+00:00\",\"type\":\"approval\"}\n",
+      "expectedOk": false,
+      "expectedMismatches": [
+        {
+          "seq": 2,
+          "kind": "modified"
+        }
+      ],
+      "expectedRuleViolations": []
+    },
+    {
+      "name": "content-modified-and-rehashed",
+      "storeText": "{\"approver\":\"Alice Example\",\"decision\":\"approved\",\"hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"rationale\":\"Matches observed behavior.\",\"recorded_by\":\"human\",\"seq\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-01T12:00:00.000+09:00\",\"type\":\"approval\"}\n{\"approver\":\"Bob Example\",\"decision\":\"approved\",\"hash\":\"79e3849003cf3a92ad5a7204c2972d10f45600ffe66e4c79417b53f85d3df384\",\"prev_hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"rationale\":\"Edited after the fact.\",\"recorded_by\":\"kiro-development-agent\",\"seq\":2,\"target\":{\"gate_id\":\"container-runtime\",\"kind\":\"gate\"},\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"approval\"}\n{\"approver\":\"Alice Example\",\"decision\":\"rejected\",\"hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"prev_hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"rationale\":\"Quote \\\" backslash \\\\ slash / tab\\t newline\\n cr\\r control \\u0001\\u001f del  accents é 日本語 emoji 😀 angle <&> end\",\"recorded_by\":\"human\",\"seq\":3,\"supersedes\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-03T00:00:00.5-05:30\",\"type\":\"approval\"}\n{\"attempted_seq\":1,\"hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"prev_hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"reason\":\"modify request refused\",\"seq\":4,\"type\":\"store_rejection\"}\n{\"approver\":\"Carol Example\",\"decision\":\"needs_changes\",\"hash\":\"063127c22380e0d9df228a9e5cbf064c97692a89cf9c58a7f1606517a124a2bd\",\"prev_hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"rationale\":\"More Experiments needed.\",\"recorded_by\":\"human\",\"seq\":5,\"target\":{\"kind\":\"run\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-04T10:20:30+00:00\",\"type\":\"approval\"}\n",
+      "expectedOk": false,
+      "expectedMismatches": [
+        {
+          "seq": 3,
+          "kind": "chain_break"
+        }
+      ],
+      "expectedRuleViolations": []
+    },
+    {
+      "name": "record-deleted-from-the-middle",
+      "storeText": "{\"approver\":\"Alice Example\",\"decision\":\"approved\",\"hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"rationale\":\"Matches observed behavior.\",\"recorded_by\":\"human\",\"seq\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-01T12:00:00.000+09:00\",\"type\":\"approval\"}\n{\"approver\":\"Alice Example\",\"decision\":\"rejected\",\"hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"prev_hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"rationale\":\"Quote \\\" backslash \\\\ slash / tab\\t newline\\n cr\\r control \\u0001\\u001f del  accents é 日本語 emoji 😀 angle <&> end\",\"recorded_by\":\"human\",\"seq\":3,\"supersedes\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-03T00:00:00.5-05:30\",\"type\":\"approval\"}\n{\"attempted_seq\":1,\"hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"prev_hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"reason\":\"modify request refused\",\"seq\":4,\"type\":\"store_rejection\"}\n{\"approver\":\"Carol Example\",\"decision\":\"needs_changes\",\"hash\":\"063127c22380e0d9df228a9e5cbf064c97692a89cf9c58a7f1606517a124a2bd\",\"prev_hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"rationale\":\"More Experiments needed.\",\"recorded_by\":\"human\",\"seq\":5,\"target\":{\"kind\":\"run\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-04T10:20:30+00:00\",\"type\":\"approval\"}\n",
+      "expectedOk": false,
+      "expectedMismatches": [
+        {
+          "seq": 2,
+          "kind": "missing"
+        },
+        {
+          "seq": 3,
+          "kind": "chain_break"
+        }
+      ],
+      "expectedRuleViolations": []
+    },
+    {
+      "name": "first-record-deleted",
+      "storeText": "{\"approver\":\"Bob Example\",\"decision\":\"approved\",\"hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"prev_hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"rationale\":\"Containers allowed for M1.\",\"recorded_by\":\"kiro-development-agent\",\"seq\":2,\"target\":{\"gate_id\":\"container-runtime\",\"kind\":\"gate\"},\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"approval\"}\n{\"approver\":\"Alice Example\",\"decision\":\"rejected\",\"hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"prev_hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"rationale\":\"Quote \\\" backslash \\\\ slash / tab\\t newline\\n cr\\r control \\u0001\\u001f del  accents é 日本語 emoji 😀 angle <&> end\",\"recorded_by\":\"human\",\"seq\":3,\"supersedes\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-03T00:00:00.5-05:30\",\"type\":\"approval\"}\n{\"attempted_seq\":1,\"hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"prev_hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"reason\":\"modify request refused\",\"seq\":4,\"type\":\"store_rejection\"}\n{\"approver\":\"Carol Example\",\"decision\":\"needs_changes\",\"hash\":\"063127c22380e0d9df228a9e5cbf064c97692a89cf9c58a7f1606517a124a2bd\",\"prev_hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"rationale\":\"More Experiments needed.\",\"recorded_by\":\"human\",\"seq\":5,\"target\":{\"kind\":\"run\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-04T10:20:30+00:00\",\"type\":\"approval\"}\n",
+      "expectedOk": false,
+      "expectedMismatches": [
+        {
+          "seq": 1,
+          "kind": "missing"
+        },
+        {
+          "seq": 2,
+          "kind": "chain_break"
+        }
+      ],
+      "expectedRuleViolations": [
+        {
+          "seq": 3,
+          "rule": "supersedes_unknown"
+        }
+      ]
+    },
+    {
+      "name": "record-duplicated",
+      "storeText": "{\"approver\":\"Alice Example\",\"decision\":\"approved\",\"hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"rationale\":\"Matches observed behavior.\",\"recorded_by\":\"human\",\"seq\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-01T12:00:00.000+09:00\",\"type\":\"approval\"}\n{\"approver\":\"Bob Example\",\"decision\":\"approved\",\"hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"prev_hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"rationale\":\"Containers allowed for M1.\",\"recorded_by\":\"kiro-development-agent\",\"seq\":2,\"target\":{\"gate_id\":\"container-runtime\",\"kind\":\"gate\"},\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"approval\"}\n{\"approver\":\"Bob Example\",\"decision\":\"approved\",\"hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"prev_hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"rationale\":\"Containers allowed for M1.\",\"recorded_by\":\"kiro-development-agent\",\"seq\":2,\"target\":{\"gate_id\":\"container-runtime\",\"kind\":\"gate\"},\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"approval\"}\n{\"approver\":\"Alice Example\",\"decision\":\"rejected\",\"hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"prev_hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"rationale\":\"Quote \\\" backslash \\\\ slash / tab\\t newline\\n cr\\r control \\u0001\\u001f del  accents é 日本語 emoji 😀 angle <&> end\",\"recorded_by\":\"human\",\"seq\":3,\"supersedes\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-03T00:00:00.5-05:30\",\"type\":\"approval\"}\n{\"attempted_seq\":1,\"hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"prev_hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"reason\":\"modify request refused\",\"seq\":4,\"type\":\"store_rejection\"}\n{\"approver\":\"Carol Example\",\"decision\":\"needs_changes\",\"hash\":\"063127c22380e0d9df228a9e5cbf064c97692a89cf9c58a7f1606517a124a2bd\",\"prev_hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"rationale\":\"More Experiments needed.\",\"recorded_by\":\"human\",\"seq\":5,\"target\":{\"kind\":\"run\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-04T10:20:30+00:00\",\"type\":\"approval\"}\n",
+      "expectedOk": false,
+      "expectedMismatches": [
+        {
+          "seq": 2,
+          "kind": "chain_break"
+        }
+      ],
+      "expectedRuleViolations": []
+    },
+    {
+      "name": "two-records-swapped",
+      "storeText": "{\"approver\":\"Alice Example\",\"decision\":\"approved\",\"hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"rationale\":\"Matches observed behavior.\",\"recorded_by\":\"human\",\"seq\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-01T12:00:00.000+09:00\",\"type\":\"approval\"}\n{\"approver\":\"Alice Example\",\"decision\":\"rejected\",\"hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"prev_hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"rationale\":\"Quote \\\" backslash \\\\ slash / tab\\t newline\\n cr\\r control \\u0001\\u001f del  accents é 日本語 emoji 😀 angle <&> end\",\"recorded_by\":\"human\",\"seq\":3,\"supersedes\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-03T00:00:00.5-05:30\",\"type\":\"approval\"}\n{\"approver\":\"Bob Example\",\"decision\":\"approved\",\"hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"prev_hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"rationale\":\"Containers allowed for M1.\",\"recorded_by\":\"kiro-development-agent\",\"seq\":2,\"target\":{\"gate_id\":\"container-runtime\",\"kind\":\"gate\"},\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"approval\"}\n{\"attempted_seq\":1,\"hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"prev_hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"reason\":\"modify request refused\",\"seq\":4,\"type\":\"store_rejection\"}\n{\"approver\":\"Carol Example\",\"decision\":\"needs_changes\",\"hash\":\"063127c22380e0d9df228a9e5cbf064c97692a89cf9c58a7f1606517a124a2bd\",\"prev_hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"rationale\":\"More Experiments needed.\",\"recorded_by\":\"human\",\"seq\":5,\"target\":{\"kind\":\"run\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-04T10:20:30+00:00\",\"type\":\"approval\"}\n",
+      "expectedOk": false,
+      "expectedMismatches": [
+        {
+          "seq": 2,
+          "kind": "missing"
+        },
+        {
+          "seq": 2,
+          "kind": "chain_break"
+        },
+        {
+          "seq": 3,
+          "kind": "chain_break"
+        },
+        {
+          "seq": 4,
+          "kind": "chain_break"
+        }
+      ],
+      "expectedRuleViolations": []
+    },
+    {
+      "name": "first-prev-hash-not-genesis-rehashed",
+      "storeText": "{\"approver\":\"Alice Example\",\"decision\":\"approved\",\"hash\":\"64777de2927a69e738b3d0f34eefbbbb59e9e8c1fa13d731dd8865ad905c9759\",\"prev_hash\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"rationale\":\"Matches observed behavior.\",\"recorded_by\":\"human\",\"seq\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-01T12:00:00.000+09:00\",\"type\":\"approval\"}\n{\"approver\":\"Bob Example\",\"decision\":\"approved\",\"hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"prev_hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"rationale\":\"Containers allowed for M1.\",\"recorded_by\":\"kiro-development-agent\",\"seq\":2,\"target\":{\"gate_id\":\"container-runtime\",\"kind\":\"gate\"},\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"approval\"}\n{\"approver\":\"Alice Example\",\"decision\":\"rejected\",\"hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"prev_hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"rationale\":\"Quote \\\" backslash \\\\ slash / tab\\t newline\\n cr\\r control \\u0001\\u001f del  accents é 日本語 emoji 😀 angle <&> end\",\"recorded_by\":\"human\",\"seq\":3,\"supersedes\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-03T00:00:00.5-05:30\",\"type\":\"approval\"}\n{\"attempted_seq\":1,\"hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"prev_hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"reason\":\"modify request refused\",\"seq\":4,\"type\":\"store_rejection\"}\n{\"approver\":\"Carol Example\",\"decision\":\"needs_changes\",\"hash\":\"063127c22380e0d9df228a9e5cbf064c97692a89cf9c58a7f1606517a124a2bd\",\"prev_hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"rationale\":\"More Experiments needed.\",\"recorded_by\":\"human\",\"seq\":5,\"target\":{\"kind\":\"run\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-04T10:20:30+00:00\",\"type\":\"approval\"}\n",
+      "expectedOk": false,
+      "expectedMismatches": [
+        {
+          "seq": 1,
+          "kind": "chain_break"
+        },
+        {
+          "seq": 2,
+          "kind": "chain_break"
+        }
+      ],
+      "expectedRuleViolations": []
+    },
+    {
+      "name": "tail-truncated-without-anchor-is-not-detectable",
+      "storeText": "{\"approver\":\"Alice Example\",\"decision\":\"approved\",\"hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"rationale\":\"Matches observed behavior.\",\"recorded_by\":\"human\",\"seq\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-01T12:00:00.000+09:00\",\"type\":\"approval\"}\n{\"approver\":\"Bob Example\",\"decision\":\"approved\",\"hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"prev_hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"rationale\":\"Containers allowed for M1.\",\"recorded_by\":\"kiro-development-agent\",\"seq\":2,\"target\":{\"gate_id\":\"container-runtime\",\"kind\":\"gate\"},\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"approval\"}\n{\"approver\":\"Alice Example\",\"decision\":\"rejected\",\"hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"prev_hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"rationale\":\"Quote \\\" backslash \\\\ slash / tab\\t newline\\n cr\\r control \\u0001\\u001f del  accents é 日本語 emoji 😀 angle <&> end\",\"recorded_by\":\"human\",\"seq\":3,\"supersedes\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-03T00:00:00.5-05:30\",\"type\":\"approval\"}\n{\"attempted_seq\":1,\"hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"prev_hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"reason\":\"modify request refused\",\"seq\":4,\"type\":\"store_rejection\"}\n",
+      "expectedOk": true,
+      "expectedMismatches": [],
+      "expectedRuleViolations": []
+    },
+    {
+      "name": "tail-truncated-with-anchor",
+      "storeText": "{\"approver\":\"Alice Example\",\"decision\":\"approved\",\"hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"rationale\":\"Matches observed behavior.\",\"recorded_by\":\"human\",\"seq\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-01T12:00:00.000+09:00\",\"type\":\"approval\"}\n{\"approver\":\"Bob Example\",\"decision\":\"approved\",\"hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"prev_hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"rationale\":\"Containers allowed for M1.\",\"recorded_by\":\"kiro-development-agent\",\"seq\":2,\"target\":{\"gate_id\":\"container-runtime\",\"kind\":\"gate\"},\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"approval\"}\n{\"approver\":\"Alice Example\",\"decision\":\"rejected\",\"hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"prev_hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"rationale\":\"Quote \\\" backslash \\\\ slash / tab\\t newline\\n cr\\r control \\u0001\\u001f del  accents é 日本語 emoji 😀 angle <&> end\",\"recorded_by\":\"human\",\"seq\":3,\"supersedes\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-03T00:00:00.5-05:30\",\"type\":\"approval\"}\n{\"attempted_seq\":1,\"hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"prev_hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"reason\":\"modify request refused\",\"seq\":4,\"type\":\"store_rejection\"}\n",
+      "anchor": {
+        "seq": 5,
+        "hash": "063127c22380e0d9df228a9e5cbf064c97692a89cf9c58a7f1606517a124a2bd"
+      },
+      "expectedOk": false,
+      "expectedMismatches": [
+        {
+          "seq": 5,
+          "kind": "missing"
+        }
+      ],
+      "expectedRuleViolations": []
+    },
+    {
+      "name": "last-line-not-newline-terminated",
+      "storeText": "{\"approver\":\"Alice Example\",\"decision\":\"approved\",\"hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"rationale\":\"Matches observed behavior.\",\"recorded_by\":\"human\",\"seq\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-01T12:00:00.000+09:00\",\"type\":\"approval\"}\n{\"approver\":\"Bob Example\",\"decision\":\"approved\",\"hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"prev_hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"rationale\":\"Containers allowed for M1.\",\"recorded_by\":\"kiro-development-agent\",\"seq\":2,\"target\":{\"gate_id\":\"container-runtime\",\"kind\":\"gate\"},\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"approval\"}\n{\"approver\":\"Alice Example\",\"decision\":\"rejected\",\"hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"prev_hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"rationale\":\"Quote \\\" backslash \\\\ slash / tab\\t newline\\n cr\\r control \\u0001\\u001f del  accents é 日本語 emoji 😀 angle <&> end\",\"recorded_by\":\"human\",\"seq\":3,\"supersedes\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-03T00:00:00.5-05:30\",\"type\":\"approval\"}\n{\"attempted_seq\":1,\"hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"prev_hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"reason\":\"modify request refused\",\"seq\":4,\"type\":\"store_rejection\"}\n{\"approver\":\"Carol Example\",\"decision\":\"needs_changes\",\"hash\":\"063127c22380e0d9df228a9e5cbf064c97692a89cf9c58a7f1606517a124a2bd\",\"prev_hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"rationale\":\"More Experiments needed.\",\"recorded_by\":\"human\",\"seq\":5,\"target\":{\"kind\":\"run\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-04T10:20:30+00:00\",\"type\":\"approval\"}",
+      "expectedOk": false,
+      "expectedMismatches": [
+        {
+          "seq": 5,
+          "kind": "modified"
+        }
+      ],
+      "expectedRuleViolations": []
+    },
+    {
+      "name": "line-replaced-by-garbage",
+      "storeText": "{\"approver\":\"Alice Example\",\"decision\":\"approved\",\"hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"rationale\":\"Matches observed behavior.\",\"recorded_by\":\"human\",\"seq\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-01T12:00:00.000+09:00\",\"type\":\"approval\"}\n{\"approver\":\"Bob Example\",\"decision\":\"approved\",\"hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"prev_hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"rationale\":\"Containers allowed for M1.\",\"recorded_by\":\"kiro-development-agent\",\"seq\":2,\"target\":{\"gate_id\":\"container-runtime\",\"kind\":\"gate\"},\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"approval\"}\nnot json\n{\"attempted_seq\":1,\"hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"prev_hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"reason\":\"modify request refused\",\"seq\":4,\"type\":\"store_rejection\"}\n{\"approver\":\"Carol Example\",\"decision\":\"needs_changes\",\"hash\":\"063127c22380e0d9df228a9e5cbf064c97692a89cf9c58a7f1606517a124a2bd\",\"prev_hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"rationale\":\"More Experiments needed.\",\"recorded_by\":\"human\",\"seq\":5,\"target\":{\"kind\":\"run\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-04T10:20:30+00:00\",\"type\":\"approval\"}\n",
+      "expectedOk": false,
+      "expectedMismatches": [
+        {
+          "seq": 3,
+          "kind": "modified"
+        }
+      ],
+      "expectedRuleViolations": []
+    },
+    {
+      "name": "blank-line-inserted",
+      "storeText": "{\"approver\":\"Alice Example\",\"decision\":\"approved\",\"hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"rationale\":\"Matches observed behavior.\",\"recorded_by\":\"human\",\"seq\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-01T12:00:00.000+09:00\",\"type\":\"approval\"}\n\n{\"approver\":\"Bob Example\",\"decision\":\"approved\",\"hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"prev_hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"rationale\":\"Containers allowed for M1.\",\"recorded_by\":\"kiro-development-agent\",\"seq\":2,\"target\":{\"gate_id\":\"container-runtime\",\"kind\":\"gate\"},\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"approval\"}\n{\"approver\":\"Alice Example\",\"decision\":\"rejected\",\"hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"prev_hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"rationale\":\"Quote \\\" backslash \\\\ slash / tab\\t newline\\n cr\\r control \\u0001\\u001f del  accents é 日本語 emoji 😀 angle <&> end\",\"recorded_by\":\"human\",\"seq\":3,\"supersedes\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-03T00:00:00.5-05:30\",\"type\":\"approval\"}\n{\"attempted_seq\":1,\"hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"prev_hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"reason\":\"modify request refused\",\"seq\":4,\"type\":\"store_rejection\"}\n{\"approver\":\"Carol Example\",\"decision\":\"needs_changes\",\"hash\":\"063127c22380e0d9df228a9e5cbf064c97692a89cf9c58a7f1606517a124a2bd\",\"prev_hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"rationale\":\"More Experiments needed.\",\"recorded_by\":\"human\",\"seq\":5,\"target\":{\"kind\":\"run\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-04T10:20:30+00:00\",\"type\":\"approval\"}\n",
+      "expectedOk": false,
+      "expectedMismatches": [
+        {
+          "seq": 2,
+          "kind": "modified"
+        },
+        {
+          "seq": 2,
+          "kind": "chain_break"
+        }
+      ],
+      "expectedRuleViolations": []
+    },
+    {
+      "name": "non-canonical-whitespace-with-valid-hash",
+      "storeText": "{\"approver\":\"Alice Example\",\"decision\":\"approved\",\"hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"rationale\":\"Matches observed behavior.\",\"recorded_by\":\"human\",\"seq\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-01T12:00:00.000+09:00\",\"type\":\"approval\"}\n{\"approver\": \"Bob Example\",\"decision\":\"approved\",\"hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"prev_hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"rationale\":\"Containers allowed for M1.\",\"recorded_by\":\"kiro-development-agent\",\"seq\":2,\"target\":{\"gate_id\":\"container-runtime\",\"kind\":\"gate\"},\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"approval\"}\n{\"approver\":\"Alice Example\",\"decision\":\"rejected\",\"hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"prev_hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"rationale\":\"Quote \\\" backslash \\\\ slash / tab\\t newline\\n cr\\r control \\u0001\\u001f del  accents é 日本語 emoji 😀 angle <&> end\",\"recorded_by\":\"human\",\"seq\":3,\"supersedes\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-03T00:00:00.5-05:30\",\"type\":\"approval\"}\n{\"attempted_seq\":1,\"hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"prev_hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"reason\":\"modify request refused\",\"seq\":4,\"type\":\"store_rejection\"}\n{\"approver\":\"Carol Example\",\"decision\":\"needs_changes\",\"hash\":\"063127c22380e0d9df228a9e5cbf064c97692a89cf9c58a7f1606517a124a2bd\",\"prev_hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"rationale\":\"More Experiments needed.\",\"recorded_by\":\"human\",\"seq\":5,\"target\":{\"kind\":\"run\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-04T10:20:30+00:00\",\"type\":\"approval\"}\n",
+      "expectedOk": false,
+      "expectedMismatches": [
+        {
+          "seq": 2,
+          "kind": "modified"
+        }
+      ],
+      "expectedRuleViolations": []
+    },
+    {
+      "name": "crlf-line-endings",
+      "storeText": "{\"approver\":\"Alice Example\",\"decision\":\"approved\",\"hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"rationale\":\"Matches observed behavior.\",\"recorded_by\":\"human\",\"seq\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-01T12:00:00.000+09:00\",\"type\":\"approval\"}\r\n{\"approver\":\"Bob Example\",\"decision\":\"approved\",\"hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"prev_hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"rationale\":\"Containers allowed for M1.\",\"recorded_by\":\"kiro-development-agent\",\"seq\":2,\"target\":{\"gate_id\":\"container-runtime\",\"kind\":\"gate\"},\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"approval\"}\r\n{\"approver\":\"Alice Example\",\"decision\":\"rejected\",\"hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"prev_hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"rationale\":\"Quote \\\" backslash \\\\ slash / tab\\t newline\\n cr\\r control \\u0001\\u001f del  accents é 日本語 emoji 😀 angle <&> end\",\"recorded_by\":\"human\",\"seq\":3,\"supersedes\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-03T00:00:00.5-05:30\",\"type\":\"approval\"}\r\n{\"attempted_seq\":1,\"hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"prev_hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"reason\":\"modify request refused\",\"seq\":4,\"type\":\"store_rejection\"}\r\n{\"approver\":\"Carol Example\",\"decision\":\"needs_changes\",\"hash\":\"063127c22380e0d9df228a9e5cbf064c97692a89cf9c58a7f1606517a124a2bd\",\"prev_hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"rationale\":\"More Experiments needed.\",\"recorded_by\":\"human\",\"seq\":5,\"target\":{\"kind\":\"run\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-04T10:20:30+00:00\",\"type\":\"approval\"}\r\n",
+      "expectedOk": false,
+      "expectedMismatches": [
+        {
+          "seq": 1,
+          "kind": "modified"
+        },
+        {
+          "seq": 2,
+          "kind": "modified"
+        },
+        {
+          "seq": 3,
+          "kind": "modified"
+        },
+        {
+          "seq": 4,
+          "kind": "modified"
+        },
+        {
+          "seq": 5,
+          "kind": "modified"
+        }
+      ],
+      "expectedRuleViolations": []
+    },
+    {
+      "name": "supersedes-names-a-record-with-another-target",
+      "storeText": "{\"approver\":\"Alice Example\",\"decision\":\"approved\",\"hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"rationale\":\"Matches observed behavior.\",\"recorded_by\":\"human\",\"seq\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-01T12:00:00.000+09:00\",\"type\":\"approval\"}\n{\"approver\":\"Bob Example\",\"decision\":\"approved\",\"hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"prev_hash\":\"d83184a9b2f9ae5ee65827cd31138b9784617fff5335937365706a4f524b323c\",\"rationale\":\"Containers allowed for M1.\",\"recorded_by\":\"kiro-development-agent\",\"seq\":2,\"target\":{\"gate_id\":\"container-runtime\",\"kind\":\"gate\"},\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"approval\"}\n{\"approver\":\"Alice Example\",\"decision\":\"rejected\",\"hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"prev_hash\":\"b8cf2130888f5fdece5866714868f12a2b799afc2518feafdbe5da717eb0fea9\",\"rationale\":\"Quote \\\" backslash \\\\ slash / tab\\t newline\\n cr\\r control \\u0001\\u001f del  accents é 日本語 emoji 😀 angle <&> end\",\"recorded_by\":\"human\",\"seq\":3,\"supersedes\":1,\"target\":{\"claim_revision_id\":\"clm-0001-r1\",\"kind\":\"claim_revision\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-03T00:00:00.5-05:30\",\"type\":\"approval\"}\n{\"attempted_seq\":1,\"hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"prev_hash\":\"12192abf21f1e0de9a4b532e43cffa2ced95b133d54b217ae3bfa97f2dcef9b1\",\"reason\":\"modify request refused\",\"seq\":4,\"type\":\"store_rejection\"}\n{\"approver\":\"Carol Example\",\"decision\":\"needs_changes\",\"hash\":\"095b7ad7b3ab499ae2e98bcbd010117367b032fc5772357f4b38666e5492356a\",\"prev_hash\":\"826b1a1e8d176b1c672cdc2bfcd1a3e6cb7dcc2a63bee04608c1a9d95e59ca21\",\"rationale\":\"More Experiments needed.\",\"recorded_by\":\"human\",\"seq\":5,\"supersedes\":2,\"target\":{\"kind\":\"run\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-01-04T10:20:30+00:00\",\"type\":\"approval\"}\n",
+      "expectedOk": false,
+      "expectedMismatches": [],
+      "expectedRuleViolations": [
+        {
+          "seq": 5,
+          "rule": "supersedes_target_differs"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,888 @@
+{
+  "format": "phoenix-approval-vectors/1",
+  "description": "Candidate approval records against a context. context.storeText is a valid store; context.knownRuns and knownClaimRevisions are the only Runs and Claim revisions that exist (every defined Gate identifier resolves). expectedFields is the sorted list of distinct top-level field names that a rejection must name; an empty list means the record is accepted. The writer must leave the store byte-identical on every rejection.",
+  "context": {
+    "storeText": "{\"approver\":\"Alice Example\",\"decision\":\"approved\",\"hash\":\"2d813ce43ef8a3ede0d9427ce9e48563785f7694bc600786a7b1162c3fcfda9b\",\"prev_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"rationale\":\"Gate approved.\",\"recorded_by\":\"human\",\"seq\":1,\"target\":{\"gate_id\":\"container-runtime\",\"kind\":\"gate\"},\"timestamp\":\"2025-03-04T05:06:07.000+09:00\",\"type\":\"approval\"}\n{\"approver\":\"Alice Example\",\"decision\":\"needs_changes\",\"hash\":\"c2d5eff0a928e7229687328af5e7c1e37d9454244d79fb9e2472f7ba614694d2\",\"prev_hash\":\"2d813ce43ef8a3ede0d9427ce9e48563785f7694bc600786a7b1162c3fcfda9b\",\"rationale\":\"Reviewed.\",\"recorded_by\":\"human\",\"seq\":2,\"target\":{\"kind\":\"run\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-03-04T05:06:07.000+09:00\",\"type\":\"approval\"}\n{\"approver\":\"Alice Example\",\"decision\":\"approved\",\"hash\":\"e13cbc6eeaec598488c3a352b85a00af91db2e75428bd6cf7d71cfbd27a81fef\",\"prev_hash\":\"c2d5eff0a928e7229687328af5e7c1e37d9454244d79fb9e2472f7ba614694d2\",\"rationale\":\"Reviewed.\",\"recorded_by\":\"human\",\"seq\":3,\"supersedes\":2,\"target\":{\"kind\":\"run\",\"run_id\":\"run-0001\"},\"timestamp\":\"2025-03-04T05:06:07.000+09:00\",\"type\":\"approval\"}\n{\"attempted_seq\":1,\"hash\":\"9e14679af33363baab5387a35e506d6b31b37235de741ec1bb810f5613097174\",\"prev_hash\":\"e13cbc6eeaec598488c3a352b85a00af91db2e75428bd6cf7d71cfbd27a81fef\",\"reason\":\"modify request refused\",\"seq\":4,\"type\":\"store_rejection\"}\n",
+    "knownRuns": [
+      "run-0001"
+    ],
+    "knownClaimRevisions": [
+      {
+        "run_id": "run-0001",
+        "claim_revision_id": "clm-0001-r1"
+      }
+    ],
+    "stateDescription": "1 gate container-runtime approved; 2 run run-0001 needs_changes; 3 run run-0001 approved, supersedes 2; 4 store_rejection (attempted_seq 1)"
+  },
+  "cases": [
+    {
+      "name": "positive-run-target",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": []
+    },
+    {
+      "name": "positive-claim-target",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "claim_revision",
+          "run_id": "run-0001",
+          "claim_revision_id": "clm-0001-r1"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": []
+    },
+    {
+      "name": "positive-gate-target",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "gate",
+          "gate_id": "m6-start"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": []
+    },
+    {
+      "name": "positive-supersedes-latest-of-target",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "rejected",
+        "rationale": "Reviewed.",
+        "recorded_by": "human",
+        "supersedes": 3
+      },
+      "expectedFields": []
+    },
+    {
+      "name": "positive-supersedes-gate-record",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "gate",
+          "gate_id": "container-runtime"
+        },
+        "decision": "rejected",
+        "rationale": "Reviewed.",
+        "recorded_by": "human",
+        "supersedes": 1
+      },
+      "expectedFields": []
+    },
+    {
+      "name": "positive-actor-agent",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "kiro-development-agent"
+      },
+      "expectedFields": []
+    },
+    {
+      "name": "positive-z-offset-and-fraction",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.123456Z",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": []
+    },
+    {
+      "name": "missing-approver",
+      "candidate": {
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "approver"
+      ]
+    },
+    {
+      "name": "missing-timestamp",
+      "candidate": {
+        "approver": "Alice Example",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "timestamp"
+      ]
+    },
+    {
+      "name": "missing-target",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "target"
+      ]
+    },
+    {
+      "name": "missing-decision",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "decision"
+      ]
+    },
+    {
+      "name": "missing-rationale",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "rationale"
+      ]
+    },
+    {
+      "name": "missing-recorded-by-actor-declaration",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed."
+      },
+      "expectedFields": [
+        "recorded_by"
+      ]
+    },
+    {
+      "name": "missing-everything",
+      "candidate": {},
+      "expectedFields": [
+        "approver",
+        "decision",
+        "rationale",
+        "recorded_by",
+        "target",
+        "timestamp"
+      ]
+    },
+    {
+      "name": "two-invalid-fields-are-both-named",
+      "candidate": {
+        "approver": "",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "maybe",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "approver",
+        "decision"
+      ]
+    },
+    {
+      "name": "empty-approver",
+      "candidate": {
+        "approver": "",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "approver"
+      ]
+    },
+    {
+      "name": "approver-101-characters",
+      "candidate": {
+        "approver": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "approver"
+      ]
+    },
+    {
+      "name": "approver-not-a-string",
+      "candidate": {
+        "approver": 7,
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "approver"
+      ]
+    },
+    {
+      "name": "empty-rationale",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "rationale"
+      ]
+    },
+    {
+      "name": "whitespace-only-rationale",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": " \t\n ",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "rationale"
+      ]
+    },
+    {
+      "name": "rationale-2001-characters",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "rationale"
+      ]
+    },
+    {
+      "name": "rationale-2001-code-points-non-bmp",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "rationale"
+      ]
+    },
+    {
+      "name": "decision-outside-set",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "maybe",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "decision"
+      ]
+    },
+    {
+      "name": "decision-wrong-case",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "APPROVED",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "decision"
+      ]
+    },
+    {
+      "name": "timestamp-without-offset",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "timestamp"
+      ]
+    },
+    {
+      "name": "timestamp-date-only",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "timestamp"
+      ]
+    },
+    {
+      "name": "timestamp-impossible-date",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-13-45T05:06:07Z",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "timestamp"
+      ]
+    },
+    {
+      "name": "timestamp-space-separator",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04 05:06:07Z",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "timestamp"
+      ]
+    },
+    {
+      "name": "actor-other-value",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "robot"
+      },
+      "expectedFields": [
+        "recorded_by"
+      ]
+    },
+    {
+      "name": "actor-empty",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": ""
+      },
+      "expectedFields": [
+        "recorded_by"
+      ]
+    },
+    {
+      "name": "actor-wrong-case",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "Human"
+      },
+      "expectedFields": [
+        "recorded_by"
+      ]
+    },
+    {
+      "name": "target-run-does-not-exist",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-9999"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "target"
+      ]
+    },
+    {
+      "name": "target-claim-revision-does-not-exist",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "claim_revision",
+          "run_id": "run-0001",
+          "claim_revision_id": "clm-0009-r9"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "target"
+      ]
+    },
+    {
+      "name": "target-claim-run-does-not-exist",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "claim_revision",
+          "run_id": "run-9999",
+          "claim_revision_id": "clm-0001-r1"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "target"
+      ]
+    },
+    {
+      "name": "target-undefined-gate",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "gate",
+          "gate_id": "no-such-gate"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "target"
+      ]
+    },
+    {
+      "name": "target-claim-without-revision-id",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "claim_revision",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "target"
+      ]
+    },
+    {
+      "name": "target-run-with-extra-key",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001",
+          "gate_id": "m6-start"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "target"
+      ]
+    },
+    {
+      "name": "target-unknown-kind",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "file",
+          "path": "x"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "target"
+      ]
+    },
+    {
+      "name": "target-run-id-path-traversal",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "../x"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "target"
+      ]
+    },
+    {
+      "name": "target-not-an-object",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": "run:run-0001",
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human"
+      },
+      "expectedFields": [
+        "target"
+      ]
+    },
+    {
+      "name": "caller-supplied-seq",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human",
+        "seq": 9
+      },
+      "expectedFields": [
+        "seq"
+      ]
+    },
+    {
+      "name": "caller-supplied-hash",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human",
+        "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expectedFields": [
+        "hash"
+      ]
+    },
+    {
+      "name": "caller-supplied-prev-hash",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human",
+        "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expectedFields": [
+        "prev_hash"
+      ]
+    },
+    {
+      "name": "unknown-extra-field",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human",
+        "approval": "approved"
+      },
+      "expectedFields": [
+        "approval"
+      ]
+    },
+    {
+      "name": "supersedes-nonexistent-seq",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human",
+        "supersedes": 99
+      },
+      "expectedFields": [
+        "supersedes"
+      ]
+    },
+    {
+      "name": "supersedes-zero",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human",
+        "supersedes": 0
+      },
+      "expectedFields": [
+        "supersedes"
+      ]
+    },
+    {
+      "name": "supersedes-not-an-integer",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human",
+        "supersedes": "1"
+      },
+      "expectedFields": [
+        "supersedes"
+      ]
+    },
+    {
+      "name": "supersedes-different-target",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human",
+        "supersedes": 1
+      },
+      "expectedFields": [
+        "supersedes"
+      ]
+    },
+    {
+      "name": "supersedes-already-superseded",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human",
+        "supersedes": 2
+      },
+      "expectedFields": [
+        "supersedes"
+      ]
+    },
+    {
+      "name": "supersedes-a-store-rejection-line",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "approved",
+        "rationale": "Reviewed.",
+        "recorded_by": "human",
+        "supersedes": 4
+      },
+      "expectedFields": [
+        "supersedes"
+      ]
+    },
+    {
+      "name": "supersedes-and-invalid-decision",
+      "candidate": {
+        "approver": "Alice Example",
+        "timestamp": "2025-03-04T05:06:07.000+09:00",
+        "target": {
+          "kind": "run",
+          "run_id": "run-0001"
+        },
+        "decision": "maybe",
+        "rationale": "Reviewed.",
+        "recorded_by": "human",
+        "supersedes": 99
+      },
+      "expectedFields": [
+        "decision",
+        "supersedes"
+      ]
+    },
+    {
+      "name": "candidate-is-null",
+      "candidate": null,
+      "expectedFields": [
+        "(record)"
+      ]
+    },
+    {
+      "name": "candidate-is-an-array",
+      "candidate": [],
+      "expectedFields": [
+        "(record)"
+      ]
+    }
+  ]
+}

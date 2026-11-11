@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/analyzer" },
+    { "path": "packages/ai-client" },
+    { "path": "packages/verifier" },
+    { "path": "packages/discovery-loop" }
+  ]
+}

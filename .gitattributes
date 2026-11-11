@@ -1,0 +1,19 @@
+# Line-ending normalization limited to paths created or changed by Discovery Loop M0 and M1.
+# No repository-wide rule: legacy/, evaluation/, tests/legacy-sample/, infra/docker-compose.yml,
+# infra/nginx/ and other existing paths are intentionally not matched.
+/package.json text eol=lf
+/package-lock.json text eol=lf
+/.npmrc text eol=lf
+/.dockerignore text eol=lf
+/tsconfig.base.json text eol=lf
+/tsconfig.json text eol=lf
+/vitest.config.ts text eol=lf
+/.env.example text eol=lf
+/.gitignore text eol=lf
+/.gitattributes text eol=lf
+/.kiro/steering/** text eol=lf
+/.kiro/specs/discovery-loop/** text eol=lf
+/docs/version-pinning.json text eol=lf
+/infra/discovery/** text eol=lf
+/infra/docker-compose.discovery.yml text eol=lf
+/packages/** text eol=lf

@@ -1,0 +1,37 @@
+# Discovery_Override (discovery-loop spec, Requirement 18.12-18.20). NOT APPLIED.
+#
+# Applying this file needs a separate explicit human approval (gate `override-apply`, R18.20).
+# The base file infra/docker-compose.yml is not changed by this override.
+#
+# Effect when applied:
+#   - creates the network `phoenix-discovery-lab` (internal: true, IPv4 only)
+#   - adds reverse-proxy to it; reverse-proxy keeps legacy-internal and legacy-api (merge = union)
+#   - nothing else joins the network. discovery-runtime is NOT a Compose service: the host-side Launcher
+#     starts it per Run with `docker run --network phoenix-discovery-lab ...` and no other network.
+#
+# Permitted flow: discovery-runtime -> reverse-proxy:8080/TCP on phoenix-discovery-lab only.
+# Published host ports are unchanged (only 127.0.0.1:8056 -> reverse-proxy:8080).
+#
+# Apply (approval required; recreates reverse-proxy):
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.discovery.yml --project-directory . up -d reverse-proxy
+# Remove (approval required; recreates reverse-proxy with its two original networks):
+#   docker compose -f infra/docker-compose.yml --project-directory . up -d reverse-proxy
+#   docker network rm phoenix-discovery-lab
+#
+# While applied, reverse-proxy has three networks, so tests/legacy-sample/test_network_isolation.ps1 (T3 expects two)
+# must be run after removing the override. The separate test tests/discovery-loop/test_discovery_network_isolation.ps1
+# (to be written) is mandatory for the applied state; skipping the legacy test is not evidence of safety.
+
+services:
+  reverse-proxy:
+    networks:
+      - discovery-lab
+
+networks:
+  discovery-lab:
+    name: phoenix-discovery-lab
+    driver: bridge
+    internal: true
+    enable_ipv6: false
+    labels:
+      phoenix.discovery.network: "discovery-lab"

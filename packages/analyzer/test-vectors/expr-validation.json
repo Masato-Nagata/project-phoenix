@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "description": "Golden static-validation vectors for the Rule_Expression_Language. Neutral data only. expect is {valid:true} or {valid:false,issues:[{code,at}]} in traversal order. Limit cases (node count, depth, long strings) are generated in the unit tests.",
+  "shape": { "derivedNames": ["d_cost", "d_double"], "tableNames": ["unit_cost_by_label", "flags"] },
+  "cases": [
+    { "id": "valid_lit", "expr": { "op": "lit", "value": 0 }, "expect": { "valid": true } },
+    { "id": "valid_comparison_example", "expr": { "op": "gt", "left": { "op": "input", "path": "requests[0].body.count" }, "right": { "op": "lit", "value": 0 } }, "expect": { "valid": true } },
+    { "id": "valid_lookup_and_derived", "expr": { "op": "add", "args": [ { "op": "derived", "name": "d_cost" }, { "op": "lookup", "table": "flags", "key": { "op": "lit", "value": "on" } } ] }, "expect": { "valid": true } },
+    { "id": "valid_sum_with_elem", "expr": { "op": "sum", "over": "requests[0].body.items", "each": { "op": "elem", "path": "qty" } }, "expect": { "valid": true } },
+    { "id": "valid_count_with_where", "expr": { "op": "count", "over": "requests[0].body.items", "where": { "op": "is_type", "ref": { "op": "elem", "path": "" }, "type": "int" } }, "expect": { "valid": true } },
+    { "id": "valid_idiv", "expr": { "op": "idiv", "left": { "op": "lit", "value": 7 }, "right": { "op": "lit", "value": 2 }, "round": "ceil" }, "expect": { "valid": true } },
+    { "id": "valid_if_is_type", "expr": { "op": "if", "cond": { "op": "is_type", "ref": { "op": "input", "path": "a" }, "type": "missing" }, "then": { "op": "lit", "value": 1 }, "else": { "op": "lit", "value": 2 } }, "expect": { "valid": true } },
+    { "id": "valid_safe_integer_bounds", "expr": { "op": "sub", "left": { "op": "lit", "value": -9007199254740991 }, "right": { "op": "lit", "value": 9007199254740991 } }, "expect": { "valid": true } },
+
+    { "id": "reject_number", "expr": 5, "expect": { "valid": false, "issues": [ { "code": "not_object", "at": "" } ] } },
+    { "id": "reject_null", "expr": null, "expect": { "valid": false, "issues": [ { "code": "not_object", "at": "" } ] } },
+    { "id": "reject_array", "expr": [], "expect": { "valid": false, "issues": [ { "code": "not_object", "at": "" } ] } },
+    { "id": "reject_string", "expr": "add", "expect": { "valid": false, "issues": [ { "code": "not_object", "at": "" } ] } },
+    { "id": "reject_missing_op", "expr": {}, "expect": { "valid": false, "issues": [ { "code": "missing_field", "at": "/op" } ] } },
+    { "id": "reject_op_not_string", "expr": { "op": 5 }, "expect": { "valid": false, "issues": [ { "code": "bad_type", "at": "/op" } ] } },
+
+    { "id": "reject_unknown_operator_pow", "expr": { "op": "pow", "left": { "op": "lit", "value": 1 }, "right": { "op": "lit", "value": 2 } }, "expect": { "valid": false, "issues": [ { "code": "unknown_operator", "at": "/op" } ] } },
+    { "id": "reject_unknown_operator_call", "expr": { "op": "call", "name": "f" }, "expect": { "valid": false, "issues": [ { "code": "unknown_operator", "at": "/op" } ] } },
+    { "id": "reject_unknown_operator_loop", "expr": { "op": "loop", "body": { "op": "lit", "value": 1 } }, "expect": { "valid": false, "issues": [ { "code": "unknown_operator", "at": "/op" } ] } },
+    { "id": "reject_unknown_operator_eval", "expr": { "op": "eval", "code": "1" }, "expect": { "valid": false, "issues": [ { "code": "unknown_operator", "at": "/op" } ] } },
+    { "id": "reject_unknown_operator_case_sensitive", "expr": { "op": "ADD", "args": [] }, "expect": { "valid": false, "issues": [ { "code": "unknown_operator", "at": "/op" } ] } },
+    { "id": "reject_unknown_operator_in_child", "expr": { "op": "not", "arg": { "op": "xor", "args": [] } }, "expect": { "valid": false, "issues": [ { "code": "unknown_operator", "at": "/arg/op" } ] } },
+
+    { "id": "reject_extra_field_on_lit", "expr": { "op": "lit", "value": 1, "extra": 2 }, "expect": { "valid": false, "issues": [ { "code": "unknown_field", "at": "/extra" } ] } },
+    { "id": "reject_extra_field_pointer_is_escaped", "expr": { "op": "lit", "value": 1, "a/b": 2 }, "expect": { "valid": false, "issues": [ { "code": "unknown_field", "at": "/a~1b" } ] } },
+    { "id": "reject_lit_without_value", "expr": { "op": "lit" }, "expect": { "valid": false, "issues": [ { "code": "missing_field", "at": "/value" } ] } },
+    { "id": "reject_if_without_else", "expr": { "op": "if", "cond": { "op": "lit", "value": true }, "then": { "op": "lit", "value": 1 } }, "expect": { "valid": false, "issues": [ { "code": "missing_field", "at": "/else" } ] } },
+    { "id": "reject_idiv_without_round", "expr": { "op": "idiv", "left": { "op": "lit", "value": 1 }, "right": { "op": "lit", "value": 1 } }, "expect": { "valid": false, "issues": [ { "code": "missing_field", "at": "/round" } ] } },
+    { "id": "reject_add_without_args", "expr": { "op": "add" }, "expect": { "valid": false, "issues": [ { "code": "missing_field", "at": "/args" } ] } },
+
+    { "id": "reject_add_one_arg", "expr": { "op": "add", "args": [ { "op": "lit", "value": 1 } ] }, "expect": { "valid": false, "issues": [ { "code": "arity", "at": "/args" } ] } },
+    { "id": "reject_and_no_args", "expr": { "op": "and", "args": [] }, "expect": { "valid": false, "issues": [ { "code": "arity", "at": "/args" } ] } },
+    { "id": "reject_args_not_array", "expr": { "op": "mul", "args": 3 }, "expect": { "valid": false, "issues": [ { "code": "bad_type", "at": "/args" } ] } },
+
+    { "id": "reject_lit_real", "expr": { "op": "lit", "value": 1.5 }, "expect": { "valid": false, "issues": [ { "code": "bad_value", "at": "/value" } ] } },
+    { "id": "reject_lit_above_safe_integer", "expr": { "op": "lit", "value": 9007199254740992 }, "expect": { "valid": false, "issues": [ { "code": "bad_value", "at": "/value" } ] } },
+    { "id": "reject_lit_below_safe_integer", "expr": { "op": "lit", "value": -9007199254740992 }, "expect": { "valid": false, "issues": [ { "code": "bad_value", "at": "/value" } ] } },
+    { "id": "reject_lit_object", "expr": { "op": "lit", "value": {} }, "expect": { "valid": false, "issues": [ { "code": "bad_value", "at": "/value" } ] } },
+    { "id": "reject_lit_array", "expr": { "op": "lit", "value": [1] }, "expect": { "valid": false, "issues": [ { "code": "bad_value", "at": "/value" } ] } },
+    { "id": "reject_idiv_round_value", "expr": { "op": "idiv", "left": { "op": "lit", "value": 1 }, "right": { "op": "lit", "value": 1 }, "round": "up" }, "expect": { "valid": false, "issues": [ { "code": "bad_value", "at": "/round" } ] } },
+    { "id": "reject_is_type_unknown_type", "expr": { "op": "is_type", "ref": { "op": "input", "path": "a" }, "type": "float" }, "expect": { "valid": false, "issues": [ { "code": "bad_value", "at": "/type" } ] } },
+    { "id": "reject_is_type_ref_not_a_reference", "expr": { "op": "is_type", "ref": { "op": "lit", "value": 1 }, "type": "int" }, "expect": { "valid": false, "issues": [ { "code": "bad_value", "at": "/ref" } ] } },
+
+    { "id": "reject_input_path_double_dot", "expr": { "op": "input", "path": "a..b" }, "expect": { "valid": false, "issues": [ { "code": "bad_path", "at": "/path" } ] } },
+    { "id": "reject_input_path_empty", "expr": { "op": "input", "path": "" }, "expect": { "valid": false, "issues": [ { "code": "bad_path", "at": "/path" } ] } },
+    { "id": "reject_input_path_digit_start", "expr": { "op": "input", "path": "0abc" }, "expect": { "valid": false, "issues": [ { "code": "bad_path", "at": "/path" } ] } },
+    { "id": "reject_input_path_index_too_long", "expr": { "op": "input", "path": "a[12345]" }, "expect": { "valid": false, "issues": [ { "code": "bad_path", "at": "/path" } ] } },
+    { "id": "reject_input_path_dash", "expr": { "op": "input", "path": "a-b" }, "expect": { "valid": false, "issues": [ { "code": "bad_path", "at": "/path" } ] } },
+    { "id": "reject_input_path_negative_index", "expr": { "op": "input", "path": "a[-1]" }, "expect": { "valid": false, "issues": [ { "code": "bad_path", "at": "/path" } ] } },
+    { "id": "reject_input_path_not_string", "expr": { "op": "input", "path": 3 }, "expect": { "valid": false, "issues": [ { "code": "bad_type", "at": "/path" } ] } },
+    { "id": "reject_sum_over_empty_path", "expr": { "op": "sum", "over": "", "each": { "op": "elem", "path": "" } }, "expect": { "valid": false, "issues": [ { "code": "bad_path", "at": "/over" } ] } },
+    { "id": "reject_elem_path_leading_dot", "expr": { "op": "count", "over": "a", "where": { "op": "eq", "left": { "op": "elem", "path": ".x" }, "right": { "op": "lit", "value": 1 } } }, "expect": { "valid": false, "issues": [ { "code": "bad_path", "at": "/where/left/path" } ] } },
+
+    { "id": "reject_derived_undeclared", "expr": { "op": "derived", "name": "zzz" }, "expect": { "valid": false, "issues": [ { "code": "unknown_reference", "at": "/name" } ] } },
+    { "id": "reject_lookup_undeclared_table", "expr": { "op": "lookup", "table": "nope", "key": { "op": "lit", "value": "x" } }, "expect": { "valid": false, "issues": [ { "code": "unknown_reference", "at": "/table" } ] } },
+
+    { "id": "reject_elem_outside_aggregate", "expr": { "op": "elem", "path": "x" }, "expect": { "valid": false, "issues": [ { "code": "elem_outside_aggregate", "at": "" } ] } },
+    { "id": "reject_elem_in_sum_over_position_is_not_a_node", "expr": { "op": "add", "args": [ { "op": "lit", "value": 1 }, { "op": "elem", "path": "" } ] }, "expect": { "valid": false, "issues": [ { "code": "elem_outside_aggregate", "at": "/args/1" } ] } },
+    { "id": "reject_is_type_elem_outside_aggregate", "expr": { "op": "is_type", "ref": { "op": "elem", "path": "" }, "type": "int" }, "expect": { "valid": false, "issues": [ { "code": "elem_outside_aggregate", "at": "/ref" } ] } },
+    { "id": "reject_nested_aggregate_in_each", "expr": { "op": "sum", "over": "a", "each": { "op": "count", "over": "b" } }, "expect": { "valid": false, "issues": [ { "code": "nested_aggregate", "at": "/each" } ] } },
+    { "id": "reject_nested_aggregate_in_where", "expr": { "op": "count", "over": "a", "where": { "op": "gt", "left": { "op": "sum", "over": "b", "each": { "op": "elem", "path": "" } }, "right": { "op": "lit", "value": 0 } } }, "expect": { "valid": false, "issues": [ { "code": "nested_aggregate", "at": "/where/left" } ] } },
+    { "id": "reject_where_not_object", "expr": { "op": "count", "over": "a", "where": 5 }, "expect": { "valid": false, "issues": [ { "code": "not_object", "at": "/where" } ] } },
+
+    { "id": "report_all_issues_in_traversal_order", "expr": { "op": "add", "args": [ { "op": "pow" }, { "op": "lit" }, { "op": "derived", "name": "zzz" } ] }, "expect": { "valid": false, "issues": [ { "code": "unknown_operator", "at": "/args/0/op" }, { "code": "missing_field", "at": "/args/1/value" }, { "code": "unknown_reference", "at": "/args/2/name" } ] } },
+    { "id": "reject_derived_name_uppercase", "expr": { "op": "derived", "name": "D_cost" }, "expect": { "valid": false, "issues": [ { "code": "bad_name", "at": "/name" } ] } },
+    { "id": "reject_derived_name_leading_underscore", "expr": { "op": "derived", "name": "_cost" }, "expect": { "valid": false, "issues": [ { "code": "bad_name", "at": "/name" } ] } },
+    { "id": "reject_derived_name_of_33_characters", "expr": { "op": "derived", "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "expect": { "valid": false, "issues": [ { "code": "bad_name", "at": "/name" } ] } },
+    { "id": "reject_lookup_table_name_uppercase", "expr": { "op": "lookup", "table": "Flags", "key": { "op": "lit", "value": "x" } }, "expect": { "valid": false, "issues": [ { "code": "bad_name", "at": "/table" } ] } },
+    { "id": "reject_lookup_table_name_with_hyphen", "expr": { "op": "lookup", "table": "unit-cost", "key": { "op": "lit", "value": "x" } }, "expect": { "valid": false, "issues": [ { "code": "bad_name", "at": "/table" } ] } }
+  ]
+}
