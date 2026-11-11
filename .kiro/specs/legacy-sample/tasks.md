@@ -268,21 +268,23 @@ All monetary calculations use integer arithmetic only. PHP source code in `legac
   - [x] 3.4 Checkpoint — verify all test API and reproducibility requirements
     - Ensure all tests pass; ask the user if questions arise.
 
-- [ ] 4. Phase 4 — Ground Truth and Evaluation Scenarios
+- [x] 4. Phase 4 — Ground Truth and Evaluation Scenarios
 
-  - [ ] 4.1 Create ground truth JSON
+  - [x] 4.1 Create ground truth JSON
     - Create `evaluation/ground-truth/ground-truth.json` following the schema defined in design.md:
       - `meta` section: `minimum_order_value: 1000`, `discount_tiers` array (3 tiers), `shipping_fee_tiers` array (2 tiers) — all as literal numeric constants
-      - `boundary_cases` array: all 9 subtotal values from design.md (0, 999, 1000, 2999, 3000, 4999, 5000, 9999, 10000) with expected `discount` and `shipping_fee`
-      - `scenarios` array: SCN-001 through SCN-014, each with `id`, `description`, `request` (`method`, `path`, `body`), `expected_status`, `expected_fields`, `non_deterministic_fields`
+      - `boundary_cases` array: all 11 subtotal values (0, 999, 1000, 2999, 3000, 4999, 5000, 5299, 5300, 9999, 10000) with expected `discount` and `shipping_fee`
+      - `scenarios` array: SCN-001 through SCN-017 (SCN-017 has variants a-d, 20 units in total), each unit with `steps` (`role` setup/action, `request`, optional `capture`) and `expected_specification` (`derived_from`, `response_code_source`, `step_expectations`, `state_checks`)
       - For monetary scenarios (SCN-001–SCN-004), compute expected values manually from seed product prices and business rule tiers; record as literal integers
-      - `non_deterministic_fields` for order responses: `["data.order_id", "data.created_at"]`
+      - `meta.non_deterministic_fields: ["data.order_id", "created_at"]`; also `meta.canary`, `meta.authoring`, and `defect_candidate_links`
+      - BC-001 is marked `execution: not_executed` with a recorded reason
       - SCN-014 must include precondition step `POST /test/orders/{id}/ship`
-      - Also add the defect-candidate scenarios SCN-015 to SCN-017 (invalid quantity: zero, negative, non-integer / non-numeric / missing). Their expected values are derived from Requirement 3.13 and confirmed by a human; they are not derived from the observed legacy output (see `evaluation/legacy-defect-candidates.md`)
-    - Validate JSON syntax: `cat evaluation/ground-truth/ground-truth.json | python -m json.tool` (or equivalent) returns no errors
-    - _Requirements: 3.13, 4.5, 9.1–9.8_
+      - Also add the defect-candidate scenarios SCN-015 to SCN-017 (invalid quantity: zero, negative, non-integer / non-numeric / missing). Their expected values are derived from Requirement 3.13 and confirmed by a human; they are not derived from the observed legacy output (see `evaluation/legacy-defect-candidates.md`). SCN-017-d (numeric string) is invalid by the approved specification
+    - Validated by `tests/legacy-sample/test_ground_truth_schema.ps1`
+    - Status: approved by the project owner (`meta.authoring.status: approved`, `approved_by`, `approved_at` recorded). Approved changes: only JSON positive integer quantities are valid (R3.13); SCN-015..SCN-017-d expect 400 "Invalid request" (`response_code_source: human_approved`), SCN-017-d is no longer undetermined; SCN-006 also expects `available` and `requested`; BC-010 (5299 -> fee 500, total 5499) and BC-011 (5300 -> fee 0, total 5000) added; BC-001 reason approved (MySQL 5.7 does not enforce CHECK).
+    - _Requirements: 3.13, 4.5, 9.1–9.8, 9.10, 9.11, 9.16, 9.17, 9.18_
 
-  - [ ] 4.2 Create ground truth README and Phoenix AI allowlist documentation
+  - [x] 4.2 Create ground truth README and Phoenix AI allowlist documentation
     - Create `evaluation/ground-truth/README.md` with the following sections:
       - **Purpose**: explains role of ground-truth.json (Spec_Restoration_Evaluation reference only)
       - **Access Restriction**: `evaluation/ground-truth/` is never mounted in any Docker container; not reachable via the Legacy_App HTTP interface
@@ -290,29 +292,31 @@ All monetary calculations use integer arithmetic only. PHP source code in `legac
       - **Spec-Restorer Input Constraint**: `packages/spec-restorer` must not pass any content from `evaluation/` to `packages/ai-client`; this is enforced by the explicit allowlist of concrete file paths, not by directory scans
       - **Development vs. Runtime Scope Note**: Kiro IDE development agents may reference ground-truth files during code review and design work; this is acceptable. The restriction applies only to Phoenix runtime execution (analyzer, spec-restorer AI calls).
       - **Verification Method**: documents (policy and method only; implementing manifest and payload verification is the responsibility of the analyzer / spec-restorer specs, not this task) how compliance is confirmed: path validation with fail-closed behavior; a per-run input manifest that equals the allowlist exactly; payload verification, i.e. scanning the text actually sent to `packages/ai-client` for canary strings from `evaluation/ground-truth/` fixtures and for paths outside the allowlist, as the authoritative check; a path log alone is not sufficient; plus a `grep` check that `infra/docker-compose.yml` contains no `evaluation` mount
-    - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.9, 13.1_
+    - Also created `docs/ai-input-allowlist.json` (machine-readable allowlist, equal to the table) and updated the `docs/ai-input-allowlist.md` verification table with the implemented/unverified status
+    - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.9, 9.15, 13.1_
 
-  - [ ]* 4.3 Write integration tests for ground truth isolation
+  - [x]* 4.3 Write integration tests for ground truth isolation
     - Test `GET http://127.0.0.1:8056/evaluation/ground-truth/ground-truth.json` returns HTTP 404 (SCN-013)
     - Test `GET http://127.0.0.1:8056/evaluation` returns HTTP 404
     - Verify `grep -r "evaluation" infra/docker-compose.yml` exits with zero matches
-    - _Requirements: 9.1, 9.4_
+    - Implemented as `tests/legacy-sample/test_ground_truth_isolation.ps1`: 17 raw HTTP probes including traversal and encoded variants, all 4xx with no Ground Truth content; compose has no evaluation reference; container mounts limited to allowed files; no Ground Truth file or canary in any container or in the DB, with positive controls
+    - Also implemented `tests/legacy-sample/test_ai_input_isolation.ps1` with `lib/ai-input-builder.ps1`: reference allowlist builder, canary decoys, negative controls, fail-closed cases, junction, repository-wide canary placement
+    - The payload actually sent by the analyzer/spec-restorer to ai-client is UNVERIFIED (packages not implemented); the test prints UNVERIFIED and does not count it as a pass.
+    - _Requirements: 9.1, 9.2, 9.4, 9.9, 9.15_
 
-  - [ ] 4.4 Run all ground truth scenarios against live legacy app
-    - For each SCN-001 through SCN-014:
-      - Call `POST /reset` to ensure known initial state
-      - Execute the scenario's request as specified in `ground-truth.json`
-      - For SCN-014, execute the precondition `POST /test/orders/{id}/ship` first
-      - Compare actual HTTP status against `expected_status`
-      - Compare actual response fields against `expected_fields`; skip fields listed in `non_deterministic_fields` (check presence and type only)
-      - Record pass/fail for each scenario
-    - If any scenario fails due to a Legacy_App bug (not a ground-truth error), fix the PHP source and rerun
-    - If any scenario fails due to incorrect expected values in ground-truth.json, update ground-truth.json
-    - Confirm all 14 scenarios pass
-    - SCN-001 to SCN-014 must all pass. Run SCN-015 to SCN-017 separately; they are expected to differ from the legacy app, so report them as defect candidates and do not count them in the pass gate. Do not modify the legacy app to make them pass without a recorded human decision
-    - _Requirements: 9.5, 9.6, 9.7, 9.8, 13.3_
+  - [x] 4.4 Run all ground truth scenarios against live legacy app
+    - Run `evaluation/runner/Invoke-GroundTruthEvaluation.ps1`:
+      - Resets before every unit, then executes its steps and state checks
+      - Boundary cases run via a temporary 1-yen fixture product
+      - Writes `evaluation/results/ground-truth-conformance.json`, keeping expected specification, observed legacy behavior, comparison, and migration decision separate
+      - Classifies each unit as: `match`, `approved_divergence`, `mismatch_replicate_legacy`, `mismatch_decision_pending`, `specification_decision_pending`, `unexpected_mismatch`, `stale_registry_entry`, or `error`, and validates the decision registry
+    - Do not modify the legacy app or the Ground Truth expectations to make a scenario pass; a suspected Ground Truth error is recorded for human review.
+    - Decisions are recorded in `evaluation/migration-decisions.json` (MD-001..MD-006, all migration decisions; MD-006 keeps the history of its earlier specification decision). The result lists the approved divergences for the Compatibility_Evaluation.
+    - Result: SCN-001..014 match; SCN-015, 016, 017-a/b/c/d are approved divergences covered by MD-001..MD-006 (`follow_expected_specification`, decided by the project owner); boundary 10/10 executed match; BC-001 not executed and not counted as a pass; registry validation has no errors; gate pass. A pending decision, an undetermined expectation, a registry error, or a mismatch without a record fails the gate.
+    - Verified by `test_ground_truth_conformance.ps1` (with negative controls that must fail the gate) and `test_ground_truth_reproducibility.ps1` (byte-identical repeated runs equal to the committed baseline)
+    - _Requirements: 9.5, 9.6, 9.7, 9.8, 9.10, 9.12, 9.13, 9.14, 13.3, 13.6_
 
-  - [ ] 4.5 Final integration verification
+  - [x] 4.5 Final integration verification
     - Run full clean sequence: `docker compose -f infra/docker-compose.yml --project-directory . down -v && docker compose -f infra/docker-compose.yml --project-directory . up -d --build`
     - Wait for health check to return 200 (within 30 seconds)
     - Call `POST /reset`
@@ -329,11 +333,13 @@ All monetary calculations use integer arithmetic only. PHP source code in `legac
       8. SCN-001 through SCN-014 all match ground-truth.json
       9. `evaluation/ground-truth/` is not mounted in any container
       10. `legacy/src/` contains no comments or documents describing business rule purpose
+    - Result: after the approval, the clean sequence was repeated: only `project-phoenix_legacy-db-data` existed and was removed; health 200 about 18 s after `up -d --build`; conformance result byte-identical to the approved baseline; `run_all.ps1 -IncludeIsolation` 283/283 checks passed (273 earlier checks + 10 checks added with the approval); MVP checklist documented in `legacy/README.md` "MVP Completion Verification"; item 8 is against the approved Ground Truth
     - Document results in `legacy/README.md` under "MVP Completion Verification"
     - _Requirements: 12.1, 12.2, 12.3, 12.4, 12.6, 12.7, 10.1, 10.3_
 
-  - [ ] 4.6 Checkpoint — final sign-off
+  - [x] 4.6 Checkpoint — final sign-off
     - Ensure all tests pass; ask the user if questions arise.
+    - Signed off after the project owner's approval of the Ground Truth and the migration decisions; all tests pass (283 checks; the real analyzer payload check remains UNVERIFIED because the analyzer is not implemented).
 
 ## Notes
 
@@ -344,9 +350,10 @@ All monetary calculations use integer arithmetic only. PHP source code in `legac
 - `legacy/src/` must never contain PHPDoc blocks (`/** ... */`) or inline comments that state the business purpose of any condition
 - All conditional blocks implementing discount tiers, shipping fee tiers, and minimum order value check must appear without naming comments
 - The Docker design uses two networks (`legacy-internal` with `internal: true`, and `legacy-api` for the reverse-proxy only). Outbound blocking for legacy-app and legacy-db is measured (task 1.11), not assumed. The reverse-proxy itself can open outbound connections, and UDP, ICMP, and IPv6 paths are not measured; no complete isolation guarantee is claimed
-- Ground truth is authored by humans only; AI-generated output must never be written into `evaluation/ground-truth/ground-truth.json`
+- The Ground Truth was drafted by the development agent from the approved requirements and design, never from legacy output and never by the Phoenix runtime AI, and was approved by the project owner (Masato Nagata). Phoenix runtime AI output must never be written into `evaluation/ground-truth/ground-truth.json`.
+- Apache `mod_status` is disabled in the legacy-app image (R11.10).
 - Tests for this spec live in `tests/legacy-sample/` (outside `legacy/`), because expected values in tests restate the business rules and must never be AI input. Test scripts require PowerShell 7 (`pwsh`). Phase 3 and Phase 4 tests follow the same location.
-- `tests/legacy-sample/test_network_isolation.ps1` measures network isolation (it needs the `docker` CLI). Run it on its own or with `run_all.ps1 -IncludeIsolation`; it is not part of the default 136-check regression. `observe_defect_candidates.ps1` only records legacy behavior for the defect candidates and never fails.
+- `tests/legacy-sample/test_network_isolation.ps1` measures network isolation (it needs the `docker` CLI). Run it on its own or with `run_all.ps1 -IncludeIsolation`; it is not part of the default run; its check count depends on the number of host IPv4 addresses (55 on the last run). The Phase 4 scripts (92 checks) run in the default `run_all.ps1`. `observe_defect_candidates.ps1` only records legacy behavior for the defect candidates and never fails.
 
 ## Task Dependency Graph
 

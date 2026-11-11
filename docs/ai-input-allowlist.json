@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "description": "Machine-readable form of the AI input allowlist defined in docs/ai-input-allowlist.md. Concrete file paths only: no directories, no wildcards. A file is added only through a reviewed change to both this file and the table in docs/ai-input-allowlist.md.",
+  "location_note": "Interim location. The final location is decided in the analyzer spec. The analyzer must take this list as explicit input and must not discover files by scanning directories.",
+  "files": [
+    "legacy/src/index.php",
+    "legacy/src/db.php",
+    "legacy/src/products.php",
+    "legacy/src/orders.php",
+    "legacy/src/utils.php",
+    "legacy/sql/schema.sql",
+    "legacy/sql/seed.sql"
+  ]
+}

@@ -72,7 +72,7 @@ The PHP settings (`allow_url_fopen = Off`, `disable_functions`) and `dns: ["127.
 Residual items:
 - `reverse-proxy` itself is on `legacy-api` and can open outbound TCP connections to external IPs (measured). It is operated with the fixed-upstream configuration only and does not execute untrusted code.
 - UDP, ICMP, outbound IPv6, and destinations other than those listed above have not been measured. They are not assumed to be safe.
-- The `legacy-app` image includes Apache `mod_status` (`/server-status`, local-only by default). Through the proxy it is answered with 403.
+- `mod_status` is disabled in the image (`a2dismod status` in `legacy/Dockerfile`, R11.10). `/server-status` and `/server-status?auto` are answered by the application's 404 JSON. This is measured by `test_network_isolation.ps1` (P5b).
 
 ### Access Paths
 
@@ -104,14 +104,20 @@ project-phoenix/
 │   ├── sql/
 │   │   ├── schema.sql         # Table DDL
 │   │   └── seed.sql           # Initial products and customers
-│   ├── Dockerfile
+│   ├── Dockerfile             # (disables Apache mod_status)
 │   └── README.md              # Setup and usage instructions only (no business rule descriptions)
 │
 ├── evaluation/
 │   ├── ground-truth/
-│   │   ├── ground-truth.json  # Authoritative scenario definitions
+│   │   ├── ground-truth.json  # Expected specification; approved by the project owner
 │   │   └── README.md          # How to use ground truth; access restriction notes
-│   └── legacy-defect-candidates.md  # Record of legacy behavior defect candidates (not Ground Truth)
+│   ├── legacy-defect-candidates.md  # Record of legacy behavior defect candidates (not Ground Truth)
+│   ├── migration-decisions.json     # Human migration/specification decisions MD-001..MD-006
+│   ├── runner/
+│   │   ├── Invoke-GroundTruthEvaluation.ps1  # Conformance runner
+│   │   └── EvalCommon.ps1                    # Conformance runner helpers
+│   └── results/
+│       └── ground-truth-conformance.json     # Generated baseline: observed behavior and comparison
 │
 ├── tests/
 │   └── legacy-sample/
@@ -122,12 +128,19 @@ project-phoenix/
 │       ├── test_phase3_concurrency.ps1       # Concurrent orders must not double-allocate stock
 │       ├── test_network_isolation.ps1        # Measured network isolation: topology, ports, TCP/DNS reachability, canary forwarding tests
 │       ├── observe_defect_candidates.ps1     # Observes legacy defect candidates; not part of run_all
-│       ├── run_all.ps1                       # Runs all tests above in order and aggregates results
+│       ├── test_ground_truth_schema.ps1         # Phase 4: Ground Truth schema and registry consistency
+│       ├── test_ground_truth_conformance.ps1    # Phase 4: conformance runner classification and gate
+│       ├── test_ground_truth_reproducibility.ps1 # Phase 4: repeated runs are byte-identical
+│       ├── test_ground_truth_isolation.ps1      # Phase 4: Ground Truth unreachable via HTTP, mounts, containers
+│       ├── test_ai_input_isolation.ps1          # Phase 4: allowlist builder, canary decoys, negative controls
+│       ├── run_all.ps1                       # Runs Phase 2/3, optional isolation, and Phase 4 scripts in order and aggregates results
 │       └── lib/
-│           └── common.ps1                    # Shared helpers: API calls, direct DB access, created_at normalization
+│           ├── common.ps1                    # Shared helpers: API calls, direct DB access, created_at normalization
+│           └── ai-input-builder.ps1          # Reference allowlist builder; test harness, not the analyzer
 │
 ├── docs/
-│   └── ai-input-allowlist.md  # AI input allowlist policy
+│   ├── ai-input-allowlist.md  # AI input allowlist policy
+│   └── ai-input-allowlist.json # Machine-readable allowlist (7 files)
 │
 ├── infra/
 │   ├── docker-compose.yml
@@ -333,7 +346,13 @@ HTTP status codes follow the scheme defined in Requirement 8.6:
 POST /orders
   │
   ├─ 1. Decode and validate request structure
-  │       Missing customer_id or empty order_lines → 400
+  │       Missing customer_id or empty lines → 400 "Invalid request"
+  │       Every line quantity must be a JSON positive integer (R3.13).
+  │       Invalid: 0, negative, non-integer (1.5), any string (including numeric
+  │       strings "5", "05", " 5", "5.0", "+5" and "abc"), null, booleans,
+  │       arrays, objects, or a missing quantity property.
+  │       Any invalid quantity rejects the WHOLE request → 400 "Invalid request";
+  │       no order is created and no stock changes.
   │
   ├─ 2. Verify customer exists
   │       Customer not found → 404
@@ -371,6 +390,8 @@ POST /orders
 ```
 
 Steps 5 and 7–10 are implemented as plain PHP conditionals (`if/elseif`) in `orders.php` with no comment identifying the business purpose of any condition.
+
+> **Known legacy deviation (not changed):** the legacy implementation casts the quantity with `(int)` and answers 409 / 500 / 201 for the invalid quantities listed in step 1 (DC-001..DC-006). The legacy code is not modified. The modern application must follow the specification (400 "Invalid request"; MD-001..MD-006, `follow_expected_specification`).
 
 ### Discount Calculation
 
@@ -557,10 +578,15 @@ Response 201:
 | Condition | HTTP Status | `error` field |
 |-----------|-------------|---------------|
 | Missing `customer_id` or empty `lines` | 400 | "Invalid request" |
+| Any line quantity that is not a JSON positive integer (0, negative, non-integer, any string including numeric strings, null, boolean, array, object, or missing); the whole request is rejected, no order, no stock change | 400 | "Invalid request" |
 | Customer not found | 404 | "Customer not found" |
 | Unknown product ID(s) | 400 | "Unknown products" + `details.product_ids` |
 | Subtotal < 1000 | 400 | "Minimum order value not met" |
 | Insufficient stock | 409 | "Insufficient stock" + `details.products` |
+
+`details.products` items contain `product_id`, `available` (the current stock quantity) and `requested` (the requested quantity) (R3.9, R5.2). This is specified behavior, approved by the project owner. Example: product 5 (stock 50) requested with quantity 51 gives `{ "product_id": 5, "available": 50, "requested": 51 }`.
+
+> **Known legacy deviation (not changed):** the legacy implementation casts the quantity with `(int)` and answers 409 / 500 / 201 for invalid quantities (DC-001..DC-006). The modern application must follow the specification (MD-001..MD-006, `follow_expected_specification`).
 
 #### Order History
 
@@ -688,7 +714,7 @@ Two fields are inherently non-deterministic:
 
 **AUTO_INCREMENT reset strategy:** The `reset` endpoint executes `ALTER TABLE orders AUTO_INCREMENT = 1` and `ALTER TABLE order_lines AUTO_INCREMENT = 1` after deleting all rows. This makes order IDs predictable across reset cycles: the first order placed after a reset always receives `id = 1`. These statements are DDL (implicit commit, not rollback-able), so they run as a separate step outside the data-restore transaction. If one fails, the endpoint does not return success; it returns HTTP 500 with `details.state = "data_reset_auto_increment_pending"`.
 
-**Verifier comparison rule:** For any response field listed as non-deterministic in the Ground Truth scenario definition, the Phoenix Verifier treats it as "present and valid format" rather than comparing the exact value.
+**Verifier comparison rule:** For any response field listed in `meta.non_deterministic_fields` of the Ground Truth, the Phoenix Verifier treats it as "present and valid format" rather than comparing the exact value.
 
 ---
 
@@ -696,19 +722,24 @@ Two fields are inherently non-deterministic:
 
 ### Role and Authorship Principle
 
-Ground Truth is a **human-authored authoritative specification**. AI-generated output (restored specs, code proposals, inferred expected values) must never be written into the Ground Truth or overwrite its contents.
+Ground Truth is the expected specification, and it is **authoritative only after human review**. A draft was prepared by the Kiro development agent from the approved requirements and design and from hand calculation on the seed data (never from legacy output, and never by the Phoenix runtime AI). Phoenix runtime AI output (restored specs, code proposals, inferred expected values) must never be written into the Ground Truth or overwrite its contents. The review status is recorded in `meta.authoring` of `ground-truth.json`: `status` is now `approved`, with `approved_by` (Masato Nagata, project owner) and `approved_at` (ISO 8601 with offset) (R9.11). The review package is `evaluation/review/ground-truth-review.md`.
 
 ```
-Ground Truth author:  Human (Phoenix engineer)
-Ground Truth content: Manually calculated and recorded from seed data and business rules
-AI's role:            Never reads the Ground Truth. Generates restored spec independently.
-Evaluation role:      Compares AI-generated restored spec against Ground Truth (comparison only).
+Draft author:         Kiro development agent (from approved requirements/design and
+                      hand calculation from seed data) or a human
+Authority:            Only after human review (status recorded in meta.authoring)
+Phoenix runtime AI:   Never reads or writes the Ground Truth. Generates restored spec independently.
+Evaluation role:      Comparison only (AI-restored spec vs Ground Truth).
 ```
 
 Patterns that violate this principle (prohibited):
-- Writing Phoenix AI output into `evaluation/ground-truth/ground-truth.json`
-- Having AI generate Ground Truth scenario definitions
+- Writing Phoenix runtime AI output into `evaluation/ground-truth/ground-truth.json`
+- Having the Phoenix runtime AI generate Ground Truth scenario definitions
+- Deriving expected values from Legacy_App output, or editing them to match it
+- Treating the draft as authoritative before human review
 - Treating Legacy_App execution results as Ground Truth during compatibility testing
+
+The schema can still mark an expectation `undetermined` (with a reason) when a human decision is outstanding. After the approval no scenario unit uses it.
 
 ### Separation Guarantee — Layered Design
 
@@ -729,12 +760,19 @@ Patterns that violate this principle (prohibited):
 - Authoritative check: scan the text actually sent to `packages/ai-client` for canary strings from `evaluation/ground-truth/` fixtures and for any path outside the allowlist; a path log alone is not sufficient evidence
 - Unit tests assert that the prompt sent by spec-restorer to the AI client does not contain any `evaluation/` path or content
 
+**AI input isolation verification (implemented now, with a reference builder):**
+- `docs/ai-input-allowlist.json` is the machine-readable allowlist. It must equal the table in `docs/ai-input-allowlist.md` (checked by `test_ground_truth_schema.ps1`). It lists 7 concrete files: `legacy/src/{index,db,products,orders,utils}.php`, `legacy/sql/schema.sql`, `legacy/sql/seed.sql`.
+- `tests/legacy-sample/lib/ai-input-builder.ps1` is a reference builder. It is a test harness that expresses the allowlist rule; it is not the analyzer. It accepts only direct files of the form `legacy/src/<name>.php` and `legacy/sql/<name>.sql`, and fails closed (never skips silently) on traversal, absolute paths, wildcards, directories, nested paths, non-source files, backslashes, whitespace, duplicates, missing files, an empty allowlist, and reparse points (junctions). It writes a manifest of path and content hash.
+- `tests/legacy-sample/test_ai_input_isolation.ps1` plants per-run canary decoys in `evaluation/`, `tests/`, `docs/`, `.kiro/`, READMEs, `.env`, and next to allowed files in `legacy/src` and `legacy/sql`, and checks that none reach the bundle. Negative controls show that a naive directory scan does pick the decoys up, so the check can detect a leak. It also checks that the Ground Truth canary appears only in `ground-truth.json`.
+- **Unverified:** the check of the payload actually sent to `packages/ai-client` by the real analyzer and spec-restorer. Those packages do not exist yet, so this check is not verified. It remains the authoritative check and must be added to their specs (R9.15).
+
 **Layer 4: Runtime non-reference guarantee**
 - `packages/spec-restorer` code must not perform any `fs.readFile` / `fs.readdir` or equivalent file operations targeting `evaluation/`; enforced by static code review
 - Unit tests verify that the context array passed to `packages/ai-client` does not include any content from `evaluation/ground-truth/`
 
 **Layer 5: HTTP interface inaccessibility (SCN-013)**
-- A test scenario records that `GET /evaluation/ground-truth/ground-truth.json` returns 404 from Legacy_App
+- Policy (R9.18): a request for the Ground Truth over HTTP must get a 4xx rejection whose body contains no Ground Truth content and no canary; the exact body is not required. SCN-013 currently expects 404 and the absence of the canary, which satisfies the policy. `test_ground_truth_isolation.ps1` checks 17 raw probes for 4xx and no Ground Truth content.
+- Example: `GET /evaluation/ground-truth/ground-truth.json` returns 404 from Legacy_App
 - Apache's document root is `/var/www/html` (mapped to `legacy/src/`); `evaluation/` is physically outside this root and cannot be served
 
 ### File Location and Access Restriction
@@ -754,49 +792,74 @@ Access restriction is enforced structurally:
 
 ### Ground Truth JSON Schema
 
+The Ground Truth file holds only the expected specification. Its implemented structure (abridged; `...` marks omitted content):
+
 ```json
 {
+  "schema_version": 1,
   "meta": {
+    "title": "...",
+    "kind": "expected_specification",
+    "separation_note": "...",
+    "authoring": { "status": "approved", "approved_by": "Masato Nagata (project owner)",
+                   "approved_at": "<ISO 8601 with offset>", "note": "..." },
+    "canary": "PHOENIX-GT-CANARY-<32 hex>",
+    "never_pass_to_runtime_ai": true,
     "minimum_order_value": 1000,
     "discount_tiers": [
       { "subtotal_min": 0,     "subtotal_max": 2999,  "discount": 0 },
       { "subtotal_min": 3000,  "subtotal_max": 9999,  "discount": 300 },
-      { "subtotal_min": 10000, "subtotal_max": null,   "discount": 1000 }
+      { "subtotal_min": 10000, "subtotal_max": null,  "discount": 1000 }
     ],
     "shipping_fee_tiers": [
       { "net_amount_min": 0,    "net_amount_max": 4999, "shipping_fee": 500 },
-      { "net_amount_min": 5000, "net_amount_max": null,  "shipping_fee": 0 }
-    ]
+      { "net_amount_min": 5000, "net_amount_max": null, "shipping_fee": 0 }
+    ],
+    "non_deterministic_fields": ["data.order_id", "created_at"],
+    "field_path_syntax": "..."
+  },
+  "defect_candidate_links": {
+    "DC-001": { "scenario": "SCN-015", "summary": "quantity 0" }
   },
   "boundary_cases": [
-    { "subtotal": 0,     "expected_discount": 0,    "expected_shipping_fee": 500 },
-    { "subtotal": 999,   "expected_discount": 0,    "expected_shipping_fee": 500 },
-    { "subtotal": 1000,  "expected_discount": 0,    "expected_shipping_fee": 500 },
-    { "subtotal": 2999,  "expected_discount": 0,    "expected_shipping_fee": 500 },
-    { "subtotal": 3000,  "expected_discount": 300,  "expected_shipping_fee": 500 },
-    { "subtotal": 4999,  "expected_discount": 300,  "expected_shipping_fee": 500 },
-    { "subtotal": 5000,  "expected_discount": 300,  "expected_shipping_fee": 500 },
-    { "subtotal": 9999,  "expected_discount": 300,  "expected_shipping_fee": 0 },
-    { "subtotal": 10000, "expected_discount": 1000, "expected_shipping_fee": 0 }
+    { "id": "BC-001", "subtotal": 0, "order_accepted": false,
+      "expected_discount": 0, "expected_shipping_fee": 500,
+      "execution": "not_executed", "reason": "..." },
+    { "id": "BC-002", "subtotal": 999, "order_accepted": false,
+      "expected_discount": 0, "expected_shipping_fee": 500,
+      "expected_rejection": { "status": 400, "error": "Minimum order value not met" } },
+    { "id": "BC-010", "subtotal": 5299, "order_accepted": true,
+      "expected_discount": 300, "expected_net_amount": 4999,
+      "expected_shipping_fee": 500, "expected_total": 5499 }
   ],
   "scenarios": [
-    {
-      "id": "SCN-001",
-      "description": "...",
-      "request": { "method": "POST", "path": "/orders", "body": { } },
-      "expected_status": 201,
-      "expected_fields": {
-        "success": true,
-        "data.subtotal": "<integer>",
-        "data.discount": "<integer>",
-        "data.shipping_fee": "<integer>",
-        "data.total": "<integer>"
-      },
-      "non_deterministic_fields": ["data.order_id", "created_at"]
-    }
+    { "id": "SCN-003", "title": "...", "category": "...", "requirements": ["R3.2"],
+      "steps": [ ... ], "expected_specification": { ... }, "defect_candidates": [] }
   ]
 }
 ```
+
+**Top level and `meta`.** `schema_version` is `1`. `meta.kind` is `expected_specification`. `meta.authoring` records `status: approved`, `approved_by` and `approved_at` (ISO 8601 with offset) after the human review (R9.11). `meta.canary` is a unique marker of the form `PHOENIX-GT-CANARY-<32 hex>`; it appears only in `ground-truth.json` and is used by the isolation checks (R9.15). `meta.never_pass_to_runtime_ai` is `true`. `meta.non_deterministic_fields` is `["data.order_id", "created_at"]`. The tier tables and `minimum_order_value` are literal constants (R9.7).
+
+**`defect_candidate_links`** maps DC-001 to DC-006 to their scenario unit and a one-line summary.
+
+**`boundary_cases`** are BC-001 to BC-011 for subtotals 0, 999, 1000, 2999, 3000, 4999, 5000, 9999, 10000, 5299 and 5300, each with `expected_discount` and `expected_shipping_fee` (the rule outputs). A case that must be rejected carries `expected_rejection` with status 400 and error `"Minimum order value not met"` (BC-001 and BC-002 have a subtotal below 1000; only BC-002 is executed). BC-001 has `execution: "not_executed"` and a `reason` (see Ground Truth Conformance Run). BC-010 and BC-011 verify that the shipping fee is decided on the Net_Amount (R9.17) and also record `expected_net_amount`:
+
+| Case | Subtotal | Discount | Net_Amount | Shipping_Fee | Total |
+|------|----------|----------|-----------|--------------|-------|
+| BC-010 | 5,299 | 300 | 4,999 | 500 | 5,499 |
+| BC-011 | 5,300 | 300 | 5,000 | 0 | 5,000 |
+
+**`scenarios`** are SCN-001 to SCN-017. SCN-017 has `variants` SCN-017-a to SCN-017-d, so there are 20 scenario units. A unit has:
+
+- `steps`: ordered requests, each with `id`, `role` (`setup` or `action`), `request` (`method`, `path`, optional `body`) and an optional `capture` that stores values from the response (for example an order id) as variables for later steps.
+- `expected_specification`:
+  - `derived_from`: how the expected values were obtained (hand calculation from seed data and rules, never from legacy output).
+  - `response_code_source`: `design` or `human_approved` (a response code or message that a human confirmed).
+  - `step_expectations`: keyed by step id, each with `status` and `fields`, optional `must_not_contain` (strings that must not appear in the body). The schema still allows `undetermined: true` plus a `reason` when the expected behavior is not decided (R9.11); no unit uses it after the approval.
+  - `state_checks`: follow-up requests (usually `GET`) with expected `status` and `fields`, used to check stock and order state.
+
+**Field path syntax.** `a.b` selects a nested property; `[n]` selects an array index; `[*]` collects every element. A value `{"$type": "integer"}` checks only the type. A string `{{name}}` refers to a value captured by an earlier step. `{{canary}}` is `meta.canary`.
 
 ### Required Scenario Coverage
 
@@ -809,43 +872,162 @@ The Ground Truth must include at least one scenario from each of the following c
 | SCN-003 | Successful order — discount tier 2 (3,000 ≤ Subtotal ≤ 9,999) | Discount = 300 |
 | SCN-004 | Successful order — free shipping (Net_Amount ≥ 5,000) | Shipping_Fee = 0 |
 | SCN-005 | Rejection — Subtotal < 1,000 (minimum order not met) | 400 status |
-| SCN-006 | Rejection — insufficient stock | 409 status, product IDs in details |
+| SCN-006 | Rejection — insufficient stock | 409 status; `details.products` with `product_id`, `available` [50] and `requested` [51] (R3.9, R5.2) |
 | SCN-007 | Rejection — unknown product ID | 400 status |
 | SCN-008 | Rejection — unknown customer ID | 404 status |
 | SCN-009 | Cancellation with stock restoration | product stock_quantity after cancel |
 | SCN-010 | Cancellation rejected — already cancelled | 409 status |
 | SCN-011 | Cancellation rejected — invalid order ID | 404 status |
 | SCN-012 | Reset idempotency — two resets in sequence | identical state after each reset |
-| SCN-013 | Ground truth inaccessibility — GET /evaluation | 404 from Legacy_App |
+| SCN-013 | Ground truth inaccessibility — GET /evaluation | 4xx rejection with no Ground Truth content or canary; exact body not required (current expectation: 404 and canary absent) |
 | SCN-014 | Cancellation rejected — non-cancellable (shipped) | 409 status; requires prior `POST /test/orders/{id}/ship` call |
-| SCN-015 | Rejection — quantity zero (defect candidate DC-001) | Expected per R3.13: rejected as invalid request (4xx; exact code/message to be confirmed by the human Ground Truth author); no order, no stock change. Legacy observed `409`. |
-| SCN-016 | Rejection — negative quantity (defect candidate DC-002) | Same expectation as SCN-015. Legacy observed `500`. |
-| SCN-017 | Rejection — non-integer, non-numeric, or missing quantity (defect candidates DC-003, DC-004, DC-006; DC-005 numeric string needs a human decision) | Same expectation as SCN-015. Legacy observed `201` (1.5 truncated), `409`, `409`. |
+| SCN-015 | Rejection — quantity zero (defect candidate DC-001) | Per R3.13: 400 `"Invalid request"` (approved by the project owner); no order, no stock change. Legacy observed `409` (approved divergence MD-001). |
+| SCN-016 | Rejection — negative quantity (defect candidate DC-002) | Same expectation as SCN-015. Legacy observed `500` (approved divergence MD-002). |
+| SCN-017 | Rejection — invalid quantity types (variants a to d below; 20 scenario units in total) | See variants |
 
-**Defect-candidate scenarios:** The expected values of SCN-015 to SCN-017 are derived from the requirement (R3.13), not from the observed legacy output, and follow the Role and Authorship Principle (the Ground Truth is authored by a human). These scenarios are expected to fail against the legacy app. They are excluded from the gate "all of SCN-001 to SCN-014 pass on the legacy app" and are reported separately. Details and reproduction steps for each candidate are in `evaluation/legacy-defect-candidates.md`.
+Variants of SCN-017 and the other defect-candidate units:
+
+| Unit | Defect candidate | Input | Expected specification | Legacy observed |
+|------|------------------|-------|------------------------|-----------------|
+| SCN-015 | DC-001 | quantity `0` | 400 `"Invalid request"` (`human_approved`); no order, no stock change | `409` (approved divergence, MD-001) |
+| SCN-016 | DC-002 | negative quantity | Same as SCN-015 | `500` (approved divergence, MD-002) |
+| SCN-017-a | DC-003 | non-integer `1.5` | Same as SCN-015 | `201` (truncated; approved divergence, MD-003) |
+| SCN-017-b | DC-004 | non-numeric `"abc"` | Same as SCN-015 | `409` (approved divergence, MD-004) |
+| SCN-017-c | DC-006 | `quantity` missing | Same as SCN-015 | `409` (approved divergence, MD-005) |
+| SCN-017-d | DC-005 | numeric string `"5"` | 400 `"Invalid request"`; no order; product 1 stock stays 500. No longer undetermined: only JSON integers are valid, numeric strings are not converted implicitly | `201` (accepted; approved divergence, MD-006) |
+
+Other invalid forms (`"05"`, `" 5"`, `"5.0"`, `"+5"`, `null`, booleans, arrays, objects) are specified by R3.13 in the same way but have no separate unit yet.
+
+**Defect-candidate scenarios:** The expected values of SCN-015 to SCN-017 are derived from the requirement (R3.13), not from the observed legacy output, and follow the Role and Authorship Principle (the Ground Truth is authored by a human). These scenarios do not match the legacy app. All six are approved divergences (decision `follow_expected_specification`, MD-001 to MD-006); the legacy app is not changed. They are listed under `approved_divergences` in the conformance result (see Ground Truth Conformance Run and Migration Decision Registry). Details and reproduction steps for each candidate are in `evaluation/legacy-defect-candidates.md`.
 
 ### Scenario Definition for Monetary Calculations
 
-For scenarios that verify monetary calculations, `expected_fields` records exact integer values computed from the seed product prices and the business rule tiers. These values are recorded as literals in the Ground Truth file, not derived from source code symbol references.
+For scenarios that verify monetary calculations, the `fields` of a step expectation record exact integer values computed from the seed product prices and the business rule tiers. These values are recorded as literals in the Ground Truth file, not derived from source code symbol references.
 
-Example for SCN-003 using seed products (Notebook A4 × 20 = 3,000 yen):
+Example for SCN-003 using seed products (product 1 Notebook A4, unit price 150 × 20 = 3,000 yen; discount 300; net 2,700, so shipping fee 500; total 3,200):
 ```json
 {
   "id": "SCN-003",
-  "request": {
-    "method": "POST", "path": "/orders",
-    "body": { "customer_id": 1, "lines": [{ "product_id": 1, "quantity": 20 }] }
+  "steps": [
+    { "id": "s1", "role": "action",
+      "request": { "method": "POST", "path": "/orders",
+        "body": { "customer_id": 1, "lines": [{ "product_id": 1, "quantity": 20 }] } } }
+  ],
+  "expected_specification": {
+    "derived_from": "Seed price 150 x 20 = 3000. Discount 300. Net 2700 < 5000, shipping fee 500. Total 3200. Stock 500 - 20 = 480.",
+    "response_code_source": "design",
+    "step_expectations": {
+      "s1": {
+        "status": 201,
+        "fields": {
+          "success": true,
+          "data.subtotal": 3000,
+          "data.discount": 300,
+          "data.shipping_fee": 500,
+          "data.total": 3200,
+          "data.order_id": { "$type": "integer" }
+        }
+      }
+    },
+    "state_checks": [
+      { "id": "c1", "request": { "method": "GET", "path": "/products/1" },
+        "status": 200, "fields": { "data.stock_quantity": 480 } }
+    ]
   },
-  "expected_status": 201,
-  "expected_fields": {
-    "success": true,
-    "data.subtotal": 3000,
-    "data.discount": 300,
-    "data.shipping_fee": 500,
-    "data.total": 3200
-  }
+  "defect_candidates": []
 }
 ```
+
+---
+
+## Ground Truth Conformance Run
+
+The conformance run compares the observed behavior of the legacy app with the expected specification in the Ground Truth. It shows where the legacy app follows the expected specification and where it does not. It is neither the Spec_Restoration_Evaluation (AI-restored spec vs Ground Truth) nor the Compatibility_Evaluation (legacy vs modern app) (R13.4, R13.6).
+
+### Runner
+
+- `evaluation/runner/Invoke-GroundTruthEvaluation.ps1` with the helpers in `evaluation/runner/EvalCommon.ps1` (HTTP calls, SQL through the legacy-db container, template and field-path resolution, masking, LF-normalized SHA-256, stable JSON output). Requires PowerShell 7.
+- Parameters: `-BaseUrl` (default `http://127.0.0.1:8056`), `-GroundTruthPath`, `-DecisionsPath`, `-AllowlistPath`, `-OutputPath`, `-RawOutputPath`. Without `-OutputPath` the committed baseline `evaluation/results/ground-truth-conformance.json` is overwritten. `-RawOutputPath` writes unmasked responses for diagnosis; that file is not deterministic.
+- Exit codes: `0` gate pass, `1` gate fail, `2` the app is not healthy or another run is in progress. Runs are serialized with a named mutex (`Local\ProjectPhoenixGroundTruthEvaluation`) because every unit resets the shared database.
+- Every unit starts with `POST /reset`.
+- Boundary cases use a temporary fixture product with id 101, name `GT Boundary Fixture 1 yen`, unit price 1 and stock 999999, inserted with SQL through the legacy-db container. A line quantity equal to the target subtotal then produces that subtotal. The final reset removes the fixture.
+
+### Output
+
+`evaluation/results/ground-truth-conformance.json` has one record per scenario unit, with these keys kept separate: `expected_specification`, `observed_legacy_behavior`, `comparison` (`result`, `differences`, `not_comparable_reason`), `migration_decision` (`status`, `decision_id`, `decision`, `kind`) and `classification`. The file also records the inputs: the LF-normalized SHA-256 of the Ground Truth, the decision registry and the 7 allowlisted legacy files. It adds:
+
+- `summary.registry_validation.errors`: the registry validation errors (empty when the registry is consistent).
+- `approved_divergences`: `{ note, count, items[] }`. Each item has `scenario`, `decision_id`, `defect_candidates`, `decision`, `decided_by`, `legacy_response` (`status`, `error`), `approved_target` (`status`, `error`) and `differences`.
+
+Decision times (`decided_at`) are not copied into the result, so it contains no wall-clock values. The registry is loaded with string dates (no date-object conversion), so timestamps are not reformatted or shifted by the JSON parser. `order_id` and `created_at` are masked as `<non-deterministic>`, also inside difference messages. Repeated runs produce byte-identical files (R9.14).
+
+### Classification and gate
+
+| Classification | Meaning | Gate |
+|----------------|---------|------|
+| `match` | Observed behavior equals the expected specification; no decision record | pass |
+| `approved_divergence` | Mismatch detected and covered by a decided `follow_expected_specification` decision | pass; listed under `approved_divergences` |
+| `mismatch_replicate_legacy` | Mismatch covered by a decided `replicate_legacy_behavior` decision | pass; reported separately |
+| `mismatch_decision_pending` | Mismatch whose decision is still `pending` (unapproved) | **fail** |
+| `specification_decision_pending` | Expectation undetermined (not comparable) | **fail** |
+| `unexpected_mismatch` | Mismatch, or not comparable, without a decision record | **fail** |
+| `stale_registry_entry` | Match, but a decision record still exists (for example the expectation was edited to match legacy) | **fail** |
+| `error` | A setup step or capture failed | **fail** |
+
+The gate also fails on any registry validation error: duplicate ids or scenarios, a decision for a scenario that does not exist, defect candidates that differ from the Ground Truth, an unknown decision or kind, a decided entry without `decided_by`, without an ISO 8601 `decided_at` with offset, or without `rationale`, a pending entry that carries decision data, or a decision on an undetermined expectation (R9.12).
+
+A boundary case that does not match fails the gate. A boundary case that is not executed is reported as `not_executed` with its reason and is not counted as a pass (R9.13).
+
+### SCN-017-d is comparable
+
+SCN-017-d sends the quantity as the numeric string `"5"`. The project owner decided that only JSON integers are valid, so the expectation is 400 `"Invalid request"`, no order, and product 1 stock 500. The unit is comparable and no longer undetermined. The legacy app accepts it (201, quantity 5), so the unit is an approved divergence (MD-006, DC-005, `follow_expected_specification`). The legacy observation is never used as the expectation.
+
+### Why BC-001 is not executed
+
+BC-001 is the rule output for a subtotal of 0. Inside the data domain no order line produces it. Every product price is at least 1 (`CHECK (unit_price BETWEEN 1 AND 9999999)` declared in `legacy/sql/schema.sql`; MySQL 5.7 parses but does not enforce CHECK, so this is the declared domain, not an enforced one), and a quantity must be a positive integer (R3.13). Producing a subtotal of 0 would need either an invalid quantity, which is SCN-015, or a 0-yen product outside the declared domain. Neither tests the rule, so BC-001 is recorded as `not_executed`. This reason is approved by the project owner. `test_ground_truth_schema.ps1` (GS33) checks the domain facts this reason depends on.
+
+### Current baseline
+
+| Result | Units |
+|--------|-------|
+| `match` | 14 (SCN-001 to SCN-014) |
+| `approved_divergence` | 6 (SCN-015, SCN-016, SCN-017-a, SCN-017-b, SCN-017-c, SCN-017-d) |
+| Boundary cases | 10 executed, 10 match; BC-001 not executed |
+
+Gate: pass. The Ground Truth is approved, and no expected value is edited to match legacy output.
+
+---
+
+## Migration Decision Registry
+
+`evaluation/migration-decisions.json` records, per scenario unit, the human decision where the legacy behavior differs from the expected specification (or, historically, could not be compared). The conformance run reads it (dates as strings); it never writes it. Only humans change it; the legacy app is not modified and the Ground Truth is not edited to make a unit pass.
+
+- `allowed_decisions`: `pending`, `replicate_legacy_behavior`, `follow_expected_specification`.
+- `kinds`:
+  - `migration_decision`: the expected specification is defined but legacy differs; a human decides whether the modern app replicates legacy or follows the specification.
+  - `specification_decision`: the expected specification is undetermined; a human first decides the expected behavior and records it in the Ground Truth, and a migration decision follows.
+- Each entry has `id`, `kind`, `scenario`, `defect_candidates`, `decision`, `decided_by`, `decided_at` (ISO 8601 with offset) and `rationale`, plus an optional `history`.
+- `required_fields_when_decided`: `decided_by`, `decided_at`, `rationale`. A decided entry missing any of them fails the gate.
+- `compatibility_mapping` (top-level) defines what each decision means for the Compatibility_Evaluation:
+
+| Decision | Compatibility meaning |
+|----------|-----------------------|
+| `follow_expected_specification` | `approved_divergence`: the modern app is expected to differ from legacy and follow the expected specification |
+| `replicate_legacy_behavior` | `must_match_legacy`: the modern app must reproduce the legacy response |
+| `pending` | `unapproved`: the gate fails until a decision is recorded |
+
+All six entries are decided by Masato Nagata (project owner) with `decided_at` and a recorded `rationale`: invalid quantities are rejected by input validation, and the legacy 409 / 500 / truncation behavior is treated as a defect that the new system does not inherit (MD-006: only JSON integers are allowed, no implicit conversion of numeric strings).
+
+| ID | Kind | Scenario | Defect candidate | Decision |
+|----|------|----------|------------------|----------|
+| MD-001 | migration_decision | SCN-015 | DC-001 | follow_expected_specification |
+| MD-002 | migration_decision | SCN-016 | DC-002 | follow_expected_specification |
+| MD-003 | migration_decision | SCN-017-a | DC-003 | follow_expected_specification |
+| MD-004 | migration_decision | SCN-017-b | DC-004 | follow_expected_specification |
+| MD-005 | migration_decision | SCN-017-c | DC-006 | follow_expected_specification |
+| MD-006 | migration_decision | SCN-017-d | DC-005 | follow_expected_specification |
+
+MD-006 was first a `specification_decision` (pending) because the expected behavior of a numeric string was undetermined. Its `history` entry records that earlier state (`kind: specification_decision`, `decision: pending`) and when and by whom it was closed (`closed_by`, `closed_at`); the entry then became a `migration_decision`. The `specification_decision` kind remains in the schema but no entry uses it now.
 
 ---
 
@@ -889,6 +1071,8 @@ Example for SCN-003 using seed products (Notebook A4 × 20 = 3,000 yen):
 4. **No shared state:** Running the Compatibility Evaluation does not alter the AI-restored spec, and running the Spec Restoration Evaluation does not trigger container execution.
 
 **Defect candidates make the two references diverge:** For the defect candidates DC-001 to DC-006, the two evaluations use different references. The Spec_Restoration_Evaluation reference is the Ground Truth (the R3.13 expectation). The Compatibility_Evaluation reference (R13.3) is the actual legacy response. For each candidate, a human must therefore record a decision before modernization: replicate the legacy behavior, or follow R3.13. Until that decision is recorded, results for these inputs are not counted as ordinary passes or failures and are reported separately. The legacy app is not modified to make these scenarios pass without a recorded decision.
+
+All six decisions are now recorded as `follow_expected_specification` (approved by the project owner). The Compatibility_Evaluation therefore reports the scenarios listed in `approved_divergences` of the conformance result (SCN-015, SCN-016, SCN-017-a, SCN-017-b, SCN-017-c, SCN-017-d) explicitly as approved differences, naming the approving decision (MD-001..MD-006): the modern app is expected to return the approved target (400 "Invalid request") instead of the legacy response. For all other scenarios the legacy response stays the reference (R13.3, R13.7).
 
 **Distinction between legacy execution results and Ground Truth:**
 
@@ -1029,6 +1213,18 @@ Property tests run against the live legacy container over HTTP. Each test calls 
 - Confirm `allow_url_fopen = Off`, `allow_url_include = Off`, and socket/curl functions disabled in `php.ini` (mitigations only; see Docker Network Rationale)
 - Confirm `dns: ["127.0.0.1"]` is set on `legacy-app` (mitigation only)
 
+**Phase 4 test scripts** (PowerShell, all run by `tests/legacy-sample/run_all.ps1`):
+
+| Script | Checks | Scope |
+|--------|--------|-------|
+| `test_ground_truth_schema.ps1` | 37 | Static: Ground Truth schema, registry consistency, allowlist JSON equals the Markdown table, price domain facts behind BC-001 (GS33) |
+| `test_ground_truth_conformance.ps1` | 26 | Runs the conformance runner and checks classification and gate. Negative controls: wrong total, expectation edited to match legacy, missing record, pending decision, wrong boundary total, missing approver, defect-candidate mismatch, wrong SCN-006 `available`. Positive case: `replicate_legacy_behavior` |
+| `test_ground_truth_reproducibility.ps1` | 9 | Repeated runs produce byte-identical result files |
+| `test_ground_truth_isolation.ps1` | 9 | 17 raw HTTP probes (including traversal and encoded variants) return no Ground Truth; not mounted; no compose reference; canary absent from containers and the database |
+| `test_ai_input_isolation.ps1` | 11 | Reference allowlist builder, canary decoys, negative controls |
+
+The check count of `test_network_isolation.ps1` depends on the number of host IPv4 addresses probed for port 8056 (55 on the last run), so it is not a fixed number. It also measures that `/server-status` and `/server-status?auto` are answered by the application's 404 JSON (P5b, R11.10).
+
 **Automated network isolation measurement:** `tests/legacy-sample/test_network_isolation.ps1` measures the isolation rather than inferring it from configuration. It checks network topology and published ports, and runs TCP reachability probes with positive controls (legacy-app → legacy-db:3306 and legacy-db → legacy-app:80 must succeed, so a probe can report "connected"). It verifies that legacy-app and legacy-db cannot open TCP connections to external IPs (1.1.1.1:53, 8.8.8.8:53, 1.1.1.1:443, 9.9.9.9:443) or resolve external names, and that port 8056 is unreachable on the host's non-loopback IPv4 addresses. It also starts a canary container on `legacy-api` and sends crafted requests (absolute URI, Host header, path tricks, override headers, CONNECT, PUT/DELETE/PATCH/OPTIONS) to confirm the proxy forwards nothing to arbitrary destinations.
 
 Paths that are not measured (UDP, ICMP, outbound IPv6, and destinations other than those above) are not considered safe. The reverse-proxy's own outbound TCP access is measured as possible and is a known residual (see Docker Network Rationale).
@@ -1160,8 +1356,9 @@ RUN echo "allow_url_fopen = Off" >> /usr/local/etc/php/php.ini \
  && echo "allow_url_include = Off" >> /usr/local/etc/php/php.ini \
  && echo "disable_functions = fsockopen,socket_create,socket_connect,curl_init,curl_exec" >> /usr/local/etc/php/php.ini
 
-# Apache configuration: disable directory listing
-RUN a2enmod rewrite
+# Apache configuration: disable directory listing; disable mod_status (R11.10)
+RUN a2enmod rewrite \
+ && a2dismod status
 
 USER appuser
 
@@ -1218,11 +1415,12 @@ The MySQL init scripts in `/docker-entrypoint-initdb.d/` are executed in filenam
 
 **For Phoenix Verifier comparisons (Compatibility Evaluation):**
 
-The Ground Truth scenario definitions include a `non_deterministic_fields` array listing JSON path expressions for fields that must not be compared by value. The Verifier applies the following rules:
+`meta.non_deterministic_fields` in the Ground Truth (`["data.order_id", "created_at"]`) applies to all scenario units; there is no per-scenario list. The following rules apply:
 
-1. Fields in `non_deterministic_fields` are compared only for presence and type (integer for IDs, ISO 8601 string for timestamps).
+1. Fields in `meta.non_deterministic_fields` are compared only for presence and type (integer for IDs, ISO 8601 string for timestamps). In the Ground Truth, an order id is checked with `{"$type": "integer"}`, which verifies the type only.
 2. All other fields are compared for exact value equality.
-3. When an `order_id` returned by the Legacy App is needed as input to a subsequent request (e.g., cancel the order just placed), the Verifier captures the ID from the response and uses it as a variable — it does not hardcode IDs in scenario definitions.
+3. When an `order_id` returned by the Legacy App is needed as input to a subsequent request (e.g., cancel the order just placed), the step records it with `capture` and later steps use it as a `{{name}}` variable — scenario definitions do not hardcode IDs.
+4. The conformance runner masks these values as `<non-deterministic>` in stored responses and also inside difference messages, so repeated runs produce byte-identical result files (R9.14).
 
 **For Auto_INCREMENT reset:**
 

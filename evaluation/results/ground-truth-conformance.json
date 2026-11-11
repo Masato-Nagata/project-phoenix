@@ -1,0 +1,3287 @@
+{
+  "schema_version": 1,
+  "kind": "ground_truth_conformance_of_legacy_app",
+  "notes": [
+    "Conformance run of the legacy app against the expected specification in the Ground Truth.",
+    "It is not the Spec_Restoration_Evaluation (AI-restored spec vs Ground Truth) and not the Compatibility_Evaluation (legacy vs modern app).",
+    "Expected specification and observed legacy behavior are recorded separately. Expected values are never changed to match observed behavior.",
+    "Non-deterministic fields are masked as <non-deterministic>. No wall-clock values are stored, so repeated runs produce identical files.",
+    "approved_divergence: the legacy behavior differs from the expected specification and a recorded human decision says the modern app follows the expected specification.",
+    "mismatch_decision_pending and specification_decision_pending: a difference, or an undetermined expectation, without an approved decision. Both fail the gate."
+  ],
+  "inputs": {
+    "ground_truth": {
+      "file": "evaluation/ground-truth/ground-truth.json",
+      "sha256_lf": "30abfbb8b7ad61683e90c7c8ab35849e13e6eb785f1c1ae24bed1544823cc15e",
+      "authoring_status": "approved"
+    },
+    "migration_decisions": {
+      "file": "evaluation/migration-decisions.json",
+      "sha256_lf": "05a8d9ef611099ae12d25354e83a49ca2315a1558517b3d764d0daa28b097c4d"
+    },
+    "legacy_sources": [
+      {
+        "path": "legacy/src/index.php",
+        "sha256_lf": "d3402544796aa703770b9acf2cf27bd3b69f7b21e4c3b31b604761b3d7fdf0ca"
+      },
+      {
+        "path": "legacy/src/db.php",
+        "sha256_lf": "3252f4215a19c02a68e88b0039a47322ac0942111f9d091507ce8eab405a230c"
+      },
+      {
+        "path": "legacy/src/products.php",
+        "sha256_lf": "23d5bce422326316e92319fdc4a093945e49d50038395b4d1a1f14df31a5d995"
+      },
+      {
+        "path": "legacy/src/orders.php",
+        "sha256_lf": "1a7f30e676218c20e13620a151d094eecd54992e6146489939df96a31b043fc6"
+      },
+      {
+        "path": "legacy/src/utils.php",
+        "sha256_lf": "63cac62aa11d89ed3b2d66532d10923646197996e4ba5a89827be3c22043c53d"
+      },
+      {
+        "path": "legacy/sql/schema.sql",
+        "sha256_lf": "c87a6914c6e6c90f46da15fb98807163b82d0192ea7153ce07c7613ad566b247"
+      },
+      {
+        "path": "legacy/sql/seed.sql",
+        "sha256_lf": "fe8a3b16d6586c29e28cc12c017897579aa5e87b997bb84a0f445135d3896b4a"
+      }
+    ],
+    "non_deterministic_fields": [
+      "data.order_id",
+      "created_at"
+    ]
+  },
+  "gate_rule": "Pass only when every scenario unit is a match without a decision record, or a mismatch covered by a decided migration decision (approved_divergence for follow_expected_specification, mismatch_replicate_legacy for replicate_legacy_behavior); the decision registry has no errors (unknown or duplicate entries, defect candidates that differ from the Ground Truth, decided entries without decided_by, decided_at or rationale, decisions on undetermined expectations); and every executed boundary case matches. A mismatch without a record, a pending decision, an undetermined expectation, a record whose unit now matches, and any execution error fail the gate. Boundary cases that were not executed are reported as not_executed and are not counted as passes.",
+  "summary": {
+    "scenario_units": 20,
+    "scenario_counts": {
+      "match": 14,
+      "approved_divergence": 6,
+      "mismatch_replicate_legacy": 0,
+      "mismatch_decision_pending": 0,
+      "specification_decision_pending": 0,
+      "unexpected_mismatch": 0,
+      "stale_registry_entry": 0,
+      "error": 0
+    },
+    "boundary_cases": {
+      "total": 11,
+      "executed": 10,
+      "counts": {
+        "match": 10,
+        "mismatch": 0,
+        "not_executed": 1
+      },
+      "note": "Cases that were not executed are not counted as passes."
+    },
+    "registry_validation": {
+      "errors": []
+    },
+    "gate": "pass"
+  },
+  "approved_divergences": {
+    "note": "Intentional incompatibilities approved by a recorded migration decision (follow_expected_specification). The Compatibility_Evaluation must report these scenarios as approved divergences: the modern app is expected to differ from the legacy response and to return the approved target. For every other scenario the legacy response stays the reference (R13.3).",
+    "count": 6,
+    "items": [
+      {
+        "scenario": "SCN-015",
+        "decision_id": "MD-001",
+        "defect_candidates": [
+          "DC-001"
+        ],
+        "decision": "follow_expected_specification",
+        "decided_by": "Masato Nagata (project owner)",
+        "legacy_response": {
+          "status": 409,
+          "error": "Insufficient stock"
+        },
+        "approved_target": {
+          "status": 400,
+          "error": "Invalid request"
+        },
+        "differences": [
+          "step s1: status: expected 400, observed 409",
+          "step s1: field 'error' expected \"Invalid request\", observed \"Insufficient stock\""
+        ]
+      },
+      {
+        "scenario": "SCN-016",
+        "decision_id": "MD-002",
+        "defect_candidates": [
+          "DC-002"
+        ],
+        "decision": "follow_expected_specification",
+        "decided_by": "Masato Nagata (project owner)",
+        "legacy_response": {
+          "status": 500,
+          "error": "Internal error"
+        },
+        "approved_target": {
+          "status": 400,
+          "error": "Invalid request"
+        },
+        "differences": [
+          "step s1: status: expected 400, observed 500",
+          "step s1: field 'error' expected \"Invalid request\", observed \"Internal error\""
+        ]
+      },
+      {
+        "scenario": "SCN-017-a",
+        "decision_id": "MD-003",
+        "defect_candidates": [
+          "DC-003"
+        ],
+        "decision": "follow_expected_specification",
+        "decided_by": "Masato Nagata (project owner)",
+        "legacy_response": {
+          "status": 201,
+          "error": null
+        },
+        "approved_target": {
+          "status": 400,
+          "error": "Invalid request"
+        },
+        "differences": [
+          "step s1: status: expected 400, observed 201",
+          "step s1: field 'success' expected false, observed true",
+          "step s1: field 'error' is missing in the response",
+          "state check c1: field 'data' expected [], observed [{\"id\":1,\"customer_id\":1,\"status\":\"pending\",\"subtotal\":12150,\"discount\":1000,\"shipping_fee\":0,\"total\":11150,\"created_at\":\"<non-deterministic>\"}]",
+          "state check c2: field 'data.stock_quantity' expected 500, observed 499"
+        ]
+      },
+      {
+        "scenario": "SCN-017-b",
+        "decision_id": "MD-004",
+        "defect_candidates": [
+          "DC-004"
+        ],
+        "decision": "follow_expected_specification",
+        "decided_by": "Masato Nagata (project owner)",
+        "legacy_response": {
+          "status": 409,
+          "error": "Insufficient stock"
+        },
+        "approved_target": {
+          "status": 400,
+          "error": "Invalid request"
+        },
+        "differences": [
+          "step s1: status: expected 400, observed 409",
+          "step s1: field 'error' expected \"Invalid request\", observed \"Insufficient stock\""
+        ]
+      },
+      {
+        "scenario": "SCN-017-c",
+        "decision_id": "MD-005",
+        "defect_candidates": [
+          "DC-006"
+        ],
+        "decision": "follow_expected_specification",
+        "decided_by": "Masato Nagata (project owner)",
+        "legacy_response": {
+          "status": 409,
+          "error": "Insufficient stock"
+        },
+        "approved_target": {
+          "status": 400,
+          "error": "Invalid request"
+        },
+        "differences": [
+          "step s1: status: expected 400, observed 409",
+          "step s1: field 'error' expected \"Invalid request\", observed \"Insufficient stock\""
+        ]
+      },
+      {
+        "scenario": "SCN-017-d",
+        "decision_id": "MD-006",
+        "defect_candidates": [
+          "DC-005"
+        ],
+        "decision": "follow_expected_specification",
+        "decided_by": "Masato Nagata (project owner)",
+        "legacy_response": {
+          "status": 201,
+          "error": null
+        },
+        "approved_target": {
+          "status": 400,
+          "error": "Invalid request"
+        },
+        "differences": [
+          "step s1: status: expected 400, observed 201",
+          "step s1: field 'success' expected false, observed true",
+          "step s1: field 'error' is missing in the response",
+          "state check c1: field 'data' expected [], observed [{\"id\":1,\"customer_id\":1,\"status\":\"pending\",\"subtotal\":12750,\"discount\":1000,\"shipping_fee\":0,\"total\":11750,\"created_at\":\"<non-deterministic>\"}]",
+          "state check c2: field 'data.stock_quantity' expected 500, observed 495"
+        ]
+      }
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "SCN-001",
+      "title": "Successful order, no discount, shipping fee applies",
+      "category": "successful_order_monetary",
+      "requirements": [
+        "R3.1",
+        "R3.2",
+        "R3.3",
+        "R3.4",
+        "R3.5",
+        "R3.6",
+        "R3.12",
+        "R4.1",
+        "R4.2",
+        "R4.4",
+        "R5.1"
+      ],
+      "defect_candidates": [],
+      "expected_specification": {
+        "derived_from": "Seed price 80 x 13 = 1040. Subtotal below 3000 gives discount 0. Net amount 1040 is below 5000, so the shipping fee is 500. Total = 1040 - 0 + 500 = 1540. Stock 1000 - 13 = 987.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": {
+            "status": 201,
+            "fields": {
+              "success": true,
+              "data.subtotal": 1040,
+              "data.discount": 0,
+              "data.shipping_fee": 500,
+              "data.total": 1540,
+              "data.order_id": {
+                "$type": "integer"
+              }
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/products/2"
+            },
+            "status": 200,
+            "fields": {
+              "data.stock_quantity": 987
+            }
+          },
+          {
+            "id": "c2",
+            "request": {
+              "method": "GET",
+              "path": "/orders"
+            },
+            "status": 200,
+            "fields": {
+              "data[*].total": [
+                1540
+              ],
+              "data[*].status": [
+                "pending"
+              ]
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 1,
+                "lines": [
+                  {
+                    "product_id": 2,
+                    "quantity": 13
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "success": true,
+                "data": {
+                  "order_id": "<non-deterministic>",
+                  "subtotal": 1040,
+                  "discount": 0,
+                  "shipping_fee": 500,
+                  "total": 1540
+                }
+              }
+            },
+            "step": "s1",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/products/2",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 2,
+                  "name": "Ballpoint Pen (Black)",
+                  "unit_price": 80,
+                  "stock_quantity": 987
+                }
+              }
+            },
+            "check": "c1"
+          },
+          {
+            "request": {
+              "method": "GET",
+              "path": "/orders",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": [
+                  {
+                    "id": 1,
+                    "customer_id": 1,
+                    "status": "pending",
+                    "subtotal": 1040,
+                    "discount": 0,
+                    "shipping_fee": 500,
+                    "total": 1540,
+                    "created_at": "<non-deterministic>"
+                  }
+                ]
+              }
+            },
+            "check": "c2"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "match",
+        "differences": [],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "not_applicable",
+        "decision_id": null,
+        "decision": null
+      },
+      "classification": "match"
+    },
+    {
+      "id": "SCN-002",
+      "title": "Successful order, highest discount tier (subtotal 10000 or more)",
+      "category": "successful_order_monetary",
+      "requirements": [
+        "R3.2",
+        "R3.3",
+        "R3.4",
+        "R3.5",
+        "R4.1",
+        "R4.2"
+      ],
+      "defect_candidates": [],
+      "expected_specification": {
+        "derived_from": "Seed price 1200 x 9 = 10800. Subtotal of 10000 or more gives discount 1000. Net amount 9800 is 5000 or more, so the shipping fee is 0. Total = 10800 - 1000 + 0 = 9800. Stock 100 - 9 = 91.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": {
+            "status": 201,
+            "fields": {
+              "success": true,
+              "data.subtotal": 10800,
+              "data.discount": 1000,
+              "data.shipping_fee": 0,
+              "data.total": 9800,
+              "data.order_id": {
+                "$type": "integer"
+              }
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/products/4"
+            },
+            "status": 200,
+            "fields": {
+              "data.stock_quantity": 91
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 1,
+                "lines": [
+                  {
+                    "product_id": 4,
+                    "quantity": 9
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "success": true,
+                "data": {
+                  "order_id": "<non-deterministic>",
+                  "subtotal": 10800,
+                  "discount": 1000,
+                  "shipping_fee": 0,
+                  "total": 9800
+                }
+              }
+            },
+            "step": "s1",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/products/4",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 4,
+                  "name": "USB Flash Drive 32GB",
+                  "unit_price": 1200,
+                  "stock_quantity": 91
+                }
+              }
+            },
+            "check": "c1"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "match",
+        "differences": [],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "not_applicable",
+        "decision_id": null,
+        "decision": null
+      },
+      "classification": "match"
+    },
+    {
+      "id": "SCN-003",
+      "title": "Successful order, middle discount tier (subtotal 3000 to 9999)",
+      "category": "successful_order_monetary",
+      "requirements": [
+        "R3.2",
+        "R3.3",
+        "R3.4",
+        "R3.5",
+        "R4.1",
+        "R4.2"
+      ],
+      "defect_candidates": [],
+      "expected_specification": {
+        "derived_from": "Seed price 150 x 20 = 3000. Subtotal 3000 gives discount 300. Net amount 2700 is below 5000, so the shipping fee is 500. Total = 3000 - 300 + 500 = 3200. Stock 500 - 20 = 480.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": {
+            "status": 201,
+            "fields": {
+              "success": true,
+              "data.subtotal": 3000,
+              "data.discount": 300,
+              "data.shipping_fee": 500,
+              "data.total": 3200,
+              "data.order_id": {
+                "$type": "integer"
+              }
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/products/1"
+            },
+            "status": 200,
+            "fields": {
+              "data.stock_quantity": 480
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 1,
+                "lines": [
+                  {
+                    "product_id": 1,
+                    "quantity": 20
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "success": true,
+                "data": {
+                  "order_id": "<non-deterministic>",
+                  "subtotal": 3000,
+                  "discount": 300,
+                  "shipping_fee": 500,
+                  "total": 3200
+                }
+              }
+            },
+            "step": "s1",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/products/1",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 1,
+                  "name": "Notebook A4",
+                  "unit_price": 150,
+                  "stock_quantity": 480
+                }
+              }
+            },
+            "check": "c1"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "match",
+        "differences": [],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "not_applicable",
+        "decision_id": null,
+        "decision": null
+      },
+      "classification": "match"
+    },
+    {
+      "id": "SCN-004",
+      "title": "Successful order, free shipping (net amount 5000 or more)",
+      "category": "successful_order_monetary",
+      "requirements": [
+        "R3.2",
+        "R3.3",
+        "R3.4",
+        "R3.5",
+        "R4.1",
+        "R4.2"
+      ],
+      "defect_candidates": [],
+      "expected_specification": {
+        "derived_from": "Seed price 800 x 7 = 5600. Subtotal 5600 gives discount 300. Net amount 5300 is 5000 or more, so the shipping fee is 0. Total = 5600 - 300 + 0 = 5300. Stock 50 - 7 = 43.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": {
+            "status": 201,
+            "fields": {
+              "success": true,
+              "data.subtotal": 5600,
+              "data.discount": 300,
+              "data.shipping_fee": 0,
+              "data.total": 5300,
+              "data.order_id": {
+                "$type": "integer"
+              }
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/products/5"
+            },
+            "status": 200,
+            "fields": {
+              "data.stock_quantity": 43
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 1,
+                "lines": [
+                  {
+                    "product_id": 5,
+                    "quantity": 7
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "success": true,
+                "data": {
+                  "order_id": "<non-deterministic>",
+                  "subtotal": 5600,
+                  "discount": 300,
+                  "shipping_fee": 0,
+                  "total": 5300
+                }
+              }
+            },
+            "step": "s1",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/products/5",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 5,
+                  "name": "Desk Organizer",
+                  "unit_price": 800,
+                  "stock_quantity": 43
+                }
+              }
+            },
+            "check": "c1"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "match",
+        "differences": [],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "not_applicable",
+        "decision_id": null,
+        "decision": null
+      },
+      "classification": "match"
+    },
+    {
+      "id": "SCN-005",
+      "title": "Order rejected: subtotal below the minimum order value",
+      "category": "rejection_minimum_order_value",
+      "requirements": [
+        "R3.11",
+        "R4.3"
+      ],
+      "defect_candidates": [],
+      "expected_specification": {
+        "derived_from": "Seed price 80 x 12 = 960, which is below the minimum of 1000. No order is created and stock is unchanged.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": {
+            "status": 400,
+            "fields": {
+              "success": false,
+              "error": "Minimum order value not met"
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/orders"
+            },
+            "status": 200,
+            "fields": {
+              "data": []
+            }
+          },
+          {
+            "id": "c2",
+            "request": {
+              "method": "GET",
+              "path": "/products/2"
+            },
+            "status": 200,
+            "fields": {
+              "data.stock_quantity": 1000
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 1,
+                "lines": [
+                  {
+                    "product_id": 2,
+                    "quantity": 12
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 400,
+              "body": {
+                "success": false,
+                "error": "Minimum order value not met"
+              }
+            },
+            "step": "s1",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/orders",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": []
+              }
+            },
+            "check": "c1"
+          },
+          {
+            "request": {
+              "method": "GET",
+              "path": "/products/2",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 2,
+                  "name": "Ballpoint Pen (Black)",
+                  "unit_price": 80,
+                  "stock_quantity": 1000
+                }
+              }
+            },
+            "check": "c2"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "match",
+        "differences": [],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "not_applicable",
+        "decision_id": null,
+        "decision": null
+      },
+      "classification": "match"
+    },
+    {
+      "id": "SCN-006",
+      "title": "Order rejected: insufficient stock",
+      "category": "rejection_insufficient_stock",
+      "requirements": [
+        "R3.9",
+        "R5.2",
+        "R5.4"
+      ],
+      "defect_candidates": [],
+      "expected_specification": {
+        "derived_from": "Product 5 has stock 50 and 51 are requested. The request is rejected, product 5 is identified with its current stock (available 50) and the requested quantity (requested 51), no order is created and stock is unchanged. available and requested were added to the specification by the project owner approval (R3.9, R5.2); they were not copied from legacy output.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": {
+            "status": 409,
+            "fields": {
+              "success": false,
+              "error": "Insufficient stock",
+              "details.products[*].product_id": [
+                5
+              ],
+              "details.products[*].available": [
+                50
+              ],
+              "details.products[*].requested": [
+                51
+              ]
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/orders"
+            },
+            "status": 200,
+            "fields": {
+              "data": []
+            }
+          },
+          {
+            "id": "c2",
+            "request": {
+              "method": "GET",
+              "path": "/products/5"
+            },
+            "status": 200,
+            "fields": {
+              "data.stock_quantity": 50
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 1,
+                "lines": [
+                  {
+                    "product_id": 5,
+                    "quantity": 51
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 409,
+              "body": {
+                "success": false,
+                "error": "Insufficient stock",
+                "details": {
+                  "products": [
+                    {
+                      "product_id": 5,
+                      "available": 50,
+                      "requested": 51
+                    }
+                  ]
+                }
+              }
+            },
+            "step": "s1",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/orders",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": []
+              }
+            },
+            "check": "c1"
+          },
+          {
+            "request": {
+              "method": "GET",
+              "path": "/products/5",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 5,
+                  "name": "Desk Organizer",
+                  "unit_price": 800,
+                  "stock_quantity": 50
+                }
+              }
+            },
+            "check": "c2"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "match",
+        "differences": [],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "not_applicable",
+        "decision_id": null,
+        "decision": null
+      },
+      "classification": "match"
+    },
+    {
+      "id": "SCN-007",
+      "title": "Order rejected: unknown product",
+      "category": "rejection_missing_product",
+      "requirements": [
+        "R3.8"
+      ],
+      "defect_candidates": [],
+      "expected_specification": {
+        "derived_from": "Product 999 does not exist. The request is rejected, the unrecognised identifier is reported, and no order is created.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": {
+            "status": 400,
+            "fields": {
+              "success": false,
+              "error": "Unknown products",
+              "details.product_ids": [
+                999
+              ]
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/orders"
+            },
+            "status": 200,
+            "fields": {
+              "data": []
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 1,
+                "lines": [
+                  {
+                    "product_id": 999,
+                    "quantity": 1
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 400,
+              "body": {
+                "success": false,
+                "error": "Unknown products",
+                "details": {
+                  "product_ids": [
+                    999
+                  ]
+                }
+              }
+            },
+            "step": "s1",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/orders",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": []
+              }
+            },
+            "check": "c1"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "match",
+        "differences": [],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "not_applicable",
+        "decision_id": null,
+        "decision": null
+      },
+      "classification": "match"
+    },
+    {
+      "id": "SCN-008",
+      "title": "Order rejected: unknown customer",
+      "category": "rejection_missing_customer",
+      "requirements": [
+        "R2.5",
+        "R3.7"
+      ],
+      "defect_candidates": [],
+      "expected_specification": {
+        "derived_from": "Customer 999 is not in the customer master. The request is rejected, no order is created and stock is unchanged.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": {
+            "status": 404,
+            "fields": {
+              "success": false,
+              "error": "Customer not found"
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/orders"
+            },
+            "status": 200,
+            "fields": {
+              "data": []
+            }
+          },
+          {
+            "id": "c2",
+            "request": {
+              "method": "GET",
+              "path": "/products/1"
+            },
+            "status": 200,
+            "fields": {
+              "data.stock_quantity": 500
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 999,
+                "lines": [
+                  {
+                    "product_id": 1,
+                    "quantity": 7
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 404,
+              "body": {
+                "success": false,
+                "error": "Customer not found"
+              }
+            },
+            "step": "s1",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/orders",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": []
+              }
+            },
+            "check": "c1"
+          },
+          {
+            "request": {
+              "method": "GET",
+              "path": "/products/1",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 1,
+                  "name": "Notebook A4",
+                  "unit_price": 150,
+                  "stock_quantity": 500
+                }
+              }
+            },
+            "check": "c2"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "match",
+        "differences": [],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "not_applicable",
+        "decision_id": null,
+        "decision": null
+      },
+      "classification": "match"
+    },
+    {
+      "id": "SCN-009",
+      "title": "Cancellation restores the reserved stock",
+      "category": "cancellation_with_stock_restoration",
+      "requirements": [
+        "R5.5",
+        "R6.1",
+        "R6.6"
+      ],
+      "defect_candidates": [],
+      "expected_specification": {
+        "derived_from": "Product 5 stock is 50. An order for 3 reserves 3 (stock 47). Cancelling restores 3, so the confirmation reports product 5 with stock 50 and the order status becomes cancelled.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s2": {
+            "status": 200,
+            "fields": {
+              "success": true,
+              "data.order_id": "{{order_id}}",
+              "data.restored_stock": [
+                {
+                  "product_id": 5,
+                  "stock_quantity": 50
+                }
+              ]
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/products/5"
+            },
+            "status": 200,
+            "fields": {
+              "data.stock_quantity": 50
+            }
+          },
+          {
+            "id": "c2",
+            "request": {
+              "method": "GET",
+              "path": "/orders/{{order_id}}"
+            },
+            "status": 200,
+            "fields": {
+              "data.status": "cancelled"
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 1,
+                "lines": [
+                  {
+                    "product_id": 5,
+                    "quantity": 3
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "success": true,
+                "data": {
+                  "order_id": "<non-deterministic>",
+                  "subtotal": 2400,
+                  "discount": 0,
+                  "shipping_fee": 500,
+                  "total": 2900
+                }
+              }
+            },
+            "step": "s1",
+            "role": "setup"
+          },
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders/1/cancel",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "order_id": "<non-deterministic>",
+                  "restored_stock": [
+                    {
+                      "product_id": 5,
+                      "stock_quantity": 50
+                    }
+                  ]
+                }
+              }
+            },
+            "step": "s2",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/products/5",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 5,
+                  "name": "Desk Organizer",
+                  "unit_price": 800,
+                  "stock_quantity": 50
+                }
+              }
+            },
+            "check": "c1"
+          },
+          {
+            "request": {
+              "method": "GET",
+              "path": "/orders/1",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 1,
+                  "customer_id": 1,
+                  "status": "cancelled",
+                  "subtotal": 2400,
+                  "discount": 0,
+                  "shipping_fee": 500,
+                  "total": 2900,
+                  "created_at": "<non-deterministic>",
+                  "lines": [
+                    {
+                      "product_id": 5,
+                      "quantity": 3,
+                      "unit_price": 800
+                    }
+                  ]
+                }
+              }
+            },
+            "check": "c2"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "match",
+        "differences": [],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "not_applicable",
+        "decision_id": null,
+        "decision": null
+      },
+      "classification": "match"
+    },
+    {
+      "id": "SCN-010",
+      "title": "Cancellation rejected: order is already cancelled",
+      "category": "cancellation_rejected",
+      "requirements": [
+        "R6.3"
+      ],
+      "defect_candidates": [],
+      "expected_specification": {
+        "derived_from": "A second cancellation of the same order is rejected as already cancelled and changes no data. Stock stays at 50.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s3": {
+            "status": 409,
+            "fields": {
+              "success": false,
+              "error": "Order is already cancelled"
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/products/5"
+            },
+            "status": 200,
+            "fields": {
+              "data.stock_quantity": 50
+            }
+          },
+          {
+            "id": "c2",
+            "request": {
+              "method": "GET",
+              "path": "/orders/{{order_id}}"
+            },
+            "status": 200,
+            "fields": {
+              "data.status": "cancelled"
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 1,
+                "lines": [
+                  {
+                    "product_id": 5,
+                    "quantity": 3
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "success": true,
+                "data": {
+                  "order_id": "<non-deterministic>",
+                  "subtotal": 2400,
+                  "discount": 0,
+                  "shipping_fee": 500,
+                  "total": 2900
+                }
+              }
+            },
+            "step": "s1",
+            "role": "setup"
+          },
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders/1/cancel",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "order_id": "<non-deterministic>",
+                  "restored_stock": [
+                    {
+                      "product_id": 5,
+                      "stock_quantity": 50
+                    }
+                  ]
+                }
+              }
+            },
+            "step": "s2",
+            "role": "setup"
+          },
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders/1/cancel",
+              "body": null
+            },
+            "response": {
+              "status": 409,
+              "body": {
+                "success": false,
+                "error": "Order is already cancelled"
+              }
+            },
+            "step": "s3",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/products/5",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 5,
+                  "name": "Desk Organizer",
+                  "unit_price": 800,
+                  "stock_quantity": 50
+                }
+              }
+            },
+            "check": "c1"
+          },
+          {
+            "request": {
+              "method": "GET",
+              "path": "/orders/1",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 1,
+                  "customer_id": 1,
+                  "status": "cancelled",
+                  "subtotal": 2400,
+                  "discount": 0,
+                  "shipping_fee": 500,
+                  "total": 2900,
+                  "created_at": "<non-deterministic>",
+                  "lines": [
+                    {
+                      "product_id": 5,
+                      "quantity": 3,
+                      "unit_price": 800
+                    }
+                  ]
+                }
+              }
+            },
+            "check": "c2"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "match",
+        "differences": [],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "not_applicable",
+        "decision_id": null,
+        "decision": null
+      },
+      "classification": "match"
+    },
+    {
+      "id": "SCN-011",
+      "title": "Cancellation rejected: order does not exist",
+      "category": "cancellation_rejected",
+      "requirements": [
+        "R6.2"
+      ],
+      "defect_candidates": [],
+      "expected_specification": {
+        "derived_from": "Order 99999 does not exist. The request is rejected as not found and changes no data.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": {
+            "status": 404,
+            "fields": {
+              "success": false,
+              "error": "Order not found"
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/orders"
+            },
+            "status": 200,
+            "fields": {
+              "data": []
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders/99999/cancel",
+              "body": null
+            },
+            "response": {
+              "status": 404,
+              "body": {
+                "success": false,
+                "error": "Order not found"
+              }
+            },
+            "step": "s1",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/orders",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": []
+              }
+            },
+            "check": "c1"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "match",
+        "differences": [],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "not_applicable",
+        "decision_id": null,
+        "decision": null
+      },
+      "classification": "match"
+    },
+    {
+      "id": "SCN-012",
+      "title": "Reset is repeatable and restores the seeded state",
+      "category": "reset_idempotency",
+      "requirements": [
+        "R8.4",
+        "R8.5",
+        "R12.6",
+        "R12.7"
+      ],
+      "defect_candidates": [],
+      "expected_specification": {
+        "derived_from": "The first reset removes the 1 order and 1 order line and restores the 5 seed products. The second reset has nothing left to delete. After each reset the state is the seeded state.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s2": {
+            "status": 200,
+            "fields": {
+              "success": true,
+              "data.orders_deleted": 1,
+              "data.order_lines_deleted": 1,
+              "data.products_restored": 5
+            }
+          },
+          "s3": {
+            "status": 200,
+            "fields": {
+              "success": true,
+              "data.orders_deleted": 0,
+              "data.order_lines_deleted": 0,
+              "data.products_restored": 5
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/orders"
+            },
+            "status": 200,
+            "fields": {
+              "data": []
+            }
+          },
+          {
+            "id": "c2",
+            "request": {
+              "method": "GET",
+              "path": "/products"
+            },
+            "status": 200,
+            "fields": {
+              "data[*].stock_quantity": [
+                500,
+                1000,
+                300,
+                100,
+                50
+              ],
+              "data[*].unit_price": [
+                150,
+                80,
+                200,
+                1200,
+                800
+              ]
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 1,
+                "lines": [
+                  {
+                    "product_id": 1,
+                    "quantity": 20
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "success": true,
+                "data": {
+                  "order_id": "<non-deterministic>",
+                  "subtotal": 3000,
+                  "discount": 300,
+                  "shipping_fee": 500,
+                  "total": 3200
+                }
+              }
+            },
+            "step": "s1",
+            "role": "setup"
+          },
+          {
+            "request": {
+              "method": "POST",
+              "path": "/reset",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "orders_deleted": 1,
+                  "order_lines_deleted": 1,
+                  "products_restored": 5
+                }
+              }
+            },
+            "step": "s2",
+            "role": "action"
+          },
+          {
+            "request": {
+              "method": "POST",
+              "path": "/reset",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "orders_deleted": 0,
+                  "order_lines_deleted": 0,
+                  "products_restored": 5
+                }
+              }
+            },
+            "step": "s3",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/orders",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": []
+              }
+            },
+            "check": "c1"
+          },
+          {
+            "request": {
+              "method": "GET",
+              "path": "/products",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": [
+                  {
+                    "id": 1,
+                    "name": "Notebook A4",
+                    "unit_price": 150,
+                    "stock_quantity": 500
+                  },
+                  {
+                    "id": 2,
+                    "name": "Ballpoint Pen (Black)",
+                    "unit_price": 80,
+                    "stock_quantity": 1000
+                  },
+                  {
+                    "id": 3,
+                    "name": "Sticky Notes (Pack)",
+                    "unit_price": 200,
+                    "stock_quantity": 300
+                  },
+                  {
+                    "id": 4,
+                    "name": "USB Flash Drive 32GB",
+                    "unit_price": 1200,
+                    "stock_quantity": 100
+                  },
+                  {
+                    "id": 5,
+                    "name": "Desk Organizer",
+                    "unit_price": 800,
+                    "stock_quantity": 50
+                  }
+                ]
+              }
+            },
+            "check": "c2"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "match",
+        "differences": [],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "not_applicable",
+        "decision_id": null,
+        "decision": null
+      },
+      "classification": "match"
+    },
+    {
+      "id": "SCN-013",
+      "title": "Ground Truth is not reachable through the application's HTTP interface",
+      "category": "ground_truth_isolation",
+      "requirements": [
+        "R9.1",
+        "R9.4"
+      ],
+      "defect_candidates": [],
+      "expected_specification": {
+        "derived_from": "The evaluation directory is outside the document root and is not mounted into any container, so both paths must be answered as not found and must never return the canary string.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": {
+            "status": 404,
+            "must_not_contain": [
+              "{{canary}}"
+            ]
+          },
+          "s2": {
+            "status": 404,
+            "must_not_contain": [
+              "{{canary}}"
+            ]
+          }
+        },
+        "state_checks": []
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/evaluation/ground-truth/ground-truth.json",
+              "body": null
+            },
+            "response": {
+              "status": 404,
+              "body": {
+                "success": false,
+                "error": "Not Found"
+              }
+            },
+            "step": "s1",
+            "role": "action"
+          },
+          {
+            "request": {
+              "method": "GET",
+              "path": "/evaluation",
+              "body": null
+            },
+            "response": {
+              "status": 404,
+              "body": {
+                "success": false,
+                "error": "Not Found"
+              }
+            },
+            "step": "s2",
+            "role": "action"
+          }
+        ],
+        "state_checks": []
+      },
+      "comparison": {
+        "result": "match",
+        "differences": [],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "not_applicable",
+        "decision_id": null,
+        "decision": null
+      },
+      "classification": "match"
+    },
+    {
+      "id": "SCN-014",
+      "title": "Cancellation rejected: order is shipped (non-cancellable)",
+      "category": "cancellation_rejected",
+      "requirements": [
+        "R6.4",
+        "R6.5"
+      ],
+      "defect_candidates": [],
+      "expected_specification": {
+        "derived_from": "A shipped order is in a non-cancellable status, so cancellation is rejected and no data changes. Stock stays at 47 (50 - 3) and the status stays shipped.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s3": {
+            "status": 409,
+            "fields": {
+              "success": false,
+              "error": "Order cannot be cancelled"
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/products/5"
+            },
+            "status": 200,
+            "fields": {
+              "data.stock_quantity": 47
+            }
+          },
+          {
+            "id": "c2",
+            "request": {
+              "method": "GET",
+              "path": "/orders/{{order_id}}"
+            },
+            "status": 200,
+            "fields": {
+              "data.status": "shipped"
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 1,
+                "lines": [
+                  {
+                    "product_id": 5,
+                    "quantity": 3
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "success": true,
+                "data": {
+                  "order_id": "<non-deterministic>",
+                  "subtotal": 2400,
+                  "discount": 0,
+                  "shipping_fee": 500,
+                  "total": 2900
+                }
+              }
+            },
+            "step": "s1",
+            "role": "setup"
+          },
+          {
+            "request": {
+              "method": "POST",
+              "path": "/test/orders/1/ship",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "order_id": "<non-deterministic>",
+                  "status": "shipped"
+                }
+              }
+            },
+            "step": "s2",
+            "role": "setup"
+          },
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders/1/cancel",
+              "body": null
+            },
+            "response": {
+              "status": 409,
+              "body": {
+                "success": false,
+                "error": "Order cannot be cancelled"
+              }
+            },
+            "step": "s3",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/products/5",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 5,
+                  "name": "Desk Organizer",
+                  "unit_price": 800,
+                  "stock_quantity": 47
+                }
+              }
+            },
+            "check": "c1"
+          },
+          {
+            "request": {
+              "method": "GET",
+              "path": "/orders/1",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 1,
+                  "customer_id": 1,
+                  "status": "shipped",
+                  "subtotal": 2400,
+                  "discount": 0,
+                  "shipping_fee": 500,
+                  "total": 2900,
+                  "created_at": "<non-deterministic>",
+                  "lines": [
+                    {
+                      "product_id": 5,
+                      "quantity": 3,
+                      "unit_price": 800
+                    }
+                  ]
+                }
+              }
+            },
+            "check": "c2"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "match",
+        "differences": [],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "not_applicable",
+        "decision_id": null,
+        "decision": null
+      },
+      "classification": "match"
+    },
+    {
+      "id": "SCN-015",
+      "title": "Order rejected: quantity zero",
+      "category": "rejection_invalid_quantity",
+      "requirements": [
+        "R3.1",
+        "R3.13"
+      ],
+      "defect_candidates": [
+        "DC-001"
+      ],
+      "expected_specification": {
+        "derived_from": "R3.13 (approved): only a JSON positive integer is a valid quantity; a request with any invalid quantity is rejected as a whole with 400 Invalid request, with no order and no stock change.",
+        "response_code_source": "human_approved",
+        "step_expectations": {
+          "s1": {
+            "status": 400,
+            "fields": {
+              "success": false,
+              "error": "Invalid request"
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/orders"
+            },
+            "status": 200,
+            "fields": {
+              "data": []
+            }
+          },
+          {
+            "id": "c2",
+            "request": {
+              "method": "GET",
+              "path": "/products/1"
+            },
+            "status": 200,
+            "fields": {
+              "data.stock_quantity": 500
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 1,
+                "lines": [
+                  {
+                    "product_id": 4,
+                    "quantity": 10
+                  },
+                  {
+                    "product_id": 1,
+                    "quantity": 0
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 409,
+              "body": {
+                "success": false,
+                "error": "Insufficient stock"
+              }
+            },
+            "step": "s1",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/orders",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": []
+              }
+            },
+            "check": "c1"
+          },
+          {
+            "request": {
+              "method": "GET",
+              "path": "/products/1",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 1,
+                  "name": "Notebook A4",
+                  "unit_price": 150,
+                  "stock_quantity": 500
+                }
+              }
+            },
+            "check": "c2"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "mismatch",
+        "differences": [
+          "step s1: status: expected 400, observed 409",
+          "step s1: field 'error' expected \"Invalid request\", observed \"Insufficient stock\""
+        ],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "decided",
+        "decision_id": "MD-001",
+        "decision": "follow_expected_specification",
+        "kind": "migration_decision",
+        "decided_by": "Masato Nagata (project owner)"
+      },
+      "classification": "approved_divergence"
+    },
+    {
+      "id": "SCN-016",
+      "title": "Order rejected: negative quantity",
+      "category": "rejection_invalid_quantity",
+      "requirements": [
+        "R3.1",
+        "R3.13"
+      ],
+      "defect_candidates": [
+        "DC-002"
+      ],
+      "expected_specification": {
+        "derived_from": "R3.13 (approved): only a JSON positive integer is a valid quantity; a request with any invalid quantity is rejected as a whole with 400 Invalid request, with no order and no stock change.",
+        "response_code_source": "human_approved",
+        "step_expectations": {
+          "s1": {
+            "status": 400,
+            "fields": {
+              "success": false,
+              "error": "Invalid request"
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/orders"
+            },
+            "status": 200,
+            "fields": {
+              "data": []
+            }
+          },
+          {
+            "id": "c2",
+            "request": {
+              "method": "GET",
+              "path": "/products/1"
+            },
+            "status": 200,
+            "fields": {
+              "data.stock_quantity": 500
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 1,
+                "lines": [
+                  {
+                    "product_id": 4,
+                    "quantity": 10
+                  },
+                  {
+                    "product_id": 1,
+                    "quantity": -5
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 500,
+              "body": {
+                "success": false,
+                "error": "Internal error"
+              }
+            },
+            "step": "s1",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/orders",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": []
+              }
+            },
+            "check": "c1"
+          },
+          {
+            "request": {
+              "method": "GET",
+              "path": "/products/1",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 1,
+                  "name": "Notebook A4",
+                  "unit_price": 150,
+                  "stock_quantity": 500
+                }
+              }
+            },
+            "check": "c2"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "mismatch",
+        "differences": [
+          "step s1: status: expected 400, observed 500",
+          "step s1: field 'error' expected \"Invalid request\", observed \"Internal error\""
+        ],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "decided",
+        "decision_id": "MD-002",
+        "decision": "follow_expected_specification",
+        "kind": "migration_decision",
+        "decided_by": "Masato Nagata (project owner)"
+      },
+      "classification": "approved_divergence"
+    },
+    {
+      "id": "SCN-017-a",
+      "title": "Non-integer quantity 1.5",
+      "category": "rejection_invalid_quantity",
+      "requirements": [
+        "R3.1",
+        "R3.13"
+      ],
+      "defect_candidates": [
+        "DC-003"
+      ],
+      "expected_specification": {
+        "derived_from": "R3.13 (approved): only a JSON positive integer is a valid quantity; a request with any invalid quantity is rejected as a whole with 400 Invalid request, with no order and no stock change.",
+        "response_code_source": "human_approved",
+        "step_expectations": {
+          "s1": {
+            "status": 400,
+            "fields": {
+              "success": false,
+              "error": "Invalid request"
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/orders"
+            },
+            "status": 200,
+            "fields": {
+              "data": []
+            }
+          },
+          {
+            "id": "c2",
+            "request": {
+              "method": "GET",
+              "path": "/products/1"
+            },
+            "status": 200,
+            "fields": {
+              "data.stock_quantity": 500
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 1,
+                "lines": [
+                  {
+                    "product_id": 4,
+                    "quantity": 10
+                  },
+                  {
+                    "product_id": 1,
+                    "quantity": 1.5
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "success": true,
+                "data": {
+                  "order_id": "<non-deterministic>",
+                  "subtotal": 12150,
+                  "discount": 1000,
+                  "shipping_fee": 0,
+                  "total": 11150
+                }
+              }
+            },
+            "step": "s1",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/orders",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": [
+                  {
+                    "id": 1,
+                    "customer_id": 1,
+                    "status": "pending",
+                    "subtotal": 12150,
+                    "discount": 1000,
+                    "shipping_fee": 0,
+                    "total": 11150,
+                    "created_at": "<non-deterministic>"
+                  }
+                ]
+              }
+            },
+            "check": "c1"
+          },
+          {
+            "request": {
+              "method": "GET",
+              "path": "/products/1",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 1,
+                  "name": "Notebook A4",
+                  "unit_price": 150,
+                  "stock_quantity": 499
+                }
+              }
+            },
+            "check": "c2"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "mismatch",
+        "differences": [
+          "step s1: status: expected 400, observed 201",
+          "step s1: field 'success' expected false, observed true",
+          "step s1: field 'error' is missing in the response",
+          "state check c1: field 'data' expected [], observed [{\"id\":1,\"customer_id\":1,\"status\":\"pending\",\"subtotal\":12150,\"discount\":1000,\"shipping_fee\":0,\"total\":11150,\"created_at\":\"<non-deterministic>\"}]",
+          "state check c2: field 'data.stock_quantity' expected 500, observed 499"
+        ],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "decided",
+        "decision_id": "MD-003",
+        "decision": "follow_expected_specification",
+        "kind": "migration_decision",
+        "decided_by": "Masato Nagata (project owner)"
+      },
+      "classification": "approved_divergence"
+    },
+    {
+      "id": "SCN-017-b",
+      "title": "Non-numeric quantity \"abc\"",
+      "category": "rejection_invalid_quantity",
+      "requirements": [
+        "R3.1",
+        "R3.13"
+      ],
+      "defect_candidates": [
+        "DC-004"
+      ],
+      "expected_specification": {
+        "derived_from": "R3.13 (approved): only a JSON positive integer is a valid quantity; a request with any invalid quantity is rejected as a whole with 400 Invalid request, with no order and no stock change.",
+        "response_code_source": "human_approved",
+        "step_expectations": {
+          "s1": {
+            "status": 400,
+            "fields": {
+              "success": false,
+              "error": "Invalid request"
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/orders"
+            },
+            "status": 200,
+            "fields": {
+              "data": []
+            }
+          },
+          {
+            "id": "c2",
+            "request": {
+              "method": "GET",
+              "path": "/products/1"
+            },
+            "status": 200,
+            "fields": {
+              "data.stock_quantity": 500
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 1,
+                "lines": [
+                  {
+                    "product_id": 4,
+                    "quantity": 10
+                  },
+                  {
+                    "product_id": 1,
+                    "quantity": "abc"
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 409,
+              "body": {
+                "success": false,
+                "error": "Insufficient stock"
+              }
+            },
+            "step": "s1",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/orders",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": []
+              }
+            },
+            "check": "c1"
+          },
+          {
+            "request": {
+              "method": "GET",
+              "path": "/products/1",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 1,
+                  "name": "Notebook A4",
+                  "unit_price": 150,
+                  "stock_quantity": 500
+                }
+              }
+            },
+            "check": "c2"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "mismatch",
+        "differences": [
+          "step s1: status: expected 400, observed 409",
+          "step s1: field 'error' expected \"Invalid request\", observed \"Insufficient stock\""
+        ],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "decided",
+        "decision_id": "MD-004",
+        "decision": "follow_expected_specification",
+        "kind": "migration_decision",
+        "decided_by": "Masato Nagata (project owner)"
+      },
+      "classification": "approved_divergence"
+    },
+    {
+      "id": "SCN-017-c",
+      "title": "Quantity missing on one line",
+      "category": "rejection_invalid_quantity",
+      "requirements": [
+        "R3.1",
+        "R3.13"
+      ],
+      "defect_candidates": [
+        "DC-006"
+      ],
+      "expected_specification": {
+        "derived_from": "R3.13 (approved): a missing quantity property is invalid, so the request is rejected as a whole with 400 Invalid request, with no order and no stock change.",
+        "response_code_source": "human_approved",
+        "step_expectations": {
+          "s1": {
+            "status": 400,
+            "fields": {
+              "success": false,
+              "error": "Invalid request"
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/orders"
+            },
+            "status": 200,
+            "fields": {
+              "data": []
+            }
+          },
+          {
+            "id": "c2",
+            "request": {
+              "method": "GET",
+              "path": "/products/1"
+            },
+            "status": 200,
+            "fields": {
+              "data.stock_quantity": 500
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 1,
+                "lines": [
+                  {
+                    "product_id": 4,
+                    "quantity": 10
+                  },
+                  {
+                    "product_id": 1
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 409,
+              "body": {
+                "success": false,
+                "error": "Insufficient stock"
+              }
+            },
+            "step": "s1",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/orders",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": []
+              }
+            },
+            "check": "c1"
+          },
+          {
+            "request": {
+              "method": "GET",
+              "path": "/products/1",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 1,
+                  "name": "Notebook A4",
+                  "unit_price": 150,
+                  "stock_quantity": 500
+                }
+              }
+            },
+            "check": "c2"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "mismatch",
+        "differences": [
+          "step s1: status: expected 400, observed 409",
+          "step s1: field 'error' expected \"Invalid request\", observed \"Insufficient stock\""
+        ],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "decided",
+        "decision_id": "MD-005",
+        "decision": "follow_expected_specification",
+        "kind": "migration_decision",
+        "decided_by": "Masato Nagata (project owner)"
+      },
+      "classification": "approved_divergence"
+    },
+    {
+      "id": "SCN-017-d",
+      "title": "Numeric string quantity \"5\"",
+      "category": "rejection_invalid_quantity",
+      "requirements": [
+        "R3.1",
+        "R3.13"
+      ],
+      "defect_candidates": [
+        "DC-005"
+      ],
+      "expected_specification": {
+        "derived_from": "R3.13 (approved): only a JSON integer is accepted; a numeric string such as \"5\" is not converted and is invalid, so the request is rejected as a whole with 400 Invalid request, with no order and no stock change.",
+        "response_code_source": "human_approved",
+        "step_expectations": {
+          "s1": {
+            "status": 400,
+            "fields": {
+              "success": false,
+              "error": "Invalid request"
+            }
+          }
+        },
+        "state_checks": [
+          {
+            "id": "c1",
+            "request": {
+              "method": "GET",
+              "path": "/orders"
+            },
+            "status": 200,
+            "fields": {
+              "data": []
+            }
+          },
+          {
+            "id": "c2",
+            "request": {
+              "method": "GET",
+              "path": "/products/1"
+            },
+            "status": 200,
+            "fields": {
+              "data.stock_quantity": 500
+            }
+          }
+        ]
+      },
+      "observed_legacy_behavior": {
+        "steps": [
+          {
+            "request": {
+              "method": "POST",
+              "path": "/orders",
+              "body": {
+                "customer_id": 1,
+                "lines": [
+                  {
+                    "product_id": 4,
+                    "quantity": 10
+                  },
+                  {
+                    "product_id": 1,
+                    "quantity": "5"
+                  }
+                ]
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "success": true,
+                "data": {
+                  "order_id": "<non-deterministic>",
+                  "subtotal": 12750,
+                  "discount": 1000,
+                  "shipping_fee": 0,
+                  "total": 11750
+                }
+              }
+            },
+            "step": "s1",
+            "role": "action"
+          }
+        ],
+        "state_checks": [
+          {
+            "request": {
+              "method": "GET",
+              "path": "/orders",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": [
+                  {
+                    "id": 1,
+                    "customer_id": 1,
+                    "status": "pending",
+                    "subtotal": 12750,
+                    "discount": 1000,
+                    "shipping_fee": 0,
+                    "total": 11750,
+                    "created_at": "<non-deterministic>"
+                  }
+                ]
+              }
+            },
+            "check": "c1"
+          },
+          {
+            "request": {
+              "method": "GET",
+              "path": "/products/1",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "success": true,
+                "data": {
+                  "id": 1,
+                  "name": "Notebook A4",
+                  "unit_price": 150,
+                  "stock_quantity": 495
+                }
+              }
+            },
+            "check": "c2"
+          }
+        ]
+      },
+      "comparison": {
+        "result": "mismatch",
+        "differences": [
+          "step s1: status: expected 400, observed 201",
+          "step s1: field 'success' expected false, observed true",
+          "step s1: field 'error' is missing in the response",
+          "state check c1: field 'data' expected [], observed [{\"id\":1,\"customer_id\":1,\"status\":\"pending\",\"subtotal\":12750,\"discount\":1000,\"shipping_fee\":0,\"total\":11750,\"created_at\":\"<non-deterministic>\"}]",
+          "state check c2: field 'data.stock_quantity' expected 500, observed 495"
+        ],
+        "not_comparable_reason": null
+      },
+      "migration_decision": {
+        "status": "decided",
+        "decision_id": "MD-006",
+        "decision": "follow_expected_specification",
+        "kind": "migration_decision",
+        "decided_by": "Masato Nagata (project owner)"
+      },
+      "classification": "approved_divergence"
+    }
+  ],
+  "boundary_cases": [
+    {
+      "id": "BC-001",
+      "subtotal": 0,
+      "expected": {
+        "id": "BC-001",
+        "subtotal": 0,
+        "order_accepted": false,
+        "expected_discount": 0,
+        "expected_shipping_fee": 500,
+        "execution": "not_executed",
+        "reason": "A zero subtotal cannot be produced by a valid order line. Every product price is at least 1 yen (legacy/sql/schema.sql declares CHECK (unit_price BETWEEN 1 AND 9999999); MySQL 5.7 parses but does not enforce CHECK, so this is the declared domain) and every quantity must be a positive integer (R3.13), so each valid line contributes at least 1 yen and any valid order has a subtotal of at least 1. A subtotal of 0 would need quantity 0, which is itself invalid input (DC-001, SCN-015), an empty line list, which is rejected as an invalid request (R3.10), or a 0-yen product outside the declared price domain; none of these tests the rule. The values are the rule outputs only. Reason approved by the project owner; the CHECK constraint is declared but not enforced by MySQL 5.7."
+      },
+      "observed": null,
+      "comparison": {
+        "result": "not_executed",
+        "differences": [],
+        "not_executed_reason": "A zero subtotal cannot be produced by a valid order line. Every product price is at least 1 yen (legacy/sql/schema.sql declares CHECK (unit_price BETWEEN 1 AND 9999999); MySQL 5.7 parses but does not enforce CHECK, so this is the declared domain) and every quantity must be a positive integer (R3.13), so each valid line contributes at least 1 yen and any valid order has a subtotal of at least 1. A subtotal of 0 would need quantity 0, which is itself invalid input (DC-001, SCN-015), an empty line list, which is rejected as an invalid request (R3.10), or a 0-yen product outside the declared price domain; none of these tests the rule. The values are the rule outputs only. Reason approved by the project owner; the CHECK constraint is declared but not enforced by MySQL 5.7."
+      }
+    },
+    {
+      "id": "BC-002",
+      "subtotal": 999,
+      "expected": {
+        "id": "BC-002",
+        "subtotal": 999,
+        "order_accepted": false,
+        "expected_discount": 0,
+        "expected_shipping_fee": 500,
+        "expected_rejection": {
+          "status": 400,
+          "error": "Minimum order value not met"
+        }
+      },
+      "observed": {
+        "status": 400,
+        "body": {
+          "success": false,
+          "error": "Minimum order value not met"
+        }
+      },
+      "comparison": {
+        "result": "match",
+        "differences": []
+      }
+    },
+    {
+      "id": "BC-003",
+      "subtotal": 1000,
+      "expected": {
+        "id": "BC-003",
+        "subtotal": 1000,
+        "order_accepted": true,
+        "expected_discount": 0,
+        "expected_shipping_fee": 500,
+        "expected_total": 1500
+      },
+      "observed": {
+        "status": 201,
+        "body": {
+          "success": true,
+          "data": {
+            "order_id": "<non-deterministic>",
+            "subtotal": 1000,
+            "discount": 0,
+            "shipping_fee": 500,
+            "total": 1500
+          }
+        }
+      },
+      "comparison": {
+        "result": "match",
+        "differences": []
+      }
+    },
+    {
+      "id": "BC-004",
+      "subtotal": 2999,
+      "expected": {
+        "id": "BC-004",
+        "subtotal": 2999,
+        "order_accepted": true,
+        "expected_discount": 0,
+        "expected_shipping_fee": 500,
+        "expected_total": 3499
+      },
+      "observed": {
+        "status": 201,
+        "body": {
+          "success": true,
+          "data": {
+            "order_id": "<non-deterministic>",
+            "subtotal": 2999,
+            "discount": 0,
+            "shipping_fee": 500,
+            "total": 3499
+          }
+        }
+      },
+      "comparison": {
+        "result": "match",
+        "differences": []
+      }
+    },
+    {
+      "id": "BC-005",
+      "subtotal": 3000,
+      "expected": {
+        "id": "BC-005",
+        "subtotal": 3000,
+        "order_accepted": true,
+        "expected_discount": 300,
+        "expected_shipping_fee": 500,
+        "expected_total": 3200
+      },
+      "observed": {
+        "status": 201,
+        "body": {
+          "success": true,
+          "data": {
+            "order_id": "<non-deterministic>",
+            "subtotal": 3000,
+            "discount": 300,
+            "shipping_fee": 500,
+            "total": 3200
+          }
+        }
+      },
+      "comparison": {
+        "result": "match",
+        "differences": []
+      }
+    },
+    {
+      "id": "BC-006",
+      "subtotal": 4999,
+      "expected": {
+        "id": "BC-006",
+        "subtotal": 4999,
+        "order_accepted": true,
+        "expected_discount": 300,
+        "expected_shipping_fee": 500,
+        "expected_total": 5199
+      },
+      "observed": {
+        "status": 201,
+        "body": {
+          "success": true,
+          "data": {
+            "order_id": "<non-deterministic>",
+            "subtotal": 4999,
+            "discount": 300,
+            "shipping_fee": 500,
+            "total": 5199
+          }
+        }
+      },
+      "comparison": {
+        "result": "match",
+        "differences": []
+      }
+    },
+    {
+      "id": "BC-007",
+      "subtotal": 5000,
+      "expected": {
+        "id": "BC-007",
+        "subtotal": 5000,
+        "order_accepted": true,
+        "expected_discount": 300,
+        "expected_shipping_fee": 500,
+        "expected_total": 5200
+      },
+      "observed": {
+        "status": 201,
+        "body": {
+          "success": true,
+          "data": {
+            "order_id": "<non-deterministic>",
+            "subtotal": 5000,
+            "discount": 300,
+            "shipping_fee": 500,
+            "total": 5200
+          }
+        }
+      },
+      "comparison": {
+        "result": "match",
+        "differences": []
+      }
+    },
+    {
+      "id": "BC-008",
+      "subtotal": 9999,
+      "expected": {
+        "id": "BC-008",
+        "subtotal": 9999,
+        "order_accepted": true,
+        "expected_discount": 300,
+        "expected_shipping_fee": 0,
+        "expected_total": 9699
+      },
+      "observed": {
+        "status": 201,
+        "body": {
+          "success": true,
+          "data": {
+            "order_id": "<non-deterministic>",
+            "subtotal": 9999,
+            "discount": 300,
+            "shipping_fee": 0,
+            "total": 9699
+          }
+        }
+      },
+      "comparison": {
+        "result": "match",
+        "differences": []
+      }
+    },
+    {
+      "id": "BC-009",
+      "subtotal": 10000,
+      "expected": {
+        "id": "BC-009",
+        "subtotal": 10000,
+        "order_accepted": true,
+        "expected_discount": 1000,
+        "expected_shipping_fee": 0,
+        "expected_total": 9000
+      },
+      "observed": {
+        "status": 201,
+        "body": {
+          "success": true,
+          "data": {
+            "order_id": "<non-deterministic>",
+            "subtotal": 10000,
+            "discount": 1000,
+            "shipping_fee": 0,
+            "total": 9000
+          }
+        }
+      },
+      "comparison": {
+        "result": "match",
+        "differences": []
+      }
+    },
+    {
+      "id": "BC-010",
+      "subtotal": 5299,
+      "expected": {
+        "id": "BC-010",
+        "subtotal": 5299,
+        "order_accepted": true,
+        "expected_discount": 300,
+        "expected_shipping_fee": 500,
+        "expected_total": 5499,
+        "expected_net_amount": 4999,
+        "purpose": "shipping fee is decided on the net amount: net 4999 is below 5000"
+      },
+      "observed": {
+        "status": 201,
+        "body": {
+          "success": true,
+          "data": {
+            "order_id": "<non-deterministic>",
+            "subtotal": 5299,
+            "discount": 300,
+            "shipping_fee": 500,
+            "total": 5499
+          }
+        }
+      },
+      "comparison": {
+        "result": "match",
+        "differences": []
+      }
+    },
+    {
+      "id": "BC-011",
+      "subtotal": 5300,
+      "expected": {
+        "id": "BC-011",
+        "subtotal": 5300,
+        "order_accepted": true,
+        "expected_discount": 300,
+        "expected_shipping_fee": 0,
+        "expected_total": 5000,
+        "expected_net_amount": 5000,
+        "purpose": "shipping fee is decided on the net amount: net 5000 reaches the free shipping tier"
+      },
+      "observed": {
+        "status": 201,
+        "body": {
+          "success": true,
+          "data": {
+            "order_id": "<non-deterministic>",
+            "subtotal": 5300,
+            "discount": 300,
+            "shipping_fee": 0,
+            "total": 5000
+          }
+        }
+      },
+      "comparison": {
+        "result": "match",
+        "differences": []
+      }
+    }
+  ]
+}

@@ -24,7 +24,7 @@ Tests live outside this directory, in `tests/legacy-sample/`.
 pwsh -NoProfile -NonInteractive -File tests/legacy-sample/run_all.ps1
 ```
 
-`run_all.ps1` runs these scripts in order, prints only FAIL lines and per-script results, and exits non-zero if anything fails. Each script can also be run on its own.
+`run_all.ps1` runs these scripts in order, prints only FAIL lines, UNVERIFIED notes and per-script results, and exits non-zero if anything fails. Each script can also be run on its own. Without `-IncludeIsolation` it runs the Phase 2/3 regression (136 checks) and the Phase 4 scripts (92 checks); `-IncludeIsolation` adds the network isolation measurement.
 
 | Script | What it checks |
 |--------|----------------|
@@ -33,13 +33,22 @@ pwsh -NoProfile -NonInteractive -File tests/legacy-sample/run_all.ps1
 | `test_phase3_reset.ps1` | Reset completeness, idempotence, AUTO_INCREMENT restart, and failure injection |
 | `test_phase3_reproducibility.ps1` | Reset, same input, same result across cycles; `created_at` normalization |
 | `test_phase3_concurrency.ps1` | Parallel orders never double-reserve stock |
-| `test_network_isolation.ps1` | Measured network isolation (54 checks, needs the `docker` CLI): topology, published ports, TCP and DNS reachability with positive controls, host reachability, and proxy forwarding tests with a canary. Run separately or with `run_all.ps1 -IncludeIsolation`; not part of the default 136 checks |
+| `test_network_isolation.ps1` | Measured network isolation (needs the `docker` CLI): topology, published ports, TCP and DNS reachability with positive controls, host reachability, proxy forwarding tests with a canary, and Apache `mod_status` disabled. The count depends on the number of host IPv4 addresses (one T11 check per address; 55 on the last run with six addresses). Run separately or with `run_all.ps1 -IncludeIsolation` |
+| `test_ground_truth_schema.ps1` | Static: Ground Truth structure, R9.6 categories, literal constants, monetary values vs tiers, 9 boundary values, BC-001 domain reason, defect candidate links, decision registry, approval status, decision registry, net-amount shipping boundaries, allowlist JSON vs `docs/ai-input-allowlist.md` (37 checks, no container needed) |
+| `test_ground_truth_conformance.ps1` | Runs the conformance runner; checks the 14 matches and 6 approved divergences, separation of expected / observed / decision, the approved divergence list, BC-010/BC-011, not-executed handling, and negative controls (wrong expectation, expectation edited to match legacy, missing or pending decision, missing approver, defect-candidate mismatch, wrong SCN-006 value, wrong boundary total) that must fail the gate (26 checks) |
+| `test_ground_truth_reproducibility.ps1` | Two runs are byte-identical and equal the committed baseline; no timestamps; masking hides real values; input hashes are current (9 checks) |
+| `test_ground_truth_isolation.ps1` | Ground Truth not reachable over HTTP (17 raw-request probes incl. traversal), not mounted, no canary in any container or in the database, with controls (9 checks) |
+| `test_ai_input_isolation.ps1` | AI input allowlist rule with a reference builder and canary decoys, fail-closed cases, junction, repository-wide canary placement (11 checks). Prints UNVERIFIED for the real analyzer payload, which does not exist yet |
 | `observe_defect_candidates.ps1` | Informational only, never fails: records how the legacy app handles invalid quantities (see `evaluation/legacy-defect-candidates.md`) |
 
 The scripts call `POST /reset` and modify database state. They also create temporary rows, a temporary trigger, and a short-lived lock holder inside the local legacy database, and remove them when they finish. Run them only against the local isolated environment.
 ## AI Input Scope
 
-Only `legacy/src/` and `legacy/sql/` are analysis targets for the Phoenix AI. Tests, `evaluation/`, `.kiro/`, `docs/`, and READMEs (including this file) are never passed to it. See `docs/ai-input-allowlist.md`.
+The Phoenix AI receives only the 7 files listed in `docs/ai-input-allowlist.md` / `docs/ai-input-allowlist.json` (5 PHP files in `legacy/src/`, 2 SQL files in `legacy/sql/`). Tests, `evaluation/`, `.kiro/`, `docs/`, `legacy/Dockerfile` and READMEs (including this file) are never passed to it. The real analyzer payload check is unverified until the analyzer exists.
+
+## Ground Truth Evaluation
+
+The expected specification is in `evaluation/ground-truth/ground-truth.json` (approved by the project owner). `evaluation/runner/Invoke-GroundTruthEvaluation.ps1` runs it against this app and writes `evaluation/results/ground-truth-conformance.json`. Current baseline: SCN-001..SCN-014 match; SCN-015, SCN-016 and SCN-017-a..d are approved divergences (the legacy app keeps its invalid-quantity defects DC-001..DC-006; the modern app must answer 400 "Invalid request", decisions MD-001..MD-006); boundary cases 10 of 10 executed match, BC-001 not executed; gate pass. This app is not changed to remove the divergences. Details: `evaluation/ground-truth/README.md`; review package: `evaluation/review/ground-truth-review.md`.
 
 ## Base Images
 
@@ -76,7 +85,7 @@ A container on an `internal: true` network has no route to the outside, while a 
 
 `infra/nginx/nginx.conf` is mounted read-only. It has one fixed upstream (`legacy-app:80`), one server, and one location; it allows GET and POST only; and it has no variable-based destination, no `resolver`, and no status or admin endpoint. The container runs as uid 101 with a read-only root filesystem (plus a tmpfs `/tmp`), all capabilities dropped, and `no-new-privileges`. Compose restarts it when `legacy-app` is recreated, because nginx resolves the upstream name only at startup.
 
-### Measured isolation (last run: 54 of 54 checks passed)
+### Measured isolation (last run: 55 of 55 checks passed)
 
 Measured with `tests/legacy-sample/test_network_isolation.ps1`:
 
@@ -90,6 +99,7 @@ Measured with `tests/legacy-sample/test_network_isolation.ps1`:
 | Positive controls: `legacy-app` to `legacy-db:3306`, `legacy-db` to `legacy-app:80`, `reverse-proxy` to `legacy-app:80` | all succeeded |
 | API reachable on `127.0.0.1:8056` (health 200, db ok) | yes |
 | Port 8056 on the host's six non-loopback IPv4 addresses, and on `[::1]` | not reachable |
+| Apache `mod_status`: not loaded (`apache2ctl -M`); `/server-status` and `/server-status?auto` answer the app's 404 JSON | disabled |
 | Crafted requests through the proxy (absolute URI, Host header, double slash, override headers, CONNECT, PUT/DELETE/PATCH/OPTIONS) against a canary container | none reached the canary |
 
 ### Residual items and what is not claimed
@@ -98,7 +108,7 @@ Measured with `tests/legacy-sample/test_network_isolation.ps1`:
 - UDP, ICMP, outbound IPv6, and destinations other than the four listed above were not measured. They are not assumed to be blocked.
 - The host check covered the host's own addresses only. Reachability from other machines on a network depends on the environment and was not tested.
 - The PHP settings (`allow_url_fopen = Off`, `disable_functions`) and `dns: ["127.0.0.1"]` on `legacy-app` are mitigations, not the isolation mechanism.
-- The `legacy-app` image contains Apache `mod_status` (`/server-status`, local-only by default). Through the proxy it answers 403. Disabling the module was not done because it would change the image.
+- Apache `mod_status` is disabled in the image (`a2dismod status` in `legacy/Dockerfile`, Phase 4). Other Apache modules of the base image were not reviewed.
 - Measured blocking of the tested paths is not a statement that the environment is safe for unknown code. That decision belongs to the project owner after reviewing this scope.
 
 ## Isolation Verification
@@ -169,3 +179,28 @@ Do not treat the database as being in the initial state until a reset has return
 - Seed values are duplicated inside `reset_db()` because `legacy/sql` is not mounted into the app container. `test_phase3_reset.ps1` compares the API output with `seed.sql` to detect drift.
 - Reset is not safe to run while other clients are placing orders.
 - Invalid quantities (zero, negative, non-integer, non-numeric, missing) are not handled as the requirements expect. The behavior is recorded as defect candidates in `evaluation/legacy-defect-candidates.md` and was not changed.
+
+## MVP Completion Verification
+
+Clean run on the development host (Windows, Docker Desktop), last repeated after the project owner approved the Ground Truth (task 4.6):
+
+1. Before `down -v`, the only Docker volume on the host was `project-phoenix_legacy-db-data` (compose project `project-phoenix`, volume `legacy-db-data`; synthetic seed data only). No other project's containers, volumes or networks existed, so `down -v` removed only this project's resources. Images were kept.
+2. `docker compose -f infra/docker-compose.yml --project-directory . down -v`, then `up -d --build` (image build served from the local cache).
+3. `/health` returned 200 (`app: ok`, `db: ok`) about 18 seconds after `up` started.
+4. `evaluation/runner/Invoke-GroundTruthEvaluation.ps1` (resets before every unit): gate pass; the result file is byte-identical to the committed baseline `evaluation/results/ground-truth-conformance.json`.
+5. `tests/legacy-sample/run_all.ps1 -IncludeIsolation`: 11 scripts, 283 of 283 checks passed (Phase 2/3 regression 136, network isolation 55, Phase 4 92), plus one UNVERIFIED note for the real analyzer payload.
+
+| # | MVP checklist item | Result | Evidence |
+|---|--------------------|--------|----------|
+| 1 | `up -d --build` starts all containers; health within 30 s | yes (about 20 s) | step 3 |
+| 2 | `POST /orders` returns the correct discount, shipping fee and total | yes | SCN-001..004, BC-002..009, `test_phase2.ps1`, `test_phase3_boundaries.ps1` |
+| 3 | Insufficient stock, unknown product, minimum order violations return the right errors | yes | SCN-005..008 |
+| 4 | Cancel cancels and restores stock | yes | SCN-009 |
+| 5 | `POST /test/orders/{id}/ship` ships; a later cancel returns 409 | yes | SCN-014 |
+| 6 | `POST /reset` restores seed stock and clears orders | yes | SCN-012, `test_phase3_reset.ps1` |
+| 7 | reset, same order, same result is reproducible | yes | `test_phase3_reproducibility.ps1`, `test_ground_truth_reproducibility.ps1` |
+| 8 | SCN-001..SCN-014 match the Ground Truth | yes, against the **approved** Ground Truth; SCN-015..SCN-017-d are approved divergences | conformance baseline |
+| 9 | `evaluation/ground-truth/` is not mounted in any container | yes | `test_ground_truth_isolation.ps1` GI4-GI8 |
+| 10 | `legacy/src/` has no comments or documents describing business rules | yes: no comment lines in `legacy/src` or `legacy/sql`; files are the 5 PHP files and `.htaccess` | grep for `//`, `#`, `/*`, `*`, `--` lines |
+
+Not covered by this verification: BC-001 (not executed), the invalid quantity forms without a Ground Truth unit (`"05"`, `" 5"`, `"5.0"`, `"+5"`, `null`, booleans, arrays, objects), the real analyzer payload (unverified), and the network residual items listed above.

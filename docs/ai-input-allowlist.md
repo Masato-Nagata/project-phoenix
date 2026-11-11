@@ -1,6 +1,6 @@
 # AI Input Allowlist Policy
 
-Status: accepted (legacy-sample, Phase 2 follow-up)
+Status: accepted (legacy-sample, Phase 2 follow-up; machine-readable form and reference checks added in Phase 4)
 
 ## Purpose
 
@@ -22,7 +22,9 @@ AI input is defined by an explicit list of concrete file paths. Anything not on 
 | `legacy/sql/schema.sql` | Table definitions |
 | `legacy/sql/seed.sql` | Initial data |
 
-Adding any file, including a new PHP file under `legacy/src/` or a config file such as `legacy/src/.htaccess` or `legacy/Dockerfile`, requires an explicit change to this table (and to the committed allowlist the analyzer reads) in a reviewed commit.
+The machine-readable form of this table is `docs/ai-input-allowlist.json` (interim location; the analyzer spec decides the final one). Both must list the same files in the same order; `tests/legacy-sample/test_ground_truth_schema.ps1` (GS29) fails if they differ.
+
+Adding any file, including a new PHP file under `legacy/src/` or a config file such as `legacy/src/.htaccess` or `legacy/Dockerfile`, requires an explicit change to this table and to `docs/ai-input-allowlist.json` in a reviewed commit.
 
 ### Not allowed
 
@@ -38,14 +40,16 @@ Adding any file, including a new PHP file under `legacy/src/` or a config file s
 
 ## Verification
 
-| Check | When |
-|-------|------|
-| Manifest contains only allowlisted paths | Every analyzer run; unit test |
-| Outbound payload scan: the text actually sent to `ai-client` contains no canary string from `evaluation/ground-truth/` and no path outside the allowlist | spec-restorer tests (Phase 4 of legacy-sample) |
-| `docker-compose.yml` has no `evaluation` mount, and running containers show no such mount | Phase 1 checklist, rerun before release |
-| Allowlisted files have no business-rule comments | Review checklist; grep for comment lines in `legacy/src` and `legacy/sql` |
+| Check | When | Status |
+|-------|------|--------|
+| Rule check with a reference builder: exactly the listed files, manifest with hashes, fail closed on traversal, absolute paths, wildcards, directories, nested or non-source files, duplicates, missing files, and junctions | `tests/legacy-sample/test_ai_input_isolation.ps1` (`lib/ai-input-builder.ps1`) | implemented (Phase 4) |
+| Canary decoys in `evaluation/`, `tests/`, `docs/`, `.kiro/`, READMEs, `.env` and next to allowed files never reach the bundle; a naive directory scan does (negative control); the Ground Truth canary exists only in `ground-truth.json` | `test_ai_input_isolation.ps1` | implemented (Phase 4) |
+| Manifest contains only allowlisted paths | Every analyzer run; analyzer unit test | not implemented (analyzer does not exist yet) |
+| Outbound payload scan: the text actually sent to `ai-client` contains no canary string from `evaluation/ground-truth/` and no path outside the allowlist | spec-restorer tests | **unverified** (spec-restorer and ai-client do not exist yet) |
+| `docker-compose.yml` has no `evaluation` mount, and running containers show no such mount | `test_ground_truth_isolation.ps1`; rerun before release | implemented |
+| Allowlisted files have no business-rule comments | Review checklist; grep for comment lines in `legacy/src` and `legacy/sql` | checked in task 4.5 |
 
-A path log alone is not sufficient evidence. The payload scan on what is really sent is the authoritative check.
+A path log alone is not sufficient evidence. The payload scan on what is really sent is the authoritative check. The reference builder shows that the rule works; it does not show that the future analyzer follows it.
 
 ## Scope note: development agent vs runtime AI
 

@@ -208,9 +208,10 @@ Invoke-TestMain {
             if (-not ($r.Status -eq 404 -and $r.Body.success -eq $false)) { $allApp = $false }
         }
         Test-Case 'P5a: status-style paths are answered by the app as 404 JSON (the proxy has no endpoints of its own)' $allApp
-        $ss = Invoke-WebRequest -Uri "http://127.0.0.1:8056/server-status" -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 10
-        Test-Case 'P5b: Apache mod_status (/server-status) is not served through the proxy (refused, not 200)' ([int]$ss.StatusCode -in @(403, 404)) ("status=" + [int]$ss.StatusCode)
-        Write-Host ("INFO: /server-status exists in the legacy-app image (Apache mod_status, local-only by default); through the proxy it answers " + [int]$ss.StatusCode) -ForegroundColor Yellow
+        $ss = Invoke-Api -Method GET -Path '/server-status'
+        $ssAuto = Invoke-Api -Method GET -Path '/server-status?auto'
+        $modules = ((& docker exec $app apache2ctl -M 2>&1) | ForEach-Object { "$_" }) -join "`n"
+        Test-Case 'P5b: Apache mod_status is disabled (module not loaded, /server-status is the app 404, not an Apache page)' ($modules -notmatch 'status_module' -and $modules -match 'rewrite_module' -and $ss.Status -eq 404 -and $ss.Body.success -eq $false -and $ssAuto.Status -eq 404) ("status=" + $ss.Status)
 
         Start-Sleep -Seconds 2
         $logsAfter = (& docker logs $script:CanaryName 2>&1) -join "`n"

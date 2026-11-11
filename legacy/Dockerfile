@@ -20,6 +20,9 @@ RUN { \
 # Enable Apache rewrite module
 RUN a2enmod rewrite
 
+# Disable the status module (it exposes /server-status)
+RUN a2dismod status
+
 # Switch to non-root user before exposing port
 USER appuser
 

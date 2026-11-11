@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "description": "Registry of migration decisions for scenarios where the observed legacy behavior differs from, or cannot be compared with, the expected specification. Each entry must be decided by a human. Until then it stays pending, and the evaluation runner reports the scenario as a mismatch with a pending decision (neither a pass nor a failure).",
+  "allowed_decisions": [
+    "pending",
+    "replicate_legacy_behavior",
+    "follow_expected_specification"
+  ],
+  "kinds": {
+    "migration_decision": "The expected specification is defined, but the legacy behavior differs. A human decides whether the modern app replicates the legacy behavior or follows the expected specification.",
+    "specification_decision": "The expected specification itself is undetermined, so the scenario cannot be compared. A human must first decide the expected behavior and record it in the Ground Truth; the migration decision follows after that."
+  },
+  "decisions": [
+    {
+      "id": "MD-001",
+      "kind": "migration_decision",
+      "scenario": "SCN-015",
+      "defect_candidates": [
+        "DC-001"
+      ],
+      "decision": "follow_expected_specification",
+      "decided_by": "Masato Nagata (project owner)",
+      "decided_at": "2026-11-11T09:43:51+09:00",
+      "rationale": "不正な数量は入力検証で拒否する。既存レガシーの409、500、数量切り捨てによる注文作成は欠陥として扱い、新システムには継承しない。"
+    },
+    {
+      "id": "MD-002",
+      "kind": "migration_decision",
+      "scenario": "SCN-016",
+      "defect_candidates": [
+        "DC-002"
+      ],
+      "decision": "follow_expected_specification",
+      "decided_by": "Masato Nagata (project owner)",
+      "decided_at": "2026-11-11T09:43:51+09:00",
+      "rationale": "不正な数量は入力検証で拒否する。既存レガシーの409、500、数量切り捨てによる注文作成は欠陥として扱い、新システムには継承しない。"
+    },
+    {
+      "id": "MD-003",
+      "kind": "migration_decision",
+      "scenario": "SCN-017-a",
+      "defect_candidates": [
+        "DC-003"
+      ],
+      "decision": "follow_expected_specification",
+      "decided_by": "Masato Nagata (project owner)",
+      "decided_at": "2026-11-11T09:43:51+09:00",
+      "rationale": "不正な数量は入力検証で拒否する。既存レガシーの409、500、数量切り捨てによる注文作成は欠陥として扱い、新システムには継承しない。"
+    },
+    {
+      "id": "MD-004",
+      "kind": "migration_decision",
+      "scenario": "SCN-017-b",
+      "defect_candidates": [
+        "DC-004"
+      ],
+      "decision": "follow_expected_specification",
+      "decided_by": "Masato Nagata (project owner)",
+      "decided_at": "2026-11-11T09:43:51+09:00",
+      "rationale": "不正な数量は入力検証で拒否する。既存レガシーの409、500、数量切り捨てによる注文作成は欠陥として扱い、新システムには継承しない。"
+    },
+    {
+      "id": "MD-005",
+      "kind": "migration_decision",
+      "scenario": "SCN-017-c",
+      "defect_candidates": [
+        "DC-006"
+      ],
+      "decision": "follow_expected_specification",
+      "decided_by": "Masato Nagata (project owner)",
+      "decided_at": "2026-11-11T09:43:51+09:00",
+      "rationale": "不正な数量は入力検証で拒否する。既存レガシーの409、500、数量切り捨てによる注文作成は欠陥として扱い、新システムには継承しない。"
+    },
+    {
+      "id": "MD-006",
+      "kind": "migration_decision",
+      "scenario": "SCN-017-d",
+      "defect_candidates": [
+        "DC-005"
+      ],
+      "decision": "follow_expected_specification",
+      "decided_by": "Masato Nagata (project owner)",
+      "decided_at": "2026-11-11T09:43:51+09:00",
+      "rationale": "JSON整数のみを許可し、数値文字列の暗黙変換は認めない。",
+      "history": [
+        {
+          "kind": "specification_decision",
+          "decision": "pending",
+          "closed_by": "Masato Nagata (project owner)",
+          "closed_at": "2026-11-11T09:43:51+09:00",
+          "note": "The expected behavior of SCN-017-d was undetermined. The project owner decided that a numeric string quantity is invalid (400 Invalid request); the entry then became a migration decision."
+        }
+      ]
+    }
+  ],
+  "compatibility_mapping": {
+    "follow_expected_specification": "approved_divergence: the modern app is expected to differ from the legacy app for this scenario and to follow the expected specification. The Compatibility_Evaluation reports the difference as an approved divergence, not as a failure.",
+    "replicate_legacy_behavior": "must_match_legacy: the modern app must reproduce the legacy response for this scenario.",
+    "pending": "unapproved: the gate fails until a decision is recorded."
+  },
+  "required_fields_when_decided": [
+    "decided_by",
+    "decided_at",
+    "rationale"
+  ]
+}

@@ -1,0 +1,473 @@
+{
+  "schema_version": 1,
+  "meta": {
+    "title": "Ground Truth: expected specification of the legacy-sample order-management application",
+    "kind": "expected_specification",
+    "separation_note": "This file holds only the expected specification. Observed legacy behavior is recorded by the evaluation runner under evaluation/results/. Expected values are never edited to match observed behavior. Migration decisions are recorded in evaluation/migration-decisions.json.",
+    "authoring": {
+      "status": "approved",
+      "approved_by": "Masato Nagata (project owner)",
+      "approved_at": "2026-11-11T10:36:19+09:00",
+      "note": "Drafted by the Kiro development agent from the approved requirements (R1-R13) and the approved design, using values calculated by hand from the seed data; never derived from legacy output. Reviewed and approved by the project owner, including the approved changes of the review round (JSON positive integer quantities, SCN-006 available/requested, SCN-017-d numeric string invalid, BC-010/BC-011, BC-001 reason). Review package: evaluation/review/ground-truth-review.md."
+    },
+    "canary": "PHOENIX-GT-CANARY-bb4b818336104ac090f9d9a2e8352c39",
+    "never_pass_to_runtime_ai": true,
+    "minimum_order_value": 1000,
+    "discount_tiers": [
+      { "subtotal_min": 0,     "subtotal_max": 2999, "discount": 0 },
+      { "subtotal_min": 3000,  "subtotal_max": 9999, "discount": 300 },
+      { "subtotal_min": 10000, "subtotal_max": null, "discount": 1000 }
+    ],
+    "shipping_fee_tiers": [
+      { "net_amount_min": 0,    "net_amount_max": 4999, "shipping_fee": 500 },
+      { "net_amount_min": 5000, "net_amount_max": null, "shipping_fee": 0 }
+    ],
+    "non_deterministic_fields": ["data.order_id", "created_at"],
+    "field_path_syntax": "Dot-separated properties. [n] selects an array index and [*] collects every element. A value {\"$type\": \"integer\"} checks the type only. A string {{name}} refers to a value captured by an earlier step; {{canary}} is meta.canary."
+  },
+  "defect_candidate_links": {
+    "DC-001": { "scenario": "SCN-015",   "summary": "quantity 0" },
+    "DC-002": { "scenario": "SCN-016",   "summary": "negative quantity" },
+    "DC-003": { "scenario": "SCN-017-a", "summary": "non-integer quantity" },
+    "DC-004": { "scenario": "SCN-017-b", "summary": "non-numeric quantity" },
+    "DC-005": { "scenario": "SCN-017-d", "summary": "numeric string quantity" },
+    "DC-006": { "scenario": "SCN-017-c", "summary": "missing quantity" }
+  },
+  "boundary_cases": [
+    { "id": "BC-001", "subtotal": 0,     "order_accepted": false, "expected_discount": 0,    "expected_shipping_fee": 500, "execution": "not_executed", "reason": "A zero subtotal cannot be produced by a valid order line. Every product price is at least 1 yen (legacy/sql/schema.sql declares CHECK (unit_price BETWEEN 1 AND 9999999); MySQL 5.7 parses but does not enforce CHECK, so this is the declared domain) and every quantity must be a positive integer (R3.13), so each valid line contributes at least 1 yen and any valid order has a subtotal of at least 1. A subtotal of 0 would need quantity 0, which is itself invalid input (DC-001, SCN-015), an empty line list, which is rejected as an invalid request (R3.10), or a 0-yen product outside the declared price domain; none of these tests the rule. The values are the rule outputs only. Reason approved by the project owner; the CHECK constraint is declared but not enforced by MySQL 5.7." },
+    { "id": "BC-002", "subtotal": 999,   "order_accepted": false, "expected_discount": 0,    "expected_shipping_fee": 500, "expected_rejection": { "status": 400, "error": "Minimum order value not met" } },
+    { "id": "BC-003", "subtotal": 1000,  "order_accepted": true,  "expected_discount": 0,    "expected_shipping_fee": 500, "expected_total": 1500 },
+    { "id": "BC-004", "subtotal": 2999,  "order_accepted": true,  "expected_discount": 0,    "expected_shipping_fee": 500, "expected_total": 3499 },
+    { "id": "BC-005", "subtotal": 3000,  "order_accepted": true,  "expected_discount": 300,  "expected_shipping_fee": 500, "expected_total": 3200 },
+    { "id": "BC-006", "subtotal": 4999,  "order_accepted": true,  "expected_discount": 300,  "expected_shipping_fee": 500, "expected_total": 5199 },
+    { "id": "BC-007", "subtotal": 5000,  "order_accepted": true,  "expected_discount": 300,  "expected_shipping_fee": 500, "expected_total": 5200 },
+    { "id": "BC-008", "subtotal": 9999,  "order_accepted": true,  "expected_discount": 300,  "expected_shipping_fee": 0,   "expected_total": 9699 },
+    { "id": "BC-009", "subtotal": 10000, "order_accepted": true,  "expected_discount": 1000, "expected_shipping_fee": 0,   "expected_total": 9000 },
+    { "id": "BC-010", "subtotal": 5299,  "order_accepted": true,  "expected_discount": 300,  "expected_shipping_fee": 500, "expected_total": 5499, "expected_net_amount": 4999, "purpose": "shipping fee is decided on the net amount: net 4999 is below 5000" },
+    { "id": "BC-011", "subtotal": 5300,  "order_accepted": true,  "expected_discount": 300,  "expected_shipping_fee": 0,   "expected_total": 5000, "expected_net_amount": 5000, "purpose": "shipping fee is decided on the net amount: net 5000 reaches the free shipping tier" }
+  ],
+  "scenarios": [
+    {
+      "id": "SCN-001",
+      "title": "Successful order, no discount, shipping fee applies",
+      "category": "successful_order_monetary",
+      "requirements": ["R3.1", "R3.2", "R3.3", "R3.4", "R3.5", "R3.6", "R3.12", "R4.1", "R4.2", "R4.4", "R5.1"],
+      "steps": [
+        { "id": "s1", "role": "action", "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 1, "lines": [ { "product_id": 2, "quantity": 13 } ] } } }
+      ],
+      "expected_specification": {
+        "derived_from": "Seed price 80 x 13 = 1040. Subtotal below 3000 gives discount 0. Net amount 1040 is below 5000, so the shipping fee is 500. Total = 1040 - 0 + 500 = 1540. Stock 1000 - 13 = 987.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": { "status": 201, "fields": { "success": true, "data.subtotal": 1040, "data.discount": 0, "data.shipping_fee": 500, "data.total": 1540, "data.order_id": { "$type": "integer" } } }
+        },
+        "state_checks": [
+          { "id": "c1", "request": { "method": "GET", "path": "/products/2" }, "status": 200, "fields": { "data.stock_quantity": 987 } },
+          { "id": "c2", "request": { "method": "GET", "path": "/orders" }, "status": 200, "fields": { "data[*].total": [1540], "data[*].status": ["pending"] } }
+        ]
+      },
+      "defect_candidates": []
+    },
+    {
+      "id": "SCN-002",
+      "title": "Successful order, highest discount tier (subtotal 10000 or more)",
+      "category": "successful_order_monetary",
+      "requirements": ["R3.2", "R3.3", "R3.4", "R3.5", "R4.1", "R4.2"],
+      "steps": [
+        { "id": "s1", "role": "action", "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 1, "lines": [ { "product_id": 4, "quantity": 9 } ] } } }
+      ],
+      "expected_specification": {
+        "derived_from": "Seed price 1200 x 9 = 10800. Subtotal of 10000 or more gives discount 1000. Net amount 9800 is 5000 or more, so the shipping fee is 0. Total = 10800 - 1000 + 0 = 9800. Stock 100 - 9 = 91.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": { "status": 201, "fields": { "success": true, "data.subtotal": 10800, "data.discount": 1000, "data.shipping_fee": 0, "data.total": 9800, "data.order_id": { "$type": "integer" } } }
+        },
+        "state_checks": [
+          { "id": "c1", "request": { "method": "GET", "path": "/products/4" }, "status": 200, "fields": { "data.stock_quantity": 91 } }
+        ]
+      },
+      "defect_candidates": []
+    },
+    {
+      "id": "SCN-003",
+      "title": "Successful order, middle discount tier (subtotal 3000 to 9999)",
+      "category": "successful_order_monetary",
+      "requirements": ["R3.2", "R3.3", "R3.4", "R3.5", "R4.1", "R4.2"],
+      "steps": [
+        { "id": "s1", "role": "action", "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 1, "lines": [ { "product_id": 1, "quantity": 20 } ] } } }
+      ],
+      "expected_specification": {
+        "derived_from": "Seed price 150 x 20 = 3000. Subtotal 3000 gives discount 300. Net amount 2700 is below 5000, so the shipping fee is 500. Total = 3000 - 300 + 500 = 3200. Stock 500 - 20 = 480.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": { "status": 201, "fields": { "success": true, "data.subtotal": 3000, "data.discount": 300, "data.shipping_fee": 500, "data.total": 3200, "data.order_id": { "$type": "integer" } } }
+        },
+        "state_checks": [
+          { "id": "c1", "request": { "method": "GET", "path": "/products/1" }, "status": 200, "fields": { "data.stock_quantity": 480 } }
+        ]
+      },
+      "defect_candidates": []
+    },
+    {
+      "id": "SCN-004",
+      "title": "Successful order, free shipping (net amount 5000 or more)",
+      "category": "successful_order_monetary",
+      "requirements": ["R3.2", "R3.3", "R3.4", "R3.5", "R4.1", "R4.2"],
+      "steps": [
+        { "id": "s1", "role": "action", "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 1, "lines": [ { "product_id": 5, "quantity": 7 } ] } } }
+      ],
+      "expected_specification": {
+        "derived_from": "Seed price 800 x 7 = 5600. Subtotal 5600 gives discount 300. Net amount 5300 is 5000 or more, so the shipping fee is 0. Total = 5600 - 300 + 0 = 5300. Stock 50 - 7 = 43.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": { "status": 201, "fields": { "success": true, "data.subtotal": 5600, "data.discount": 300, "data.shipping_fee": 0, "data.total": 5300, "data.order_id": { "$type": "integer" } } }
+        },
+        "state_checks": [
+          { "id": "c1", "request": { "method": "GET", "path": "/products/5" }, "status": 200, "fields": { "data.stock_quantity": 43 } }
+        ]
+      },
+      "defect_candidates": []
+    },
+    {
+      "id": "SCN-005",
+      "title": "Order rejected: subtotal below the minimum order value",
+      "category": "rejection_minimum_order_value",
+      "requirements": ["R3.11", "R4.3"],
+      "steps": [
+        { "id": "s1", "role": "action", "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 1, "lines": [ { "product_id": 2, "quantity": 12 } ] } } }
+      ],
+      "expected_specification": {
+        "derived_from": "Seed price 80 x 12 = 960, which is below the minimum of 1000. No order is created and stock is unchanged.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": { "status": 400, "fields": { "success": false, "error": "Minimum order value not met" } }
+        },
+        "state_checks": [
+          { "id": "c1", "request": { "method": "GET", "path": "/orders" }, "status": 200, "fields": { "data": [] } },
+          { "id": "c2", "request": { "method": "GET", "path": "/products/2" }, "status": 200, "fields": { "data.stock_quantity": 1000 } }
+        ]
+      },
+      "defect_candidates": []
+    },
+    {
+      "id": "SCN-006",
+      "title": "Order rejected: insufficient stock",
+      "category": "rejection_insufficient_stock",
+      "requirements": ["R3.9", "R5.2", "R5.4"],
+      "steps": [
+        { "id": "s1", "role": "action", "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 1, "lines": [ { "product_id": 5, "quantity": 51 } ] } } }
+      ],
+      "expected_specification": {
+        "derived_from": "Product 5 has stock 50 and 51 are requested. The request is rejected, product 5 is identified with its current stock (available 50) and the requested quantity (requested 51), no order is created and stock is unchanged. available and requested were added to the specification by the project owner approval (R3.9, R5.2); they were not copied from legacy output.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": { "status": 409, "fields": { "success": false, "error": "Insufficient stock", "details.products[*].product_id": [5], "details.products[*].available": [50], "details.products[*].requested": [51] } }
+        },
+        "state_checks": [
+          { "id": "c1", "request": { "method": "GET", "path": "/orders" }, "status": 200, "fields": { "data": [] } },
+          { "id": "c2", "request": { "method": "GET", "path": "/products/5" }, "status": 200, "fields": { "data.stock_quantity": 50 } }
+        ]
+      },
+      "defect_candidates": []
+    },
+    {
+      "id": "SCN-007",
+      "title": "Order rejected: unknown product",
+      "category": "rejection_missing_product",
+      "requirements": ["R3.8"],
+      "steps": [
+        { "id": "s1", "role": "action", "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 1, "lines": [ { "product_id": 999, "quantity": 1 } ] } } }
+      ],
+      "expected_specification": {
+        "derived_from": "Product 999 does not exist. The request is rejected, the unrecognised identifier is reported, and no order is created.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": { "status": 400, "fields": { "success": false, "error": "Unknown products", "details.product_ids": [999] } }
+        },
+        "state_checks": [
+          { "id": "c1", "request": { "method": "GET", "path": "/orders" }, "status": 200, "fields": { "data": [] } }
+        ]
+      },
+      "defect_candidates": []
+    },
+    {
+      "id": "SCN-008",
+      "title": "Order rejected: unknown customer",
+      "category": "rejection_missing_customer",
+      "requirements": ["R2.5", "R3.7"],
+      "steps": [
+        { "id": "s1", "role": "action", "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 999, "lines": [ { "product_id": 1, "quantity": 7 } ] } } }
+      ],
+      "expected_specification": {
+        "derived_from": "Customer 999 is not in the customer master. The request is rejected, no order is created and stock is unchanged.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": { "status": 404, "fields": { "success": false, "error": "Customer not found" } }
+        },
+        "state_checks": [
+          { "id": "c1", "request": { "method": "GET", "path": "/orders" }, "status": 200, "fields": { "data": [] } },
+          { "id": "c2", "request": { "method": "GET", "path": "/products/1" }, "status": 200, "fields": { "data.stock_quantity": 500 } }
+        ]
+      },
+      "defect_candidates": []
+    },
+    {
+      "id": "SCN-009",
+      "title": "Cancellation restores the reserved stock",
+      "category": "cancellation_with_stock_restoration",
+      "requirements": ["R5.5", "R6.1", "R6.6"],
+      "steps": [
+        { "id": "s1", "role": "setup",  "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 1, "lines": [ { "product_id": 5, "quantity": 3 } ] } }, "capture": { "order_id": "data.order_id" } },
+        { "id": "s2", "role": "action", "request": { "method": "POST", "path": "/orders/{{order_id}}/cancel" } }
+      ],
+      "expected_specification": {
+        "derived_from": "Product 5 stock is 50. An order for 3 reserves 3 (stock 47). Cancelling restores 3, so the confirmation reports product 5 with stock 50 and the order status becomes cancelled.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s2": { "status": 200, "fields": { "success": true, "data.order_id": "{{order_id}}", "data.restored_stock": [ { "product_id": 5, "stock_quantity": 50 } ] } }
+        },
+        "state_checks": [
+          { "id": "c1", "request": { "method": "GET", "path": "/products/5" }, "status": 200, "fields": { "data.stock_quantity": 50 } },
+          { "id": "c2", "request": { "method": "GET", "path": "/orders/{{order_id}}" }, "status": 200, "fields": { "data.status": "cancelled" } }
+        ]
+      },
+      "defect_candidates": []
+    },
+    {
+      "id": "SCN-010",
+      "title": "Cancellation rejected: order is already cancelled",
+      "category": "cancellation_rejected",
+      "requirements": ["R6.3"],
+      "steps": [
+        { "id": "s1", "role": "setup",  "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 1, "lines": [ { "product_id": 5, "quantity": 3 } ] } }, "capture": { "order_id": "data.order_id" } },
+        { "id": "s2", "role": "setup",  "request": { "method": "POST", "path": "/orders/{{order_id}}/cancel" } },
+        { "id": "s3", "role": "action", "request": { "method": "POST", "path": "/orders/{{order_id}}/cancel" } }
+      ],
+      "expected_specification": {
+        "derived_from": "A second cancellation of the same order is rejected as already cancelled and changes no data. Stock stays at 50.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s3": { "status": 409, "fields": { "success": false, "error": "Order is already cancelled" } }
+        },
+        "state_checks": [
+          { "id": "c1", "request": { "method": "GET", "path": "/products/5" }, "status": 200, "fields": { "data.stock_quantity": 50 } },
+          { "id": "c2", "request": { "method": "GET", "path": "/orders/{{order_id}}" }, "status": 200, "fields": { "data.status": "cancelled" } }
+        ]
+      },
+      "defect_candidates": []
+    },
+    {
+      "id": "SCN-011",
+      "title": "Cancellation rejected: order does not exist",
+      "category": "cancellation_rejected",
+      "requirements": ["R6.2"],
+      "steps": [
+        { "id": "s1", "role": "action", "request": { "method": "POST", "path": "/orders/99999/cancel" } }
+      ],
+      "expected_specification": {
+        "derived_from": "Order 99999 does not exist. The request is rejected as not found and changes no data.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": { "status": 404, "fields": { "success": false, "error": "Order not found" } }
+        },
+        "state_checks": [
+          { "id": "c1", "request": { "method": "GET", "path": "/orders" }, "status": 200, "fields": { "data": [] } }
+        ]
+      },
+      "defect_candidates": []
+    },
+    {
+      "id": "SCN-012",
+      "title": "Reset is repeatable and restores the seeded state",
+      "category": "reset_idempotency",
+      "requirements": ["R8.4", "R8.5", "R12.6", "R12.7"],
+      "steps": [
+        { "id": "s1", "role": "setup",  "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 1, "lines": [ { "product_id": 1, "quantity": 20 } ] } } },
+        { "id": "s2", "role": "action", "request": { "method": "POST", "path": "/reset" } },
+        { "id": "s3", "role": "action", "request": { "method": "POST", "path": "/reset" } }
+      ],
+      "expected_specification": {
+        "derived_from": "The first reset removes the 1 order and 1 order line and restores the 5 seed products. The second reset has nothing left to delete. After each reset the state is the seeded state.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s2": { "status": 200, "fields": { "success": true, "data.orders_deleted": 1, "data.order_lines_deleted": 1, "data.products_restored": 5 } },
+          "s3": { "status": 200, "fields": { "success": true, "data.orders_deleted": 0, "data.order_lines_deleted": 0, "data.products_restored": 5 } }
+        },
+        "state_checks": [
+          { "id": "c1", "request": { "method": "GET", "path": "/orders" }, "status": 200, "fields": { "data": [] } },
+          { "id": "c2", "request": { "method": "GET", "path": "/products" }, "status": 200, "fields": { "data[*].stock_quantity": [500, 1000, 300, 100, 50], "data[*].unit_price": [150, 80, 200, 1200, 800] } }
+        ]
+      },
+      "defect_candidates": []
+    },
+    {
+      "id": "SCN-013",
+      "title": "Ground Truth is not reachable through the application's HTTP interface",
+      "category": "ground_truth_isolation",
+      "requirements": ["R9.1", "R9.4"],
+      "steps": [
+        { "id": "s1", "role": "action", "request": { "method": "GET", "path": "/evaluation/ground-truth/ground-truth.json" } },
+        { "id": "s2", "role": "action", "request": { "method": "GET", "path": "/evaluation" } }
+      ],
+      "expected_specification": {
+        "derived_from": "The evaluation directory is outside the document root and is not mounted into any container, so both paths must be answered as not found and must never return the canary string.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s1": { "status": 404, "must_not_contain": ["{{canary}}"] },
+          "s2": { "status": 404, "must_not_contain": ["{{canary}}"] }
+        },
+        "state_checks": []
+      },
+      "defect_candidates": []
+    },
+    {
+      "id": "SCN-014",
+      "title": "Cancellation rejected: order is shipped (non-cancellable)",
+      "category": "cancellation_rejected",
+      "requirements": ["R6.4", "R6.5"],
+      "steps": [
+        { "id": "s1", "role": "setup",  "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 1, "lines": [ { "product_id": 5, "quantity": 3 } ] } }, "capture": { "order_id": "data.order_id" } },
+        { "id": "s2", "role": "setup",  "request": { "method": "POST", "path": "/test/orders/{{order_id}}/ship" } },
+        { "id": "s3", "role": "action", "request": { "method": "POST", "path": "/orders/{{order_id}}/cancel" } }
+      ],
+      "expected_specification": {
+        "derived_from": "A shipped order is in a non-cancellable status, so cancellation is rejected and no data changes. Stock stays at 47 (50 - 3) and the status stays shipped.",
+        "response_code_source": "design",
+        "step_expectations": {
+          "s3": { "status": 409, "fields": { "success": false, "error": "Order cannot be cancelled" } }
+        },
+        "state_checks": [
+          { "id": "c1", "request": { "method": "GET", "path": "/products/5" }, "status": 200, "fields": { "data.stock_quantity": 47 } },
+          { "id": "c2", "request": { "method": "GET", "path": "/orders/{{order_id}}" }, "status": 200, "fields": { "data.status": "shipped" } }
+        ]
+      },
+      "defect_candidates": []
+    },
+    {
+      "id": "SCN-015",
+      "title": "Order rejected: quantity zero",
+      "category": "rejection_invalid_quantity",
+      "requirements": ["R3.1", "R3.13"],
+      "steps": [
+        { "id": "s1", "role": "action", "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 1, "lines": [ { "product_id": 4, "quantity": 10 }, { "product_id": 1, "quantity": 0 } ] } } }
+      ],
+      "expected_specification": {
+        "derived_from": "R3.13 (approved): only a JSON positive integer is a valid quantity; a request with any invalid quantity is rejected as a whole with 400 Invalid request, with no order and no stock change.",
+        "response_code_source": "human_approved",
+        "step_expectations": {
+          "s1": { "status": 400, "fields": { "success": false, "error": "Invalid request" } }
+        },
+        "state_checks": [
+          { "id": "c1", "request": { "method": "GET", "path": "/orders" }, "status": 200, "fields": { "data": [] } },
+          { "id": "c2", "request": { "method": "GET", "path": "/products/1" }, "status": 200, "fields": { "data.stock_quantity": 500 } }
+        ]
+      },
+      "defect_candidates": ["DC-001"]
+    },
+    {
+      "id": "SCN-016",
+      "title": "Order rejected: negative quantity",
+      "category": "rejection_invalid_quantity",
+      "requirements": ["R3.1", "R3.13"],
+      "steps": [
+        { "id": "s1", "role": "action", "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 1, "lines": [ { "product_id": 4, "quantity": 10 }, { "product_id": 1, "quantity": -5 } ] } } }
+      ],
+      "expected_specification": {
+        "derived_from": "R3.13 (approved): only a JSON positive integer is a valid quantity; a request with any invalid quantity is rejected as a whole with 400 Invalid request, with no order and no stock change.",
+        "response_code_source": "human_approved",
+        "step_expectations": {
+          "s1": { "status": 400, "fields": { "success": false, "error": "Invalid request" } }
+        },
+        "state_checks": [
+          { "id": "c1", "request": { "method": "GET", "path": "/orders" }, "status": 200, "fields": { "data": [] } },
+          { "id": "c2", "request": { "method": "GET", "path": "/products/1" }, "status": 200, "fields": { "data.stock_quantity": 500 } }
+        ]
+      },
+      "defect_candidates": ["DC-002"]
+    },
+    {
+      "id": "SCN-017",
+      "title": "Order rejected: non-integer, non-numeric, or missing quantity (variants)",
+      "category": "rejection_invalid_quantity",
+      "requirements": ["R3.1", "R3.13"],
+      "variants": [
+        {
+          "id": "SCN-017-a",
+          "title": "Non-integer quantity 1.5",
+          "steps": [
+            { "id": "s1", "role": "action", "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 1, "lines": [ { "product_id": 4, "quantity": 10 }, { "product_id": 1, "quantity": 1.5 } ] } } }
+          ],
+          "expected_specification": {
+            "derived_from": "R3.13 (approved): only a JSON positive integer is a valid quantity; a request with any invalid quantity is rejected as a whole with 400 Invalid request, with no order and no stock change.",
+            "response_code_source": "human_approved",
+            "step_expectations": {
+              "s1": { "status": 400, "fields": { "success": false, "error": "Invalid request" } }
+            },
+            "state_checks": [
+              { "id": "c1", "request": { "method": "GET", "path": "/orders" }, "status": 200, "fields": { "data": [] } },
+              { "id": "c2", "request": { "method": "GET", "path": "/products/1" }, "status": 200, "fields": { "data.stock_quantity": 500 } }
+            ]
+          },
+          "defect_candidates": ["DC-003"]
+        },
+        {
+          "id": "SCN-017-b",
+          "title": "Non-numeric quantity \"abc\"",
+          "steps": [
+            { "id": "s1", "role": "action", "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 1, "lines": [ { "product_id": 4, "quantity": 10 }, { "product_id": 1, "quantity": "abc" } ] } } }
+          ],
+          "expected_specification": {
+            "derived_from": "R3.13 (approved): only a JSON positive integer is a valid quantity; a request with any invalid quantity is rejected as a whole with 400 Invalid request, with no order and no stock change.",
+            "response_code_source": "human_approved",
+            "step_expectations": {
+              "s1": { "status": 400, "fields": { "success": false, "error": "Invalid request" } }
+            },
+            "state_checks": [
+              { "id": "c1", "request": { "method": "GET", "path": "/orders" }, "status": 200, "fields": { "data": [] } },
+              { "id": "c2", "request": { "method": "GET", "path": "/products/1" }, "status": 200, "fields": { "data.stock_quantity": 500 } }
+            ]
+          },
+          "defect_candidates": ["DC-004"]
+        },
+        {
+          "id": "SCN-017-c",
+          "title": "Quantity missing on one line",
+          "steps": [
+            { "id": "s1", "role": "action", "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 1, "lines": [ { "product_id": 4, "quantity": 10 }, { "product_id": 1 } ] } } }
+          ],
+          "expected_specification": {
+            "derived_from": "R3.13 (approved): a missing quantity property is invalid, so the request is rejected as a whole with 400 Invalid request, with no order and no stock change.",
+            "response_code_source": "human_approved",
+            "step_expectations": {
+              "s1": { "status": 400, "fields": { "success": false, "error": "Invalid request" } }
+            },
+            "state_checks": [
+              { "id": "c1", "request": { "method": "GET", "path": "/orders" }, "status": 200, "fields": { "data": [] } },
+              { "id": "c2", "request": { "method": "GET", "path": "/products/1" }, "status": 200, "fields": { "data.stock_quantity": 500 } }
+            ]
+          },
+          "defect_candidates": ["DC-006"]
+        },
+        {
+          "id": "SCN-017-d",
+          "title": "Numeric string quantity \"5\"",
+          "steps": [
+            { "id": "s1", "role": "action", "request": { "method": "POST", "path": "/orders", "body": { "customer_id": 1, "lines": [ { "product_id": 4, "quantity": 10 }, { "product_id": 1, "quantity": "5" } ] } } }
+          ],
+          "expected_specification": {
+            "derived_from": "R3.13 (approved): only a JSON integer is accepted; a numeric string such as \"5\" is not converted and is invalid, so the request is rejected as a whole with 400 Invalid request, with no order and no stock change.",
+            "response_code_source": "human_approved",
+            "step_expectations": {
+              "s1": { "status": 400, "fields": { "success": false, "error": "Invalid request" } }
+            },
+            "state_checks": [
+              { "id": "c1", "request": { "method": "GET", "path": "/orders" }, "status": 200, "fields": { "data": [] } },
+              { "id": "c2", "request": { "method": "GET", "path": "/products/1" }, "status": 200, "fields": { "data.stock_quantity": 500 } }
+            ]
+          },
+          "defect_candidates": ["DC-005"]
+        }
+      ]
+    }
+  ]
+}
