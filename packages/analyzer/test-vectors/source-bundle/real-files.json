@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "description": "Expected SHA-256 values (R1.6) of the seven allowlisted files, with CRLF and lone CR replaced by LF. The expected values were computed by a different tool chain from the code under test: perl (s/\\r\\n?/\\n/g) piped to sha256sum, inside the approved toolchain container with --network none, on 2026-11-12. The reference builder tests/legacy-sample/lib/ai-input-builder.ps1 (New-AiInputBundle) produced the same hashes and character counts on the same day; it is a cross-check and not the source of these values. If a legacy file changes, this test fails on purpose: the allowlisted input changed and the hashes must be reviewed against R1.6, not copied from any tool.",
+  "files": [
+    { "path": "legacy/src/index.php", "sha256Lf": "d3402544796aa703770b9acf2cf27bd3b69f7b21e4c3b31b604761b3d7fdf0ca", "bytesAfterNormalization": 1359 },
+    { "path": "legacy/src/db.php", "sha256Lf": "3252f4215a19c02a68e88b0039a47322ac0942111f9d091507ce8eab405a230c", "bytesAfterNormalization": 251 },
+    { "path": "legacy/src/products.php", "sha256Lf": "23d5bce422326316e92319fdc4a093945e49d50038395b4d1a1f14df31a5d995", "bytesAfterNormalization": 1170 },
+    { "path": "legacy/src/orders.php", "sha256Lf": "1a7f30e676218c20e13620a151d094eecd54992e6146489939df96a31b043fc6", "bytesAfterNormalization": 10112 },
+    { "path": "legacy/src/utils.php", "sha256Lf": "63cac62aa11d89ed3b2d66532d10923646197996e4ba5a89827be3c22043c53d", "bytesAfterNormalization": 5199 },
+    { "path": "legacy/sql/schema.sql", "sha256Lf": "c87a6914c6e6c90f46da15fb98807163b82d0192ea7153ce07c7613ad566b247", "bytesAfterNormalization": 2073 },
+    { "path": "legacy/sql/seed.sql", "sha256Lf": "fe8a3b16d6586c29e28cc12c017897579aa5e87b997bb84a0f445135d3896b4a", "bytesAfterNormalization": 410 }
+  ]
+}

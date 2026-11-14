@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "baseAddress": "http://reverse-proxy:8080",
+  "limits": { "requestTimeoutMs": 10000, "experimentTimeoutMs": 60000 },
+  "lease": { "heartbeatIntervalMs": 1000, "staleAfterMs": 4000 }
+}

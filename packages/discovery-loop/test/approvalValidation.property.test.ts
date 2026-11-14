@@ -28,7 +28,7 @@ const SEED = 23_033;
 const NUM_RUNS = 120;
 const TIMEOUT_MS = 120_000;
 
-const GATES = ["start-implementation", "container-runtime", "override-draft", "override-apply", "install-kiro-cli", "m6-start", "m7-start", "transmit-source"];
+const GATES = ["start-implementation", "container-runtime", "override-draft", "override-apply", "install-kiro-cli", "m6-start", "m7-start", "transmit-source", "m0-checkpoint-exception"];
 const RUNS = ["run-0001", "run-0002"];
 const CLAIMS = [{ run_id: "run-0001", claim_revision_id: "clm-0001-r1" }];
 
@@ -51,6 +51,7 @@ const POOL: StoredTarget[] = [
   { kind: "claim_revision", run_id: "run-0001", claim_revision_id: "clm-0001-r1" },
   { kind: "gate", gate_id: "m6-start" },
   { kind: "gate", gate_id: "transmit-source" },
+  { kind: "gate", gate_id: "m0-checkpoint-exception" },
 ];
 const UNKNOWN: StoredTarget[] = [
   { kind: "run", run_id: "run-9999" },

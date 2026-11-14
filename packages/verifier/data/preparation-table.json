@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "internalOperations": [
+    { "method": "GET", "path": "/health" },
+    { "method": "POST", "path": "/reset" },
+    { "method": "POST", "path": "/test/orders/{id}/ship" }
+  ],
+  "steps": [
+    {
+      "kind": "order_exists",
+      "params": { "customer_id": { "type": "integer", "min": 1, "max": 2147483647, "body": "customer_id" } },
+      "numbered": { "name": "lines", "bodyList": "lines", "min": 1, "max": 5, "fields": { "product": { "type": "integer", "min": 1, "max": 2147483647, "body": "product_id" }, "quantity": { "type": "integer", "min": 1, "max": 2147483647, "body": "quantity" } } },
+      "translate": [ { "method": "POST", "path": "/orders", "body": "assembled", "expect": 201, "capture": { "bindTo": "step.bind", "fromResponse": "data.order_id" } } ]
+    },
+    {
+      "kind": "order_shipped",
+      "params": { "customer_id": { "type": "integer", "min": 1, "max": 2147483647, "body": "customer_id" } },
+      "numbered": { "name": "lines", "bodyList": "lines", "min": 1, "max": 5, "fields": { "product": { "type": "integer", "min": 1, "max": 2147483647, "body": "product_id" }, "quantity": { "type": "integer", "min": 1, "max": 2147483647, "body": "quantity" } } },
+      "translate": [ { "method": "POST", "path": "/orders", "body": "assembled", "expect": 201, "capture": { "bindTo": "step.bind", "fromResponse": "data.order_id" } }, { "method": "POST", "path": "/test/orders/{bound}/ship", "expect": 200 } ]
+    },
+    {
+      "kind": "order_cancelled",
+      "params": { "customer_id": { "type": "integer", "min": 1, "max": 2147483647, "body": "customer_id" } },
+      "numbered": { "name": "lines", "bodyList": "lines", "min": 1, "max": 5, "fields": { "product": { "type": "integer", "min": 1, "max": 2147483647, "body": "product_id" }, "quantity": { "type": "integer", "min": 1, "max": 2147483647, "body": "quantity" } } },
+      "translate": [ { "method": "POST", "path": "/orders", "body": "assembled", "expect": 201, "capture": { "bindTo": "step.bind", "fromResponse": "data.order_id" } }, { "method": "POST", "path": "/orders/{bound}/cancel", "expect": 200 } ]
+    }
+  ]
+}

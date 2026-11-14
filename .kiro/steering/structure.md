@@ -47,7 +47,7 @@ project-phoenix/
 │
 ├── discovery/
 │   ├── runs/              # Exported Run records (git-ignored by default)
-│   └── approvals/         # Human Approval_Store (append-only audit record; tracked in Git)
+│   └── approvals/         # Human Approval_Store (append-only audit record; real data NOT tracked in Git)
 │
 ├── evaluation/            # Ground Truth, migration decisions, conformance runner, results; never AI input
 │   └── spec-restoration-evaluator/  # Independent_Evaluator (separate package, not importable by runtime packages)
@@ -80,7 +80,7 @@ project-phoenix/
 | `legacy/` | PHP 5.6 | Sample order-management app; must not be modified by the pipeline |
 | `modern/` | PHP 8.4 | Migration output; managed by `modernizer`; reviewed by human |
 | `infra/` | YAML / shell / Dockerfile | Container orchestration and container images; no application logic |
-| `discovery/` | JSON / JSONL | Exported Run records (`runs/`, git-ignored) and the human Approval_Store (`approvals/`) |
+| `discovery/` | JSON / JSONL | Exported Run records (`runs/`, git-ignored) and the human Approval_Store (`approvals/`, real data git-ignored; the Approval_Store code in `discovery/tools/` is tracked) |
 | `docs/` | Markdown | Architecture Decision Records (ADRs), diagrams, onboarding guide |
 
 ---

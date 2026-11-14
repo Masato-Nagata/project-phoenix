@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "description": "Neutral Experiments of the probe of task 2.20. The accepted ones read data only and predict no business value; the rejected ones each break one policy rule and must never be sent.",
+  "accepted": [
+    {
+      "experimentId": "probe-read-products",
+      "requests": [{ "method": "GET", "path": "/products", "headers": { "accept": "application/json" } }],
+      "prediction": { "target": { "list": "requests", "index": 0 }, "status": 200, "fields": [{ "path": "success", "value": true }] }
+    },
+    {
+      "experimentId": "probe-read-orders",
+      "requests": [{ "method": "GET", "path": "/orders" }],
+      "stateChecks": [{ "method": "GET", "path": "/products" }],
+      "prediction": { "target": { "list": "requests", "index": 0 }, "status": 200, "fields": [{ "path": "success", "value": true }] }
+    }
+  ],
+  "rejected": [
+    { "rule": "POL-004", "experiment": { "experimentId": "probe-reject-reset", "requests": [{ "method": "POST", "path": "/reset" }] } },
+    { "rule": "POL-005", "experiment": { "experimentId": "probe-reject-test-namespace", "requests": [{ "method": "POST", "path": "/test/orders/{id}/ship", "pathParams": { "id": 1 } }] } },
+    { "rule": "POL-006", "experiment": { "experimentId": "probe-reject-absolute-url", "requests": [{ "method": "GET", "path": "http://reverse-proxy:8080/products" }] } },
+    { "rule": "POL-007", "experiment": { "experimentId": "probe-reject-traversal", "requests": [{ "method": "GET", "path": "/orders/../products" }] } },
+    { "rule": "POL-008", "experiment": { "experimentId": "probe-reject-header", "requests": [{ "method": "GET", "path": "/products", "headers": { "host": "other" } }] } },
+    { "rule": "POL-003", "experiment": { "experimentId": "probe-reject-not-allowlisted", "requests": [{ "method": "GET", "path": "/customers" }] } },
+    { "rule": "POL-012", "experiment": { "experimentId": "probe-reject-get-body", "requests": [{ "method": "GET", "path": "/products", "body": { "x": 1 } }] } },
+    { "rule": "POL-013", "experiment": { "experimentId": "probe-reject-state-check-write", "requests": [{ "method": "GET", "path": "/products" }], "stateChecks": [{ "method": "POST", "path": "/orders" }] } },
+    { "rule": "POL-011", "experiment": { "experimentId": "probe-reject-preparation", "requests": [{ "method": "GET", "path": "/products" }], "preparation": [{ "kind": "unknown_state", "params": {} }] } }
+  ]
+}

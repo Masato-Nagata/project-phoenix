@@ -648,6 +648,8 @@ const recordEnvelope: Schema = {
 const GATE_IDS = [
   "start-implementation", "container-runtime", "override-draft", "override-apply", "install-kiro-cli", "m6-start",
   "m7-start", "transmit-source",
+  // R21.20 (2026-11-14): one-time exception for the M0 checkpoint, allowing only the start of M3. Not the start-implementation gate.
+  "m0-checkpoint-exception",
 ];
 
 const approvalRecord: Schema = {

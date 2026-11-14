@@ -60,7 +60,7 @@ Some requirements interact. These notes record how the design resolves them. Eac
 | C8 | R9.4 and R24 require the mutex of the conformance runner, which is a Windows named mutex that a container cannot observe | The Launcher owns the mutex on the host and issues a Run_Lease that the runtime can observe (D5, Mutual Exclusion). The runtime never sees the mutex itself |
 | C9 | R24.12 says a subsequent Launcher start stops leftover containers after it has acquired both locks and before it creates a new Run_Volume or Run directory, identified by container label | The Launcher tries both locks with zero wait first (no side effect when it fails), and only after it holds both locks and **before** it creates a Run_Volume, issues a lease or starts a container does it stop leftover containers by label (R24.12). Stopping before holding the locks could stop the container of a **live** Run owned by another Launcher, which is why the order matters |
 | C10 | R14.10 needs the Approval status in evaluator reports, but a broken Approval_Store would make that status unreliable | R13.2 includes the Approval_Store (read-only) in the evaluator inputs and R13.13 makes the evaluator refuse to score when its chain fails verification. The Independent_Evaluator verifies the chain before scoring and treats a failure like an invalid input: non-zero exit, error report, no score |
-| C11 | R23.2 appends a record of a rejected modify or delete request, R23.7 leaves the store byte-identical for an invalid record | The host command has no modify or delete verb. A request that tries to modify or delete (an `--overwrite` style argument, or a `seq` that already exists) is rejected and appended as a `store_rejection` line. An invalid new Approval_Record (R23.7) is rejected with no change to the store. The two cases are different and are tested separately |
+| C11 | R23.2 appends a record of a rejected modify or delete request, R23.7 leaves the store byte-identical for an invalid new record | The store layer receives requests that carry an explicit operation (OD-7 C11; see "Store-layer request interface" under Approval_Store). A `modify` or `delete` request is refused and a `store_rejection` line is appended. An `append` request that violates R23.7 is refused with no line, and the store stays byte-identical. The human-facing command has no modify or delete parameter; the two outcomes are told apart by the operation of the request, not by command-line flags. The two cases are tested separately, and the modify and delete refusals are also tested through the regular entry point |
 
 ### M1 review resolutions
 
@@ -96,7 +96,7 @@ flowchart LR
   subgraph HOST["Host (Windows, no Node.js)"]
     L["Launcher (PowerShell 7)<br/>owns mutex + Run lock, creates Run dir,<br/>issues and renews Run_Lease"]
     AC["Approval command (PowerShell 7)<br/>only writer of the Approval_Store"]
-    ACB["Audit_Config_Builder<br/>(container, reads evaluation/)"]
+    ACB["Audit_Config_Builder<br/>(container; restricted files mounted read-only by the host step)"]
     SC["Sandbox controller<br/>(PowerShell, M6)"]
     LEASE[("discovery/leases/run-id/")]
     APPR[("discovery/approvals/")]
@@ -164,7 +164,7 @@ flowchart LR
 |---------|-------|-------|--------|---------|-------|
 | Launcher (`discovery/tools/Start-DiscoveryRun.ps1`, PowerShell 7) | Host, human account | Anything the human can read; the Approval_Store (gate check) | Run_Volume (create, remove), lease directory, channel directory, Incoming_Export, Completion_Marker, Reason_File, Launcher record | Host (Docker CLI) | Trusted. Owns the mutex and the Run lock, issues and renews the Run_Lease, starts the runtime with `docker run`, inspects the created container (R15.12), stops it, revokes the lease, exports and verifies the Run (Evidence_Store, Run_Volume export), releases the locks (R24) |
 | Approval command (`discovery/tools/Add-ApprovalRecord.ps1`, PowerShell 7) | Host, human account | Approval_Store, `records.jsonl` of Runs (target resolution only) | Approval_Store (the only writer) | None | Run by the human, or by the Kiro development agent only under R23.8. Never runs in a container |
-| Audit_Config_Builder | Container, `--network none` | `evaluation/` restricted files (read-only), 7 source files, instruction templates | `discovery/config/audit-config.json` | None | Only place besides the evaluator that reads `evaluation/` before a Run |
+| Audit_Config_Builder | Container, `--network none` | `evaluation/` restricted files (read-only), 7 source files, instruction templates | `discovery/config/audit-config.json` | None | Only place besides the evaluator that reads `evaluation/` before a Run. Code in `packages/ai-client/src/audit-config-builder.ts` (2026-11-14); it reads the restricted files only when the human runs it with them mounted. |
 | `discovery-runtime` | Container started by `docker run` | See mount table | Run_Volume only, channel directory (M6) | `phoenix-discovery-lab` only | Contains Loop_Orchestrator and the libraries. No repository, no `evaluation/`, no Approval_Store, no Docker socket, no HOME. Started only by the Launcher |
 | `reverse-proxy`, `legacy-app`, `legacy-db` | Existing containers | Unchanged | Unchanged | Unchanged. While the Discovery_Override is applied, `reverse-proxy` is also a member of `discovery-lab` | The only legacy-sample change is the network membership of `reverse-proxy`, and only while the override is applied (R18.15) |
 | Sandbox controller | Host PowerShell (M6) | `discovery/channel/<run-id>/requests/` | `discovery/channel/<run-id>/responses/` | Host | Starts one AI_Sandbox per request with a fixed argument list |
@@ -384,7 +384,9 @@ export interface SourceBundle {
 export type BundleErrorCode =
   | 'allowlist_missing' | 'allowlist_invalid_json' | 'allowlist_no_files' | 'allowlist_entry_not_string'
   | 'entry_absolute' | 'entry_traversal' | 'entry_directory' | 'entry_link' | 'entry_duplicate'
-  | 'entry_missing' | 'entry_unreadable' | 'allowlist_md_mismatch' | 'manifest_mismatch';
+  | 'entry_missing' | 'entry_unreadable' | 'allowlist_md_mismatch' | 'manifest_mismatch'
+  | 'allowlist_unknown_field' | 'allowlist_unsupported_version' | 'entry_not_utf8'
+  | 'entry_shape';   // added in task 2.1, see Source_Bundler decisions, item 5
 export interface BundleError { code: BundleErrorCode; path?: string; detail: string }
 export interface FileSystemPort {                          // injected; the only I/O the bundler has
   readFile(path: string): Promise<Uint8Array>;
@@ -490,36 +492,52 @@ export function canonicalJson(v: Json): string;                                 
 ### `packages/verifier`
 
 ```ts
-export interface PolicyConfig { /* see Experiment_Policy; loaded from a baked-in file */ }
+export interface PolicyConfig { /* see Experiment_Policy; loaded from a baked-in file; carries the loaded PrepTable as `preparationTable` (task 2.26) */ }
 export interface PolicyDecision { experimentId: string; decision: 'accept' | 'reject'; ruleIds: PolicyRuleId[] }
-export function loadPolicyConfig(raw: unknown): Result<PolicyConfig, string[]>;      // rejects reset/test entries (R8.6)
+export function loadPolicyConfig(raw: unknown, table: PrepTable): Result<PolicyConfig, string[]>;   // rejects reset/test entries (R8.6) and a `preparationKinds` list; the table is the single definition of POL-011 (task 2.26)
 export function decide(e: Experiment, cfg: PolicyConfig): PolicyDecision;             // pure (R8.2)
 export function foldPath(p: string): string;                                          // used by deny rules
 
-export interface MaskConfig { token: string; paths: readonly string[] }
+export interface MaskConfig { paths: readonly string[] }   // the mask token is the constant MASK_TOKEN, not a setting (OD-7, C2-1)
 export function maskJson(v: Json, cfg: MaskConfig): Json;                             // idempotent (R10.12)
 export function compare(pred: Prediction, obs: Observation, cfg: MaskConfig | undefined): ComparisonResult; // pure
 
 export interface HttpPort { send(req: HttpRequest, timeoutMs: number, signal: AbortSignal): Promise<HttpResponse> }
 /** Read-only view of the Run_Lease (R24.9, R24.15). The runtime can only observe it; only the Launcher writes it. */
 export interface LeasePort {
-  /** Called before the Run starts and before every request. */
-  check(): LeaseState;
+  /**
+   * Called before the Run starts and before every request. It may answer with a Promise, because a hold on an indeterminate reading (up to U)
+   * cannot be synchronous; a fake may answer directly. `deadlineAtMs` is a time on the monotonic clock (the Experiment time limit): a hold that
+   * reaches it, or a signal that aborts, ends the wait with `LeaseCheckInterrupted`, which the runner treats as a time limit or a stop, never
+   * as a lease failure. The first check of the real port is the start-up liveness proof: it never answers `valid` before the proof passed.
+   */
+  check(options?: { signal?: AbortSignal; deadlineAtMs?: number }): LeaseState | Promise<LeaseState>;
 }
-export type LeaseState = { valid: true } | { valid: false; reason: 'missing' | 'malformed' | 'run_mismatch' | 'nonce_mismatch' | 'revoked' | 'heartbeat_stale' };
+/** `reason` decides what the Run does (table in "Run_Lease"); `cause` keeps apart cases that share a reason. The cause is diagnostic and never changes the mapping to a termination reason. */
+export type LeaseState = { valid: true } | { valid: false; reason: 'missing' | 'malformed' | 'run_mismatch' | 'nonce_mismatch' | 'revoked' | 'heartbeat_stale' | 'unreadable'; cause?: LeaseCause };   // 'unreadable' ends the Run as lease_unavailable (OD-7, C8)
+export type LeaseCause = 'lease_json_absent' | 'lease_json_invalid' | 'lease_json_changed' | 'run_id_differs' | 'nonce_differs' | 'timing_differs'
+  | 'revoked_file' | 'counter_decreased' | 'no_counter_change' | 'read_hold_expired';
 export interface ExperimentRunner {
   health(): Promise<Result<void, string>>;                                            // R9.1, 10 s
-  execute(e: Experiment, decisionRecordId: string, signal: AbortSignal): Promise<ExecutionOutcome>;
+  execute(e: Experiment, decisionRecordId: string, signal: AbortSignal, options?: { notAfterMs?: number }): Promise<ExecutionOutcome>;   // notAfterMs: the Run time limit (R11.12), a time on the monotonic clock
 }
-export type ExecutionOutcome =
+export type ExecutionOutcome =                                          // `observation` is the M1 Observation record; the other fields are control information of the Runner
   | { status: 'executed'; observation: Observation; preparationLog: PrepLogEntry[] }
-  | { status: 'timed_out'; observation: Observation }                  // responses collected so far
-  | { status: 'aborted'; reason: 'lease_unavailable' | 'address_not_allowed'; observation: Observation }  // at least one request sent
-  | { status: 'not_executed'; reason: NotExecutedReason; detail?: string };
+  | { status: 'timed_out'; observation: Observation; detail?: string }  // responses collected so far; `detail` names the cause (see "Runner decisions of 2026-11-12")
+  | { status: 'aborted'; reason: 'lease_unavailable' | 'address_not_allowed'; observation: Observation;
+      leaseReason?: LeaseReason; terminationReason?: 'lease_unavailable' | 'launcher_killed' }  // at least one request sent
+  | { status: 'not_executed'; reason: NotExecutedReason; step?: number; detail?: string; observation: Observation;
+      leaseReason?: LeaseReason; terminationReason?: 'lease_unavailable' | 'launcher_killed'; fatal?: true }   // fatal: only for runner_internal_error
+  | { status: 'interrupted'; cause: 'forced_stop' | 'fatal_error'; experimentId: string; phase: 'not_started' | 'reset' | 'prep' | 'boundary' | 'seq' | 'state';
+      step?: number; sentRequests: number; collectedResponses: number; collectedStateChecks: number; fatal?: true; detail?: string };
+// `interrupted`: the Run was stopped in the middle of an Experiment by a forced stop or a fatal error. There is NO Observation (OD-18, decision (a)); the counts say what was collected. After it the Runner executes nothing more.
 export type NotExecutedReason =
-  | 'policy_not_accepted' | 'lease_unavailable' | 'address_not_allowed' | 'reset_failed' | 'preparation_failed' | 'preparation_untranslatable' | 'timeout_before_requests';
+  | 'policy_not_accepted' | 'lease_unavailable' | 'address_not_allowed' | 'reset_failed' | 'preparation_failed' | 'timeout_before_requests'
+  | 'runner_not_healthy' | 'runner_internal_error';      // the last two: see "Runner decisions of 2026-11-12". `preparation_untranslatable` is not used (R9.12)
 export function createRunner(deps: { http: HttpPort; lease: LeasePort; prepTable: PrepTable; policy: PolicyConfig;
-  mask: MaskConfig; baseAddress: string; limits: RunnerLimits; isAccepted(id: string): boolean }): ExperimentRunner;
+  mask: MaskConfig; baseAddress: string; addressPolicy: AddressPolicy; limits: RunnerLimits; clock: MonotonicClock;
+  isAccepted(experimentId: string, decisionRecordId: string, identity: ExecutionIdentity): AcceptanceVerdict;   // contract: "Decision identity and the acceptance check (OD-17)"
+  inFlightWatch?: { intervalMs: number; sleeper: Sleeper } }): ExperimentRunner;      // throws RunnerStartRefused for an invalid limit, address, or mask (R9.14, R9.17)
 ```
 
 ### `packages/discovery-loop`
@@ -627,9 +645,11 @@ export type UncoveredReason = 'no_applying_claim' | 'fixture_not_reproducible' |
 export function classifyUncovered(unit: ScoringUnit, claimsApplying: number): UncoveredReason | undefined;     // pure, from unit metadata
 ```
 
-### Audit_Config_Builder (`evaluation/audit-config-builder/`, run in a container, `--network none`)
+### Audit_Config_Builder (`packages/ai-client/src/audit-config-builder.ts`, run in a container, `--network none`)
 
 Reads the restricted evaluation files, the 7 allowlisted files and the instruction templates. Writes `discovery/config/audit-config.json`. Imports only the pure `tokenize` and `ngramHashes` functions from `packages/ai-client` so that the builder and the auditor cannot disagree on tokenization.
+
+Location changed on 2026-11-14 (human decision): the builder is code in `packages/ai-client` (`src/audit-config-builder.ts`), outside `evaluation/`. It is not exported from the package entry `src/index.ts`, and no runtime module imports it (static check). It contains no path into `evaluation/`: the restricted files, the allowlisted source files, and the instruction templates are given to it as inputs by the host-side run step, which mounts them read-only. Its function is unchanged. Tests use synthetic fixtures only; running it against the real restricted files needs a separate human approval.
 
 ---
 
@@ -688,6 +708,60 @@ All schemas are JSON Schema draft 2020-12. They set `additionalProperties: false
 ```
 
 The manifest holds no byte count, no timestamp and no host path, so identical inputs give identical bytes (R1.8). The bundle payload text format is the reference builder's `=== FILE: <path> ===` header followed by the LF-normalized text and one LF; it is a port of `tests/legacy-sample/lib/ai-input-builder.ps1`. The port tightens one rule: the reference checks that each entry matches `^legacy/(src/[^/]+\.php|sql/[^/]+\.sql)$`; the TypeScript port keeps that check as an **additional** shape check and also compares with the allowlist exactly as R1 requires.
+
+#### Source_Bundler decisions (OD-7, C5-1 to C5-7)
+
+These decisions complete R1 and note C5. They add no requirement and change no M1 schema.
+
+1. **Allowlist JSON (C5-1).** The file is parsed strictly (valid JSON, no duplicate key). The accepted top-level keys are `schema_version`, `description`, `location_note`, and `files`; any other key is the error `allowlist_unknown_field`. `schema_version` must be the integer 1, otherwise `allowlist_unsupported_version`. `description` and `location_note` are ignored. The rest of R1.4 applies as written.
+2. **Markdown table (C5-2).** The grammar is applied to the LF-normalized text of `docs/ai-input-allowlist.md`:
+   1. Exactly one line starts with `### Allowed`. Zero or several is `allowlist_md_mismatch`.
+   2. After that heading, blank lines are skipped. The next line is the header row `| File | Reason |` (cell text compared after trimming, case-sensitive).
+   3. The next line is a separator row of two columns (cells made only of `-`, `:`, and spaces).
+   4. The data rows are the following lines that start with `|`. The first line that does not start with `|`, a blank line included, ends the table. At least one data row is required.
+   5. Each data row has exactly two cells. The first cell, trimmed, is one code span (a path between two backticks) with no other text. The second cell is not empty; its text is not used.
+   6. The sequence of paths must equal `files` of the JSON in set and order (R1.5). The first difference is reported with its index and both values (or `missing`).
+   7. Text outside that table, the "Not allowed" section included, is not read.
+
+   Difference from the existing test GS29 of `tests/legacy-sample/test_ground_truth_schema.ps1`: GS29 collects every line of the document that matches a row pattern for a `legacy/...` path; this grammar reads only the first table under the heading and is stricter. On the current document both give the same list. If a matching row were added elsewhere in the document, GS29 would fail and the TypeScript reader would ignore it. This is intended and is documented here.
+3. **Entry form, duplicates, shape (C5-3, C5-7).** Every entry must already be in normal form; the bundler normalizes nothing in an accepted entry. The reference builder's syntax rules are kept: no surrounding whitespace, not empty, no backslash, no wildcard character, not absolute, no drive letter, no `~`, no empty, `.`, or `..` segment. The shape check is `^legacy/(src/[A-Za-z0-9_]+\.php|sql/[A-Za-z0-9_]+\.sql)$`, the same as test GS30, which is the strictest of the three character sets in use and lies inside the M1 manifest pattern. Duplicates are detected case-insensitively (ASCII case folding): two entries that differ only in case are `entry_duplicate`.
+4. **Link checks (C5-4).** The host-side check of the Launcher is the authority. Before the runtime starts, it checks for each allowlisted file, and for every directory on its path, that the item is not a reparse point (symbolic link or junction) and that the file has exactly one hard link. The runtime adds `lstat` (the kind must be `file`) and `nlink` (must be 1) as a supplementary check. `nlink` through Docker Desktop file mounts is **UNVERIFIED** (OD-3) and is not relied on until it is measured. Observed on the development host on 2026-11-12 (an observation, not a guarantee): the repository volume is NTFS; each of the seven files has one hard link; the files and their parent directories are not reparse points. A check that passed once does not protect against a later replacement. Replacement between the host check and the container start is **UNVERIFIED** and is a residual risk.
+5. **Decoding (C5-5).** Each file is decoded as UTF-8 strictly (an invalid sequence is an error) and a leading byte-order mark is kept as the character U+FEFF. An invalid sequence is the error `entry_not_utf8`. The codes `allowlist_unknown_field`, `allowlist_unsupported_version`, and `entry_not_utf8` are added to `BundleErrorCode`. A fourth code, `entry_shape`, was found necessary during task 2.1: the entry-form rules of the reference builder (empty or space-padded entry, backslash, wildcard character) and the additional shape check had no error code in the design. `entry_absolute` and `entry_traversal` keep their meaning; `entry_shape` covers the rest. The addition was approved by the human on 2026-11-12; the responsibilities, the conditions, and the priority are in item 9.
+6. **Differences between the reference builder and the specification (C5-6).** The specification (R1, R5.7) is authoritative. Where the reference builder differs, the TypeScript port follows the specification.
+
+| # | Item | Reference builder | Specification | Effect on the seven current files |
+|---|------|-------------------|---------------|------------------------------------|
+| 1 | Lone CR | Only CRLF is normalized | R1.6: CRLF and lone CR | None (four files contain one CRLF pair each, no lone CR) |
+| 2 | Byte-order mark | `ReadAllText` removes it | R5.7: kept | None (no file has one) |
+| 3 | Invalid UTF-8 | Replaced silently | An error | None (all files are valid UTF-8) |
+| 4 | Duplicates | Case-insensitive (default of `Sort-Object -Unique`) | R1.3 says "after path normalization"; case-insensitive folding chosen | None |
+| 5 | Shape character set | `[^/]+` | M1 manifest `[A-Za-z0-9._-]+`; GS30 `[A-Za-z0-9_]+`; GS30 chosen | None |
+| 6 | Hard links | Not checked | R1.3: rejected | Each file has one link |
+| 7 | Manifest field names | `sha256_lf`, `chars` | `sha256Lf`, no `chars` | Format only |
+| 8 | Path containment | Full-path prefix test, case-insensitive | The runtime holds no host path; the rules act on the entry string | None |
+| 9 | Table reading | Every matching line of the document (GS29) | First table under `### Allowed` | Same list |
+
+7. **Golden vectors (C5-6).** The reference builder's output is not taken as the correct answer. Three layers are used. (1) Metamorphic checks that need no expected hash: a CRLF form, a lone-CR form, and the LF form of the same text give the same hash; a text with a byte-order mark and the same text without it give different hashes; an invalid UTF-8 sequence fails; two entries that differ only in case are duplicates. (2) For the seven real files, an expected hash computed by a different tool chain (an LF-normalized copy made with a stream tool and hashed with `sha256sum`, both in the approved container with no network); it is compared three ways with the reference builder's output and the TypeScript output, and a disagreement is resolved against the text of R1.6, not against the reference builder. (3) Negative vectors written by hand from R1.3 to R1.5 and from the table above, each with the expected error code.
+8. **Not adopted now.** The Launcher could compute an independent hash of the seven files before the start and pass it in the attestation so that the runtime compares it with its own manifest. That would detect a replacement between check and start. It is not part of this decision; it is reviewed with task 2.18.
+9. **Entry error codes: responsibilities, conditions, and priority (C5-3, C5-7; `entry_shape` approved on 2026-11-12).** R1.3 names absolute, traversal, directory, link, duplicate, missing, and unreadable entries. `entry_shape` covers the entry-form defects that R1.3 does not name and the additional shape check; it never replaces a code that R1.3 names.
+
+| Code | Stage | Condition |
+|------|-------|-----------|
+| `allowlist_entry_not_string` | document | an element of `files` is not a string |
+| `entry_absolute` | entry form | the entry starts with `/` or `\`, with a drive letter and `:`, or with `~` |
+| `entry_traversal` | entry form | a `..` segment when the entry is split at `/` or `\`; or an empty or `.` segment when it is split at `/` |
+| `entry_shape` | entry form | the entry is empty or has leading or trailing whitespace; contains a backslash; contains one of `*`, `?`, `[`, `]`, `{`, `}`; or is longer than 256 characters or does not match the shape check of C5-7 |
+| `entry_duplicate` | set | two entries are equal when ASCII letters are compared without case; the later entry is named |
+| `entry_link`, `entry_directory`, `entry_missing`, `entry_unreadable`, `entry_not_utf8` | files | as described in items 4 and 5 |
+
+Priority when an allowlist has more than one defect: the stages run in this order and the first defect found is the one reported.
+   1. The JSON document: missing or unreadable (`allowlist_missing`); not valid JSON (`allowlist_invalid_json`); an unknown key; `schema_version`; `files` missing or empty; then the first element, in list order, that is not a string.
+   2. The form of the entries, in list order: the first entry with any form defect gives the error. Within one entry the first of these applies: (1) empty or padded, `entry_shape`; (2) absolute, `entry_absolute`; (3) a `..` segment split at either separator, `entry_traversal`; (4) a backslash, `entry_shape`; (5) a wildcard character, `entry_shape`; (6) an empty or `.` segment, `entry_traversal`; (7) too long or not of the shape, `entry_shape`. Examples: ` /x` is `entry_shape` (the padding is found first); `/legacy/../x` is `entry_absolute`; `legacy\src\..\a.php` is `entry_traversal` (the `..` rule comes before the backslash rule); `legacy\src\a.php` is `entry_shape`.
+   3. Duplicates.
+   4. The Markdown document: missing or unreadable, invalid UTF-8, the grammar, then the first difference from the JSON.
+   5. The files, in list order; for each entry the parent directories (outermost first), the entry's kind, the hard-link count, the read, and the UTF-8 check.
+
+Consistency check made with this note (2026-11-12): the codes and their order match the tests of task 2.1 (the entry-form table in `bundler.test.ts` and the defect classes of the fail-closed property test), R1.3 to R1.5 name no other defect class, and no existing test or specification text expects `entry_shape` to mean anything else.
 
 ### Hypothesis, Claim, Citation
 
@@ -1337,6 +1411,8 @@ The Experiment_Policy is a pure function of the Experiment content and the polic
 
 `/reset` and `/test/orders/{id}/ship` are not allowlisted and are rejected for the AI. If the configuration lists either of them, lists any operation whose folded path matches `denyFolded`, is missing or is malformed, `loadPolicyConfig` fails, every Experiment is rejected, and the Loop_Orchestrator refuses to start (R8.6).
 
+Preparation kinds are not part of this file. POL-011 validates preparation steps against the runner-owned preparation table, which is the only definition of kinds and their parameters (OD-7, POL-011; see "Numbered line parameters and the single definition" under the preparation table). A policy configuration that also carries an inline list of kinds is refused.
+
 ### Matching rules
 
 - **Exact operation match.** A request is allowed only if `method` equals an allowlist method and `path` equals an allowlist path **string** exactly. A placeholder path such as `/orders/{id}` is written literally and the concrete value comes from `pathParams`. A concrete path such as `/orders/1` therefore does not match, and neither does any encoded, cased or suffixed variant. No normalization, decoding or case folding is done for the allow decision (R8.1).
@@ -1382,18 +1458,18 @@ The preparation table is a second data file, owned by the Experiment_Runner and 
   ],
   "steps": [
     { "kind": "order_exists",
-      "params": { "customer_id": "positive integer", "lines": "array of {product_id, quantity}, 1 to 10 items" },
+      "params": { "customer_id": "positive integer" }, "numbered": { "name": "lines", "fields": { "product": "positive integer", "quantity": "positive integer" }, "min": 1, "max": 5 },
       "translate": [
-        { "op": "POST /orders", "body": "params", "expect": 201, "capture": { "bindTo": "step.bind", "fromResponse": "<created id field>" } } ] },
+        { "op": "POST /orders", "body": "customer_id and the numbered lines assembled by the table", "expect": 201, "capture": { "bindTo": "step.bind", "fromResponse": "<created id field>" } } ] },
     { "kind": "order_shipped",
-      "params": { "customer_id": "positive integer", "lines": "array of {product_id, quantity}, 1 to 10 items" },
+      "params": { "customer_id": "positive integer" }, "numbered": { "name": "lines", "fields": { "product": "positive integer", "quantity": "positive integer" }, "min": 1, "max": 5 },
       "translate": [
-        { "op": "POST /orders", "body": "params", "expect": 201, "capture": { "bindTo": "step.bind", "fromResponse": "<created id field>" } },
+        { "op": "POST /orders", "body": "customer_id and the numbered lines assembled by the table", "expect": 201, "capture": { "bindTo": "step.bind", "fromResponse": "<created id field>" } },
         { "op": "POST /test/orders/{bound}/ship", "expect": 200 } ] },
     { "kind": "order_cancelled",
-      "params": { "customer_id": "positive integer", "lines": "array of {product_id, quantity}, 1 to 10 items" },
+      "params": { "customer_id": "positive integer" }, "numbered": { "name": "lines", "fields": { "product": "positive integer", "quantity": "positive integer" }, "min": 1, "max": 5 },
       "translate": [
-        { "op": "POST /orders", "body": "params", "expect": 201, "capture": { "bindTo": "step.bind", "fromResponse": "<created id field>" } },
+        { "op": "POST /orders", "body": "customer_id and the numbered lines assembled by the table", "expect": 201, "capture": { "bindTo": "step.bind", "fromResponse": "<created id field>" } },
         { "op": "POST /orders/{bound}/cancel", "expect": 200 } ] }
   ]
 }
@@ -1401,13 +1477,35 @@ The preparation table is a second data file, owned by the Experiment_Runner and 
 
 The `<created id field>` placeholder is a path in the Test API response; the concrete path is written into the data file at implementation and reviewed with it. The table holds only HTTP shapes and expected statuses, never a business value. The `/test/orders/{id}/ship` operation is reachable **only** through `order_shipped`; the runner checks that every operation it sends is in `internalOperations` or in the policy allowlist. The table translates into at most 3 operations per step, and the time limit of R9.13 covers reset, preparation and requests together.
 
+#### Numbered line parameters and the single definition (OD-7, POL-011)
+
+**Problem.** The M1 Experiment schema allows only scalar values in the parameters of a preparation step (at most 16). `POST /orders` creates one order from one `lines` list, and there is no operation to add a line to an order afterwards (checked in the allowlisted source). Preparation steps are independent, so repeating a scalar-only step creates several separate orders; an order with several lines cannot be prepared that way.
+
+**Decision (C, approved).** Keep the M1 schema and express the lines as numbered scalar parameters.
+- The table declares a `numbered` group for a kind: a `name` (here `lines`), `fields` (each with a rule: type and range as in the policy rules), `min`, and `max` (at most 5 in this design). The parameters are `<field>_<n>` for n = 1 to `max` (for example `product_1`, `quantity_1`, `product_2`). The fixed parameters of the kind (for example `customer_id`) stay in `params`.
+- One function, `validatePreparationStep(table, step)`, decides validity. POL-011 calls it, so the policy and the runner cannot disagree. A step is rejected when:
+  1. only one of the fields of an index is present (for example `product_2` without `quantity_2`);
+  2. the indexes present are not exactly 1 to k (a gap in the numbering);
+  3. k is above `max`, or an index is above `max`;
+  4. an index is 0, has a leading zero, or the name is not exactly `<field>_<n>`;
+  5. k is below `min`;
+  6. a value has the wrong type or is outside the range of its rule;
+  7. a parameter is not defined by the table, or a required fixed parameter is missing, or `bind` is not a local key or is used twice.
+- `buildStepBody(table, step)` builds the request body for the runner from the same definition: the fixed parameters and a `lines` list in numeric order with exactly the given values (the body field names come from the table).
+- `loadPreparationTable(raw)` (in `packages/verifier/src/prep/`) validates the table itself and refuses it if the largest parameter count of a kind (fixed parameters plus fields times `max`) is above the M1 limit of 16 parameters, if a name is reserved (`reset`, `test`), or if a field name would be a forbidden key (`method`, `path`, `url`, `uri`, `header`, `headers`, `host`).
+- **Single source.** The preparation table is the only definition of kinds and parameters. The Experiment_Policy receives the loaded table and no longer reads an inline list of kinds (the earlier `preparationKinds` of the policy configuration is removed by task 2.26). The Experiment_Runner receives the same loaded table. A policy configuration that carries its own list of kinds is refused. **Done in task 2.26:** `PolicyConfig` carries the loaded table as `preparationTable`, `loadPolicyConfig(raw, table)` refuses a `preparationKinds` list, and POL-011 is `validatePreparationStep` of that table plus the rule that a `bind` name is used by one step only. The Runner refuses to start if its table is not the one of the policy configuration (compared by hash).
+- **Cap.** A prepared state has at most 5 lines (11 parameters). Larger orders are sent in a request body (up to the limit of POL-009); only prepared states are capped.
+
+**Fallback B (defined, not approved).** Allow, in the M1 schema, a value of `params` to be a list of at most 10 flat objects of scalars, with the forbidden-key rule applied to the nested names. It would change the M1 Experiment schema, its fixtures and security tests, the policy rule vocabulary, and the runner translation, and would re-open the M1 baseline. It is not implemented. If M4 shows that units are `uncovered` because of the line cap, they are reported with that reason and nothing is switched; a change to B needs a separate human approval (OD-13).
+
+
 ### Runner behavior summary (R9)
 
 1. Health check within 10 seconds before the first Experiment; otherwise the Run stops with an error and executes nothing.
 2. Execute only if the policy accept record exists for this Experiment id (`isAccepted`); otherwise `not_executed: policy_not_accepted`.
 3. Check the Run_Lease (`LeasePort.check()`) before the Experiment starts and again **before every request, including reset and preparation operations**. The Run holds the Run_Lock for its whole duration through the Launcher, so the runner acquires and releases no lock per Experiment (R9.4). If the lease is invalid before any request-sequence request was sent: `not_executed: lease_unavailable`. If at least one request-sequence request was sent: `aborted: lease_unavailable` with the responses so far (R9.5).
 4. `POST /reset`, require HTTP 200 and success; otherwise `not_executed: reset_failed`.
-5. Translate and run the preparation steps in order; a step that cannot be translated or returns a non-expected status gives `not_executed` with the failing step.
+5. Translate and run the preparation steps in order; a step that is not in the table, whose parameters are not valid, or that returns a non-expected status gives `not_executed` with the reason `preparation_failed`, the failing step, and the recorded status or `none` (R9.12). A step that cannot be translated has the detail `untranslatable:<codes>`; the reason `preparation_untranslatable` is not used.
 6. Send the requests in order, then the state checks. Record each status and the masked body.
 7. Enforce the per-request and per-Experiment time limits with `AbortSignal`. A timeout before the request sequence is `not_executed`; a timeout during it is `timed_out` with the responses so far.
 8. Before each request, check that the target address is the configured one. Otherwise send nothing: `not_executed: address_not_allowed`, or `aborted: address_not_allowed` if a request-sequence request was already sent (R9.16).
@@ -1415,21 +1513,98 @@ The `<created id field>` placeholder is a path in the Test API response; the con
 
 The runner takes the base address only from the validated run configuration. An address that is not the loopback reverse-proxy address or the internal reverse-proxy address refuses the start, records the configured value and sends no request (R18.3).
 
+**Exact match of the address (decision of 2026-11-12).** The configured address is accepted only if its text equals, character for character, the canonical text of `http://127.0.0.1:8056` or of the configured internal address (default `http://reverse-proxy:8080`). The URL parser is not used to decide: it turns other spellings into the same origin (`0x7f.0.0.1`, `2130706433`, `127.1`, a port written `08056`, upper case, a full-width host name), and a trailing `/` is refused too. The texts of the address policy itself must be canonical (ASCII, equal to the parsed origin, no explicit default port, the internal host not a loopback or wildcard name). This agrees with the closed enumeration of `testApi.baseAddress` in the run configuration. Redirects are not followed: the adapter uses `node:http`, returns a 3xx as a response, and never sends to its `Location`. **Residual risk (unresolved):** the check compares names; the container network resolves `reverse-proxy` at connection time and the resolved address is not verified. The `discovery-lab` network has only `reverse-proxy` and the runtime as members (R18.14), which limits this, but the limit is not measured here.
+
+### Runner decisions of 2026-11-12 (tasks 2.15 to 2.17)
+
+These points were found during implementation and approved by the human. Items 1 to 4 and 6 to 7 are implemented (tasks 2.15 to 2.17 and the follow-up batch of 2026-11-12, tasks 2.26 and the identity module). Of item 5, the provisional `timed_out` for a communication failure is implemented; the `error` record is written by the Loop_Orchestrator (tasks 4.4 and 4.6), which does not exist yet.
+
+1. **Preparation reasons.** R9.12 prevails over the earlier design type: a step that is not in the table, or whose parameters are not valid, gives `not_executed` with `preparation_failed`, the step, and the detail `untranslatable:<codes>`. `preparation_untranslatable` is never emitted.
+2. **Lease port.** `LeasePort.check` takes `{signal, deadlineAtMs}` and may answer with a Promise; `LeaseState` has an optional `cause` that separates states sharing a reason (a counter that went down and a `lease.json` that was changed are both `malformed`, with the causes `counter_decreased` and `lease_json_changed`; a read failure that lasted U is `unreadable` with `read_hold_expired`). The cause is diagnostic. The mapping to the termination reason uses the reason only (`heartbeat_stale` gives `launcher_killed`, every other reason gives `lease_unavailable`).
+3. **Defensive and fatal outcomes.** `runner_not_healthy` is a defensive refusal: the Loop_Orchestrator never reaches it, because a failed health check stops the Run (R9.1, R11.15). `runner_internal_error` is **fatal**: the outcome carries `fatal: true`, the Loop_Orchestrator stops the Run with the termination reason `error` and writes an `error` record, and the Runner executes nothing more (a latch: every later call returns an `interrupted` outcome with the phase `not_started`). Both reasons are strings of the free field `notExecuted.reason`, so the M1 schema is unchanged. `fatal` is control information of the Runner and is **not** in the Observation. An internal error after a request of the sequence was sent gives `interrupted` with the cause `fatal_error` and **no Observation**; it is never presented as `timed_out`. A `notAfterMs` that is not a finite number is an internal error too.
+4. **Preparation table review.** The table was reviewed against the allowlisted `legacy/src/index.php`, `orders.php`, `utils.php`, and `legacy/sql/schema.sql`. The reset and health judgments (`200` with `success == true` for the reset, a 2xx status for the health check) stay in the Runner and are not in the table. The numeric range 1 to 2147483647 of the parameters is **a safety constraint of the Runner**, the same as the range of a path parameter and of the M1 `ParamValue`. It is not taken from the Legacy_App, whose ID columns accept up to 4294967295 (`INT UNSIGNED`).
+
+   | Item of `preparation-table.json` | Source | Origin |
+   |---|---|---|
+   | `GET /health`, `POST /reset`, `POST /test/orders/{id}/ship` as internal operations | routes of `index.php`; this design (internal operations); R8.5, R9.1, R9.8 | specification and source agree |
+   | kinds `order_exists`, `order_shipped`, `order_cancelled` | this design (preparation table) | specification |
+   | body field `customer_id`; list field `lines`; line fields `product_id` and `quantity` | `place_order` of `orders.php` | source |
+   | at most 5 lines (the source accepts up to 100) | OD-13 | specification |
+   | range 1 to 2147483647 of every numeric parameter | M1 `ParamValue` and the policy `pathParam` range | Runner safety constraint |
+   | expected status 201 for `POST /orders`; 200 for the ship and cancel operations | `json_success` calls in `place_order`, `ship_order`, `cancel_order` | source |
+   | captured field `data.order_id` | `place_order` returns `{order_id}`, wrapped by `json_success` as `{success, data}` | source (this design leaves the concrete path to be written at implementation and reviewed) |
+   | `POST /test/orders/{bound}/ship`, `POST /orders/{bound}/cancel` | routes of `index.php`; the cancel operation is also in the policy allowlist | source; specification |
+
+   The table holds no business value: the thresholds of the source (minimum order value, stock, existing customers) are not encoded, so a prepared state with unsuitable values fails with 400, 404, or 409 and is reported as `preparation_failed`. The table is not part of the AI input (it is not on the allowlist), so the AI never sees these names (R7.3).
+5. **Communication failure (provisional).** A failure that is not a timeout while a request of the sequence or a state check is in flight (a connection reset, for example) is recorded as `timed_out` **only as a provisional, compatible expression**, because the M1 schema has no better outcome (`aborted` carries only the reasons `lease_unavailable` and `address_not_allowed`). The Runner returns the detail `transport_error`; the Loop_Orchestrator writes the real cause into an `error` record (experiment identifier, phase, cause). A failure in the reset or the preparation is already expressed by `reset_failed` and `preparation_failed`. If writing the `error` record fails, the Loop_Orchestrator starts no further Experiment and stops the Run with the termination reason `error` (R12.14, R11.15). A dedicated reason code (for example `transport_error` as an `abortReason`) needs an M1 schema change and a requirement change and is decided separately (OD-18). *(Not yet implemented: the `error` record is written by the Loop_Orchestrator, M3 and M4.)*
+6. **`isAccepted(experimentId, decisionRecordId, identity)`.** Decided and implemented as the pure function `verifyAcceptance` (see "Decision identity and the acceptance check (OD-17)" below). The Runner passes the identity of what it is about to execute, and also decides again itself.
+7. **Interruption of a Run.** Three causes are kept apart and the true reason is always written to the `termination` record.
+   - *Run time limit (R11.12).* The Loop_Orchestrator passes the option `notAfterMs` (a time on the monotonic clock); the deadline of the Experiment is the smaller of its own time limit and `notAfterMs`, and it also caps the time of each request and the deadline of the lease check. The outcome follows R9.15 literally (`reset_failed` during the reset, `preparation_failed` during the preparation, `timed_out` during the request sequence), with the detail `run_time_limit` instead of `experiment_time_limit`; if the limit has passed before the Experiment starts, nothing is started (`timeout_before_requests`, detail `run_time_limit`). The Run ends with `time_limit_reached`. **Implemented.**
+   - *Forced stop (`isolation_violation` and similar).* The signal stops the Run: a request in flight is aborted, no further request is sent, and the Experiment is `interrupted` with the cause `forced_stop` and **no Observation**. It is not turned into `timed_out`, `reset_failed`, or `preparation_failed`. The Observations of Experiments that finished earlier are untouched, and no later Experiment is executed. **Implemented** (OD-18, decision (a)).
+   - *Internal error.* Fatal (item 3): the Run ends with `error`. **Implemented.**
+### Decision identity and the acceptance check (OD-17, decided 2026-11-12)
+
+A recorded `accept` decision allows the execution of exactly what it was made about. Three things are identified by a hash, each the SHA-256 of canonical JSON text:
+
+| Hash | Of | Where it is recorded |
+|------|----|----------------------|
+| `experimentSha256` | the whole Experiment object that the Runner is asked to execute | `policy_decision` payload |
+| `policyConfigSha256` | the loaded policy configuration, without the preparation table | `policy_decision` payload; Run_Manifest `config` |
+| `preparationTableSha256` | the loaded preparation table | `policy_decision` payload; Run_Manifest `config` |
+
+- **Canonical form.** The existing rule is used: keys sorted by UTF-16 code unit, no white space, the standard escapes. The module `packages/verifier/src/identity/` adds the refusals of the Evidence_Store's canonical JSON (a non-finite number, an integer outside the safe range, a lone surrogate, a value that is not JSON), and a property test checks that the two writers give the same text for every value that both accept and refuse the same values. The Run_Manifest `config` is a free object, so the two configuration hashes need no schema change.
+- **The payload.** `evaluateForRecord(e, cfg)` returns `{experimentId, decision, ruleIds, experimentSha256, policyConfigSha256, preparationTableSha256}`; the Loop_Orchestrator appends it as a record of the kind `policy_decision`. The payload of that kind is a free object (M1 envelope), so the M1 schema is unchanged; R8.2 is kept (the identifier, the decision, the ordered rule ids) and extended by the hashes. An Experiment that cannot be hashed is recorded as a reject (`POL-099`).
+- **`verifyAcceptance(records, experimentId, decisionRecordId, identity)`** is a pure function over a view of the records; `createAcceptanceCheck(records)` makes the `isAccepted` callback. The first condition that fails is the reason, in this order: `record_missing` (the record does not exist); `record_not_policy_decision`; `payload_malformed`; `experiment_id_mismatch`; `reject_exists` (a `reject` exists for the identifier, also next to an accept, R9.3); `decision_not_unique` (not exactly one `policy_decision` for the identifier, R9.2); `decision_not_accept`; `payload_malformed` (a rule list that is not empty, or a hash that is not 64 lowercase hexadecimal digits); `experiment_content_changed`; `policy_config_changed`; `preparation_table_changed`. It never throws.
+- **The Runner.** It computes the identity of what it is about to execute (the content hash of the Experiment, and the hashes of its own configuration and table, taken once at the start) and passes it to `isAccepted`. After the callback accepts, the Runner **decides again** with the same pure `decide(e, cfg)` and executes only on `accept` (the detail `redecision_rejected:<rule ids>` otherwise). A Runner whose preparation table is not the one of the policy configuration, or whose hashes cannot be computed, does not start (`preparation_table_mismatch`, `identity_hash_failed`). Every refusal is `not_executed` with the reason `policy_not_accepted` and the detail `not_accepted:<code>`; no request is sent, not even the reset.
+- **What it does not give.** The hashes are computed by the process that is checked. They catch a different Experiment, a different configuration, a reload, or a mix-up; they do not defend against a compromised runtime. The Run_Manifest hashes and the image digest let a reader check afterwards that the configuration of the Run was the one the decisions name.
 ---
 
 ## Comparator Masking
 
 ```ts
-interface MaskConfig { token: string; paths: string[] }   // path syntax: a.b, [n], [*]
+interface MaskConfig { paths: string[] }   // the mask token is the constant MASK_TOKEN, not a setting (OD-7, C2-1)   // path syntax: a.b, [n], [*]
 ```
 
 - `maskJson(v, cfg)` replaces the value at each configured path with `token`. A path that does not exist is left absent (the value is not inserted). `[*]` applies to every array element.
-- It is applied to the Prediction fields and to the Observation by `path`. A predicted field whose path is configured is masked on both sides, so a non-deterministic field can be named in a prediction without causing a false mismatch.
+- It is applied to the Prediction fields and to the Observation by `path`. A predicted field whose path is configured is masked on both sides, so a non-deterministic field can be named in a prediction without causing a false mismatch. A predicted object or list value is masked inside as well (Comparator decisions, item 6).
 - **Idempotence.** `maskJson(maskJson(v)) = maskJson(v)`, because masking sets values at fixed paths to a constant and does not move or add any path (R10.12).
 - **Capture-time masking (C2/D11).** The runner masks while it builds the Observation. The record stores the mask configuration hash. The Comparator masks again.
 - **Comparison.** For every predicted field, the observed value at the same path is compared by deep equality with exact types (integer, string, boolean, null, array, object) and no coercion, trimming, case folding or tolerance (R10.3). The status code is compared first. Observed fields that the Prediction does not name are ignored (R10.4). The differences list is ordered with `$status` first and then by ascending code-point order of the path (R10.7).
 - **Not comparable.** `not_executed`, `timed_out` or `aborted` Experiment, missing Prediction, a body that is not parseable JSON when a field is predicted, or a missing or invalid mask configuration: result `not_comparable` with the reason, never `match` or `mismatch` (R10.8, R10.9).
 - The Comparator is pure and has no AI call, clock or random source (R10.1, R10.11).
+
+### Masking decisions (OD-7, C2-1 to C2-6)
+
+1. **Token (C2-1).** `MASK_TOKEN` is a constant in the code of `packages/verifier` (the string `<masked>`). It is not part of the configuration. A value that differs per configuration would weaken the idempotence and reproducibility arguments, so `MaskConfig` holds the paths only.
+2. **Source of the paths (C2-2).** A human authors the list from the allowlisted source files and the shapes of the Test API responses. The list is never copied or derived from the Ground_Truth or its list of non-deterministic fields (R15). It is stored in `run-config.json`, and its hash is recorded in the Run_Manifest and in every Observation and comparison result (`maskSha256`). The list may be empty until the integration run of task 2.20. Whether it is sufficient is judged by the repeat-Run identity check (tasks 4.8 and 4.14). A field found to be non-deterministic is added by a reviewed change to the configuration, never by the AI.
+3. **Matching of predicted paths (C2-3).** A Prediction field has a concrete path (for example with `[0]`); a mask entry may use `[*]`. A predicted path is masked if it equals a mask entry or lies below one at a segment boundary, with `[*]` standing for any index. The status code (`$status`) is never masked. The same matching decides which parts of an Observation body are masked, so both sides are masked by one function.
+4. **Mask configuration hash (C2-4).** `maskSha256` is the SHA-256 of the canonical JSON of `{"paths": [...]}` with the paths sorted by code point and without duplicates. The Comparator recomputes it from the configuration it was given and compares it with the value stored in the Observation. A difference, or an invalid or missing configuration, gives `not_comparable` with the existing reason `mask_config_invalid`. The M1 schema is unchanged.
+5. **A match that rests on masked fields (C2-5).** Checked against the evidence rules: R6.6 turns every `match` into the outcome `supports`; R6.8 limits `experiment` Evidence to "observed Legacy_App behavior"; no gate or limit of the loop reads an Evidence_Status; the status code is always compared, and a Prediction names at least one field. The decision keeps R6.6 literally: such a match stays `match` with the outcome `supports`. The report adds a derived note, computed from the stored Prediction and the mask configuration in the Run_Manifest: the number of predicted fields that were not masked, and the text "status-only agreement" when all predicted fields were masked. The note is shown next to the four facts and does not change any Evidence_Status. No M1 schema change is needed. A stricter rule (outcome `inconclusive` when no predicted field is unmasked) would change R6.6 and R10.5 and is **not adopted**; it needs a requirement change that only the human can approve.
+6. **Responsibilities (C2-6).** Masking and leakage prevention are separate.
+
+| | Masking | Leakage prevention |
+|---|---------|--------------------|
+| Purpose | Make non-deterministic values comparable and records reproducible (R10.2, R22.1) | Keep the Ground_Truth and non-allowlisted content out of what is sent (R2) |
+| Done by | `maskJson` and the Comparator | The Payload_Auditor (checks A03 to A06) and the isolation checks of R15 |
+| Acts on | Predictions and Observations | The exact bytes of every payload |
+| Relied on for confidentiality | No | Yes |
+
+A masked Observation that is part of a revision payload is still audited before it is sent. Masking removes only the configured fields and is not evidence that the rest of the Observation is free of restricted content.
+
+### Comparator decisions (task 2.12; open to review)
+
+These points complete R10 and the "Masking decisions" above. They were found necessary during implementation; they add no requirement and change no M1 schema. They are listed here so that the human can confirm or amend them.
+
+1. **Order of the `not_comparable` reasons.** The first that applies wins: (1) the Experiment is `not_executed`, `timed_out`, or `aborted` (R10.8); (2) the Prediction is missing or malformed, `prediction_missing`; (3) the mask configuration is missing or invalid, or its hash differs from the Observation's, `mask_config_invalid`; (4) a predicted field needs a body that is not structured data, `observation_unparseable`. A body nested too deeply to mask, or an Observation with the wrong shape, is also `observation_unparseable`.
+2. **No valid mask configuration.** The result's `maskSha256` is 64 zeros (the M1 schema requires a hash). Otherwise it is the hash of the configuration given.
+3. **A masked path.** A predicted path is masked when it equals a mask entry or lies below one. Both sides are then masked, so only the existence of the outermost masked node is still checked (the Observation holds the token below it): if that node is absent the difference has the token as the predicted value and the absent marker as the observed value. Nothing below a masked node can differ.
+4. **Missing response.** If the Prediction names a response that is not in the Observation (an index beyond the list), the result is `mismatch` with an absent status and absent fields. The Experiment was executed, so a missing response is an observed fact, not an unreadable body.
+5. **A body that is not JSON.** R10.9 is applied literally: if any field is predicted and the response body is text, empty, or lacks a JSON value, the result is `observation_unparseable`, even when the status code differs. A status difference on such a response is therefore not reported as a mismatch.
+6. **Values inside a predicted value (decided 2026-11-12; replaces the earlier open item).** A predicted value that is an object or a list is masked like the Observation (R10.2). The value is taken to sit at the predicted path, and every mask entry that continues below that path is applied inside it with the rules of `maskJson`: the outermost masked node wins, `[*]` stands for an array index only and never for an object key, a path that is absent is never created, and masking twice is a no-op. If the predicted path itself is masked, the whole value is the token (item 3). The masked values are then compared exactly (R10.3): they must have the same keys and the same list lengths, so a masked key that the Prediction omits, or that the Observation lacks, is still a difference. The Comparator adds no key, and R10.4 is not applied inside a predicted value. The difference shows the masked predicted value, the one that was compared, as a new value; the Prediction is not modified. `maskPredictedValue` implements this. Its result equals masking a body that holds the value at the predicted path and reading the path back (the oracle of Property 13), and the true value at any existing path matches whatever the mask configuration is (the truth property, limited to an equal status, a comparable body and a valid path). The priority of the `not_comparable` reasons (item 1) is unchanged.
+7. **Path rules of the M1 schemas (corrected 2026-11-12; an observation, not a change).** `PATH_PATTERN` (a name first, then `.name` or `[n]`) is applied to the Claim `ResponsePath` (`ExpectedField.path`) only. The Prediction field `path` in `prediction.schema.json` has only `minLength: 1` and `maxLength: 128` and no pattern, and its `value` may be any JSON value. The Comparator reads a predicted path with the same grammar (`parseConcretePath`, which also starts with a name). A Prediction path that passes the schema but does not follow that grammar is therefore `not_comparable` with `prediction_missing` (OD-16), and a path cannot name a field of a body whose root is a list (OD-15). Mask entries may start with an index.
+8. **The absent marker** is `{"$absent": true}` and is a new object in every result; the values in a difference are copies, not references into the inputs.
+9. **The report note (C2-5).** `deriveMaskNote(prediction, config)` returns the number of predicted fields, the masked and unmasked counts, and `statusOnly` (all predicted fields masked). It reads the stored Prediction and the mask configuration only and changes no result.
+10. **Bodies that are not structured data (current behavior, now documented).** (a) An empty body or a text body with a predicted field is `not_comparable(observation_unparseable)`. (b) A JSON scalar body (`bodyKind: json`, for example `5`) is parsed: every predicted path is absent and the result is `mismatch`. (c) When the status code differs and the body is not structured data, the result stays `not_comparable`: R10.9 is read as stronger than R10.6, because an environment failure (for example a gateway error page) is not a contradiction of a Claim. No requirement is changed; reading (c) the other way would need an amendment of R10.9.
 
 ---
 
@@ -1595,7 +1770,7 @@ Human approvals of Claim revisions, Runs and Gates are stored apart from every R
 | Location | `discovery/approvals/approvals.jsonl`, outside every `discovery/runs/<run-id>/` directory (R23.1, R12.16) |
 | Format | JSON Lines, one canonical-JSON record per line (same canonical form as the Evidence_Store: keys sorted, no insignificant whitespace, UTF-8 without BOM) |
 | Chain | Each record carries `seq` (starts at 1, +1, no gaps) and `prev_hash`. The first record has `prev_hash` = 64 zeros (genesis). `hash` = SHA-256 of the canonical JSON of the record without `hash` (R23.2) |
-| Git | The file is **tracked** by Git (not in `.gitignore`): it is small, text, and a hash chain is most useful when its history is kept. Run directories stay ignored (R12.12), so a target `run_id` may refer to a Run that exists only on the machine that made it. Rationales must not contain secrets; the human is responsible. The Kiro development agent never commits (steering) |
+| Git | **Superseded by the user's decision of 2026-11-12 (see "Implementation decisions, batch 1", item 7): real approval data is NOT tracked by Git.** Earlier text, kept for history: the file is **tracked** by Git (not in `.gitignore`): it is small, text, and a hash chain is most useful when its history is kept. Run directories stay ignored (R12.12), so a target `run_id` may refer to a Run that exists only on the machine that made it. Rationales must not contain secrets; the human is responsible. The Kiro development agent never commits (steering) |
 | Runtime access | **Not mounted** into `discovery-runtime` (R6.11 forbids reading it while payloads are built, and R23.3 forbids writing). The Independent_Evaluator and the `report` container mount it read-only. The AI_Sandbox never sees it |
 | Writer | Exactly one: `discovery/tools/Add-ApprovalRecord.ps1`, run on the host (D13) |
 
@@ -1633,6 +1808,7 @@ The defined Gate identifiers are fixed by this design from Requirement 21 and 18
 | `m6-start` | R21.10 | Start of M6 |
 | `m7-start` | R21.10 | Start of M7 |
 | `transmit-source` | R21.11 | Transmitting the Source_Bundle to a named AI_Provider. The rationale must name the AI_Provider and the manifest hashes it covers; the command cannot check that, so the Launcher's gate check compares the hashes at Run start |
+| `m0-checkpoint-exception` | R21.20 | Start of M3 only, while the M0 checkpoint (0.14) is open and after the M2 acceptance condition is met. Not an approval of `start-implementation`, not a past start instruction (R21.19), and not a meeting of the M0 acceptance condition; never carried over to M4 or later. The rationale must name R21.20 and `requirements.md=<sha256> design.md=<sha256> tasks.md=<sha256>` of the approved files; the read-only check `discovery/tools/Test-M3StartGate.ps1` (module `MilestoneGate.psm1`) compares them |
 
 Approval applies to the single action presented (R21.12). A Gate approval is therefore consumed by humans reading the latest record, not by a time window; a withdrawal is a superseding record with decision `rejected` or `needs_changes`.
 
@@ -1661,7 +1837,35 @@ Add-ApprovalRecord.ps1 -Verify
 - **Supersedes (R23.12).** `-Supersedes <seq>` must name an existing record of `type` `approval`, with the same `target`, that no later record already supersedes. The new record must carry all mandatory fields and pass every other check. The superseded record stays in the chain, unchanged and readable.
 - **Concurrency (R23.13).** The command holds a Windows named mutex `Local\ProjectPhoenixApprovalStore` (wait up to 10 seconds; failing to get it is an error and a non-zero exit, nothing written). Under the mutex it reads the last record, builds the new record (`seq` = last + 1, `prev_hash` = last hash), writes the whole new content to `approvals.jsonl.tmp` in the same directory, flushes it, and atomically replaces the file (`File.Replace`). Two concurrent invocations get distinct `seq` values and valid links, because the second one reads the file after the first has replaced it. A failed write removes the temp file, prints an error, exits non-zero, and is never reported as stored. A stale `.tmp` is reported by verification.
 - **Verify (R23.9).** `-Verify` opens the file read-only, recomputes every link and hash, and reports each mismatch with `seq` and kind `modified`, `missing` or `chain_break`. It exits 0 only if there is no mismatch. The TypeScript `ApprovalReader.verify()` performs the same check for the evaluator and the `report` container. Verification without an external anchor cannot detect removal of trailing records (M1 review resolution 7); a zero exit status then means "no mismatch in the records present", not "the store is complete".
-- **Modify or delete.** The command has no such verb. An attempt (an existing `seq`, an `-Overwrite`-style argument, a hand edit found by `-Verify`) is refused and, for a request through the command, a `store_rejection` line is appended (R23.2).
+- **Modify or delete.** The human-facing command has no modify or delete parameter. A request to modify or delete a stored record can only arrive as a request with the operation `modify` or `delete` at the store layer (see "Store-layer request interface"); it is refused and a `store_rejection` line is appended (R23.2). A hand edit of the file is not a request; `-Verify` finds it and reports it (read-only).
+
+**Staged delivery.** The command is delivered in two parts. Part 1 (task 2.25, M2) is needed before the override can be applied (R18.20) and before the Launcher gate check can pass: target kind `gate:` only, all validations, chain, atomic write under the store mutex, `-Supersedes`, the store-layer request interface with the refusal of `modify` and `delete` requests, `-Verify`, and a read function for the Launcher that returns the latest decision per Gate. A `run:` or `claim:` target is rejected as unresolvable, which is what R23.7 requires while no Run exists. Part 2 (task 4.10, M4) adds target resolution for `run:` and `claim:` and the external anchor (resolution 11 of the M1 review). Until the anchor exists, `-Verify` and the Launcher read function report only that no mismatch exists among the records present (R23.14), tail truncation is not detected, and `recorded_by` is a declaration that the command cannot authenticate. Both limits are residual risks with status `unresolved`; the Launcher gate check is a backstop, not a replacement for the procedure. The command never writes a real record on its own initiative (R23.8), and its tests use a temporary store.
+
+#### Store-layer request interface (OD-7, C11)
+
+R23.2 speaks of requests to the Approval_Store that modify or delete a stored record, and R23.7 of new records that are invalid. The two are told apart by the operation of the request, which the store layer receives explicitly, and not by command-line flags.
+
+The Approval_Store has one write path: the PowerShell module `discovery/tools/ApprovalStore.psm1`. Its function `Invoke-ApprovalStoreRequest` takes a request with an operation and is the only code that opens `approvals.jsonl` for writing (a static test checks this).
+
+| Operation | Meaning | Outcome |
+|-----------|---------|---------|
+| `append` | Add a new Approval_Record. A correction or withdrawal is an `append` with `supersedes` (R23.12) | Valid: the line is appended (`stored`). Invalid under R23.7: refused (`invalid`), every violated field named, the store is byte-identical, no line is added, non-zero exit |
+| `modify` | Change a stored record | Refused (`refused`): a `store_rejection` line with the fixed reason `modify_refused` is appended, with `attempted_seq` when the request names a sequence number that exists; stored lines are unchanged; non-zero exit |
+| `delete` | Remove a stored record | The same, with the fixed reason `delete_refused` |
+| any other value | Not a request the store understands | Refused (`invalid`), byte-identical, no line, non-zero exit |
+
+Entry points. They are thin; none opens the store itself.
+- `Add-ApprovalRecord.ps1` is the human-facing command. Its parameters stay as designed (approver, decision, target, rationale, actor, optional `-Supersedes`, and `-Verify`). It builds an `append` request. A static test checks that it declares no parameter for modify or delete.
+- A test harness reaches the store layer the way a real caller does. The reachability of the `modify` and `delete` refusals is verified first through a script that exists for the tests only (`tests/discovery-loop/ApprovalStoreRequestHarness.ps1`), which reads one JSON request document and calls `Invoke-ApprovalStoreRequest` in a child `pwsh` process. It is not a general-purpose command, it is not used to write the real store, and nothing mounts it. Whether a general request front end is added later is open: **the human reviews the C11 design again before task 2.25 is implemented** (reservation of 2026-11-12; the `-RequestFile` command proposed earlier is not approved).
+
+Rules of the store layer:
+- The chain is verified before any write, a rejection line included. If verification fails, nothing is written (the file stays byte-identical), the failure is reported with the kind and the sequence number (R23.9), and the exit status is non-zero. A damaged chain is reported and not extended.
+- The reason of a `store_rejection` line is one of the fixed strings above. Nothing from the request is copied into the line, so a rejected request cannot carry text into the store. The line shape is unchanged from M1 (no schema change); the M1 reader ignores such lines for the Approval status.
+- Every write, a rejection line included, takes the store mutex and uses the atomic replace of the host-side command.
+- `store_rejection` lines take a sequence number and are part of the chain. The external anchor (R23.14, task 4.10) covers the last sequence number and the last-record hash including such lines.
+- Residual risks (status `unresolved`): a rejection line has no timestamp and no actor, so it cannot tell who made the request; the number of rejection lines is not limited.
+
+Verification: unit tests of the function for every row of the table, and process-level tests that start `pwsh -File` on a temporary store for `Add-ApprovalRecord.ps1` and for the test harness and check exit status, messages, and the bytes of the store, including: a `modify` and a `delete` request sent through the test harness leave every stored line byte-identical and append exactly one `store_rejection` line; an invalid `append`, through `Add-ApprovalRecord.ps1` and through the test harness, leaves the whole file byte-identical; an `append` on a damaged chain writes nothing.
 
 #### Approval status (R6.9)
 
@@ -1750,6 +1954,17 @@ sequenceDiagram
 
 **Lock timing (R24.6, R24.11).** The conformance mutex is held from before the Run_Volume is created until the runtime container has stopped (confirmed by `docker inspect`) and the lease is revoked; it is then released. The Run-level lock is held until the export has ended with the outcome `complete` or `incomplete`. The export does not touch the Legacy_App, so releasing the mutex before it is safe for the conformance runner, while a second Run cannot start until the export is done.
 
+#### Testable structure of the Launcher (tasks 2.18, 2.23)
+
+- **One Docker entry point.** Every call of the Docker CLI goes through a single function, `Invoke-DockerCli`. Unit tests replace it with a fake that records its calls, so no test needs a Docker daemon, and a test can assert that no real `docker` process was started. Real Docker is used only in the steps that name it (2.20, 4.16, 4.18) and only after the approvals named there.
+- **Lock acquisition as a function, not as an option.** `Enter-DiscoveryLocks` takes the mutex name and the lock file path as arguments. The script entry point calls it with the fixed constants `Local\ProjectPhoenixGroundTruthEvaluation` and `discovery/locks/discovery-run.lock`. The script has no command-line parameter, environment variable, or configuration value that changes either, so a mistake in a Run command cannot remove the exclusion from the conformance runner. A static test checks that the entry point has no such parameter and contains the exact constants.
+- **Tests use a test-specific mutex name.** Launcher unit tests (2.23) call `Enter-DiscoveryLocks` with a name such as `Local\ProjectPhoenixTest-<random>`. The type is the real `System.Threading.Mutex`, not a mock, so the abandoned-state behavior is real; only the name differs, so these tests cannot disturb a conformance run. They are not the evidence for R24.13(a), (b), and the runner side of (d, abandoned), which need the built-in real name. That evidence comes from the runner measurement of task 2.22 and the lock tests of tasks 5.14 and 5.15, each run only with user confirmation while no conformance run is active.
+- **Image selection.** A Run starts only the `discovery-runtime` image. Any other image is a probe, allowed only through the probe profile of task 2.20 after OD-12 is resolved; the Launcher record names the image digest and marks the start `probe`; a probe never counts as a Run and is refused for a real Run. The decisions of 2026-11-13 (run id, exit codes, probe profile, helper images) are recorded under "Implementation decisions, batch 1 (2026-11-13)" at the end of this document.
+
+#### Runtime-side lease watcher and adapters (task 2.15)
+
+The state function of the watcher is pure: its input is a view of the lease directory (`lease.json`, `heartbeat`, `revoked`) and a monotonic clock, and its output is `LeaseState` with one of the reasons in the table below. The `heartbeat_stale` rule uses only the runtime's own monotonic clock ("the counter value has not changed for the staleness window", default 4 seconds). The Node.js `LeasePort` adapter reads `/run/lease/` read-only and never writes it, and checks before the Run and before every request. The Node.js `HttpPort` adapter sends only to the address accepted by the address check and honors the time limits and the `AbortSignal`. Both adapters use Node.js built-ins only and expose no file-write, process, Docker, or Git operation. Property 34 and the unit tests of 2.17 run the state function with a fake clock and the adapters against a temporary directory and a local fake server. The start-up rule, the treatment of read failures, and the settings are defined in "Lease timing" below and take precedence over the 4-second default named here.
+
 #### Run_Lease (R24.7, R24.9)
 
 The lease is a directory `discovery/leases/<run-id>/`, mounted read-only at `/run/lease/` (a directory mount, because replacing a single mounted file by rename would break the mount).
@@ -1763,7 +1978,7 @@ The lease is a directory `discovery/leases/<run-id>/`, mounted read-only at `/ru
 
 The random 128-bit nonce is held by the Launcher and passed to the container in the environment variable `PHOENIX_LEASE_NONCE` together with `PHOENIX_RUN_ID`. It is not a secret (it protects against a stale or copied lease directory, not against an attacker in the container). The runtime accepts the lease only if `lease.json` parses, `run_id` equals `PHOENIX_RUN_ID`, `SHA-256(PHOENIX_LEASE_NONCE)` equals `nonce_sha256`, `revoked` does not exist, and the heartbeat counter has **changed** within the staleness window.
 
-The runtime measures staleness with its own monotonic clock: "the counter value has not changed for 4 seconds". It never compares the Launcher's timestamps with its own clock, so host/container clock drift cannot invalidate a live lease or keep a dead one alive. The Launcher renews every 1 second and the runtime watches every 500 ms (defaults, configurable inside fixed bounds).
+The runtime measures staleness with its own monotonic clock: "the counter value has not changed for 4 seconds". It never compares the Launcher's timestamps with its own clock, so host/container clock drift cannot invalidate a live lease or keep a dead one alive. The Launcher renews every 1 second and the runtime watches every 500 ms (defaults; the bounds are fixed in "Lease timing" below).
 
 `LeaseState.reason` and what the runtime does:
 
@@ -1775,6 +1990,83 @@ The runtime measures staleness with its own monotonic clock: "the counter value 
 
 `launcher_pid` and `launcher_start_ticks` are recorded for diagnosis. The container cannot verify a host PID, so "bound to the Launcher process" means: only that process renews the heartbeat, and the Run stops when it stops.
 
+#### Lease timing (OD-7, C8-A to C8-E)
+
+This section supersedes the fixed values of the paragraphs above (the 4-second default, the 500 ms watch interval, and the start-up check). The earlier range proposals (heartbeat interval up to 5000 ms, staleness up to 30000 ms) are withdrawn: with the rule S >= 3 H they would allow a stop time far above the 10 seconds of R24.12.
+
+**Settings.**
+
+| Symbol | Meaning | Default | Range |
+|--------|---------|---------|-------|
+| H | `heartbeatIntervalMs`: the Launcher increments the counter at least this often | 1000 ms | 500 to 2000 ms |
+| P | watch interval of the runtime | min(500, H / 2) | fixed by this formula |
+| S | `staleAfterMs`: no change of the counter for this long makes the lease stale | 4000 ms | 3 H to 6000 ms |
+| D | measured propagation delay, the largest round trip seen in the measurement of task 2.27 | none until measured | measured |
+| A | budget to abort an in-flight request, record it, and exit | 2000 ms | fixed |
+| J | allowance for the Launcher's timer and scheduling jitter | 250 ms | fixed |
+| U | hold limit for an indeterminate reading | S / 2 | derived |
+
+Three rules are checked, with the measured D, by the Launcher before it starts a Discovery Run and by the runtime when it starts. A failure refuses the start (non-zero exit, `lease_timing_invalid`, no Run_Volume, no lease, no container; the runtime sends no request and writes no Experiment record):
+
+1. S >= 3 H (at least two missed beats are tolerated).
+2. S >= H + 2 P + D + J (a healthy Launcher is never judged stale).
+3. S + P + D + A <= 10000 ms (a killed Launcher is detected and the Run stopped inside the 10 seconds of R24.12).
+
+With the defaults, rule 2 allows D up to 1750 ms and rule 3 up to 3500 ms, so D <= 1750 ms. If the measured D is larger, S must be raised, but never above 6000 ms and never so far that rule 3 fails; if that is impossible the 10-second requirement cannot be met on that machine and the Launcher does not start Runs. The runtime clock is a monotonic clock (`MonotonicClock { nowMs(): number }`, injected); the wall-clock `Clock` is not used.
+
+**Start-up liveness proof.** Before the first request of a Run, the runtime must see the counter change. It reads `lease.json` (it must parse, name `PHOENIX_RUN_ID`, carry the hash of `PHOENIX_LEASE_NONCE`, and carry the same H and S as the run configuration), checks that `revoked` does not exist, reads the counter c0 and the time t0, and polls every P until a read shows a value greater than c0. If no change is seen within S of t0, the lease is `heartbeat_stale` and the Run does not start; no request has been sent. A healthy Launcher increments within H, so the proof takes about H + D + P (about 1.5 to 2.5 seconds with the defaults, and it scales with H); a stopped Launcher cannot produce a change, so no value of S lets a stopped Launcher pass, and a copied or old directory is also stopped by the nonce.
+
+**Running rule.** The lease is valid if and only if the content of `lease.json` is the content checked at start (compared by hash), `revoked` does not exist, and less than S has passed on the monotonic clock since the poll that first saw the current counter value.
+
+**Counter.** The counter starts at 1 and the Launcher only increases it. A value lower than the last value seen is `malformed` (integrity violation); an equal value is "no change".
+
+**Read results.** Each read has one of three results: ok, absent (the file does not exist), or error (any other failure, including an unparsable value).
+
+| File | absent | error |
+|------|--------|-------|
+| `revoked` | not revoked | indeterminate |
+| `lease.json` | `missing` | indeterminate (a changed content is `malformed`) |
+| `heartbeat` | no observation | no observation |
+
+"No observation" is neither a change nor a failure: the staleness time keeps running and ends the lease only when S is reached.
+
+**Hold.** When the synchronous check before a request finds an indeterminate reading, it repeats the reading up to 3 times, 100 ms apart. If the reading is still indeterminate, the request is held: it is not sent, and it is not failed. The check is repeated every P. The hold ends when the reading becomes determinate (then the normal rules apply) or when U has passed since the first indeterminate reading; then the lease is `unreadable`, the Run ends with the termination reason `lease_unavailable`, and R9.5 decides between `not_executed` and `aborted` for the Experiment. Time spent on hold counts toward the per-request and per-Experiment time limits (R9.14). The mapping of reasons to termination reasons is unchanged: `heartbeat_stale` gives `launcher_killed`; every other reason, `unreadable` included, gives `lease_unavailable`. A request is never sent while the reading is indeterminate, so a transient failure delays a request and never lets one through. The residual race between the last check and the sending of one request is bounded by the watcher (P) and the abort of that request.
+
+**Launcher duties.** The Launcher writes `lease.json` (with `heartbeat_interval_ms` and `stale_after_ms` added to the fields above), then writes the counter 1 at once, and then increments it by 1 at intervals of at most H, scheduling each beat from the previous one so that delays do not accumulate. It never writes a smaller value. It counts the beats that were later than H + J and records the count in the Launcher record. At the end it writes `revoked` first and then removes `heartbeat`. The lease directory is kept after the Run for diagnosis (`discovery/leases/` is not tracked by Git).
+
+**No Discovery Run without a measured D.** The Launcher starts a Discovery Run only if `discovery/config/lease-timing.json` is a valid measurement record. The validation module belongs to task 2.18 and recomputes everything; it trusts nothing in the file except the measured numbers. A record is valid only if: `kind` is `lease-timing-measurement` and `schemaVersion` is 1; the hash of the settings (H, P, S, A, J) in the record equals the hash of the settings of this start; the recorded Docker server version equals the current one; the propagation phase has at least 300 beats and a maximum round trip D; the start-up phase has at least 10 healthy trials that passed and at least 5 trials with a stopped writer that were all refused with no request; the kill phase has at least 10 samples and every sample is at most 10000 ms; and the three rules hold with D. Otherwise the Launcher exits non-zero with `lease_timing_unmeasured`, creates no Run_Volume, no Run directory, no lease, and no container. The gate applies equally to the probe profile of task 2.20. The SHA-256 of the record used is written to the Launcher record of the Run. It is not written to the Run_Manifest, so the M1 schema is unchanged. The record has to be measured again when the settings or the Docker server version change.
+
+**What the record proves, and what it does not.** `lease-timing.json` is an observation record, not a guarantee. It states the date; the conditions (the settings H, P, S, A, J and their hash, the Docker server version, the operating system and Docker details as reported by Docker, the probe image digest, the kind of mount of the lease directory, and the numbers of beats and trials); and the largest values observed (the round trip D, the 99th percentile, the largest gap between two observed changes, and the largest kill-to-stop time), with their sample counts. A valid record means only that a measurement under these conditions was done and that its numbers meet the rules. It does not prove that a Run on another machine, with another Docker version, with other settings, or under a heavier load stops within 10 seconds. Neither the Launcher output, the Launcher record, the Run_Manifest, nor any report may claim a verified stop time beyond the recorded conditions; they say "measured under <conditions>, maximum observed <value>, not verified for other environments". A change of the settings or of the Docker server version invalidates the record (the gate). Other changes of the environment are not detected and are a residual risk.
+
+**Lease timing measurement (not a Discovery Run).** The measurement has its own entry point, `discovery/tools/Measure-LeaseTiming.ps1` (task 2.27), and cannot be started through `Start-DiscoveryRun.ps1`. The Launcher cannot write the record.
+
+| | Discovery Run | Lease timing measurement |
+|---|---------------|---------------------------|
+| Entry point | `Start-DiscoveryRun.ps1` | `Measure-LeaseTiming.ps1` |
+| Legacy_App, Test API, lab network | Used | Never touched; the container has `--network none` |
+| AI provider, Experiments, Payloads | Used (Mock or real) | None |
+| Conformance mutex | Held | Not taken (no Legacy_App access) |
+| Run-versus-Run lock | Held | Held, so that a measurement never overlaps a Run |
+| Run_Volume, `discovery/runs/` entry, Run_Manifest, Evidence records | Created | None created |
+| Container | `discovery-runtime` image, label `phoenix.discovery.role=runtime` | Toolchain image, label `phoenix.discovery.role=lease-measure` (the Run recovery of R24.12 does not touch it) |
+| Lease directory | `discovery/leases/<run-id>/` | `discovery/leases/measure-<id>/` (read-only in the container) and `discovery/leases/measure-<id>-ack/` (read-write) |
+| Output | Run records and export | `discovery/config/lease-timing.json` only |
+| Approval | Gates of the Run | User confirmation of each execution |
+
+The container mounts only the lease directory (read-only), the acknowledgement directory (read-write), `packages/` (read-only), and the `node_modules` volume (read-only); it has no repository root, no `evaluation/`, no `legacy/`, no `.env`, no Docker socket, and no environment secret. It runs the lease watcher module of task 2.15 unchanged, plus a small harness that acknowledges every change it observes. Phases:
+
+1. **Propagation.** The host writes the counter at the interval H for at least 300 beats. The container writes an acknowledgement file for every new value. The host records the time from writing a value to seeing its acknowledgement. The largest such round trip is D; it is an upper bound of the one-way delay because the clocks of host and virtual machine are never compared. The reader side also records the largest gap between two observed changes (check of rule 2 against real jitter).
+2. **Start-up proof.** At least 10 starts of the container with a healthy writer must pass the proof; at least 5 starts with a stopped writer must be refused with zero requests (counted by a fake HTTP port in the harness).
+3. **Kill to stop.** At least 10 trials: the host starts the writer as a separate process, starts the container, waits for the proof, kills the writer process (`Stop-Process -Force`), and measures with the host stopwatch the time until the container is no longer running. Every sample must be at most 10000 ms.
+
+**Acceptance of the 10-second requirement.** The requirement of R24.12 is not met by the formulas alone. It is accepted in two steps. Step 1 (M2): a valid record, with every kill sample at most 10000 ms. Step 2 (M4 and M5): the same measurement with the real Launcher and the runtime image (tasks 4.14 and 4.19), and the lock tests of R24.13(e) (task 5.15). Until step 1 is done the status of the 10-second stop is **UNVERIFIED**, and no Discovery Run starts.
+
+**Verification (Property 34).** The property is run over generated settings (H, S, P inside the ranges and the three rules), a fake monotonic clock, and scripted beat sequences: a healthy writer (beats at most H apart, delays up to D, jitter up to J) is never judged invalid at start or while running; a writer that stops is judged invalid no later than S + P (+ D) after its last visible change, and a writer that was already stopped at start never passes the proof and no request is sent; a counter decrease is `malformed`; transient read failures shorter than U never end the Run and never let a request through; an indeterminate reading for U ends the Run as `lease_unavailable`.
+
+**What Property 34 does and does not establish (decision of 2026-11-12).** "A healthy writer is never judged invalid" is a property **of the test model**: beats at most H apart, delays at most D, jitter at most J, a monotonic clock that does not pause, and checks that are not further apart than the model allows. It is not an unconditional guarantee for the real environment: D is the maximum of a finite sample, and host load, sleep, `docker pause`, or a stalled Launcher fall outside the model. In those cases the lease may be judged stale although the Launcher is alive, which is the safe direction. The priority of the design is the other property: **when the lease is invalid, indeterminate, or cannot be read, no new HTTP request is sent.** That holds by construction (a request is sent only after a check answered `valid`, an invalid state is latched, a failing check is treated as `unreadable`, an indeterminate reading is held), not by the timing model. What remains is the race between the last check and the sending of one request, bounded by the watcher interval P and by the abort of the request in flight. The 10-second stop stays UNVERIFIED until task 2.27.
+
+**Residual risks (status `unresolved`).** D is the maximum of a finite sample, not a bound; the delay under heavy host load is not measured. Sleep or hibernation of Windows and `docker pause` stop the beats and end the Run as `launcher_killed`, which is the safe direction. The window of the "Honest window" paragraph remains until step 2 is done.
+
 ### Normal end, error end, kill
 
 1. **Normal or error end.** The Launcher stops the container (`docker stop`, then `docker kill` if needed), confirms with `docker inspect` that it is not running, only then revokes the lease, and only then releases the mutex (R24.11). It then runs the export (Evidence_Store, Run_Volume procedure) and releases the Run lock last, after the export ended as `complete` or `incomplete` (R24.6). If anything in the Launcher throws, a `finally` block runs the same sequence, and a failure of the export never skips the lock release.
@@ -1782,6 +2074,7 @@ The runtime measures staleness with its own monotonic clock: "the counter value 
 3. **Next Launcher start.** It takes both locks with zero wait first. If the mutex is returned in the abandoned state, it stops as described under *Abandoned mutex* and the **following** explicit start continues. Once it holds both locks normally, it stops containers carrying the label `phoenix.discovery.role=runtime`, confirms they are stopped, and, for every Run_Volume that has no verified completed export, writes a Reason_File `interrupted` into `discovery/runs/.incoming/<run-id>/` (creating it if needed), keeps the volume, and writes no Completion_Marker (R24.12). Then it creates a new Run_Volume. This is the order required by R24.12 (note C9): stopping containers before holding the locks could stop the container of a live Run owned by another Launcher.
 
 **Honest window.** Between the kill and the runtime's detection (about 4 to 5 seconds, plus Docker file-change propagation, UNVERIFIED, OD-3) the mutex is already free but the container may still send a request. A conformance runner started in that gap would not be stopped by the mutex. The window is bounded by the staleness setting and is accepted as a residual risk until a measurement shows its real size. A new Launcher is not affected, because it stops the leftover container before it creates a Run.
+Superseded in part: the window is bounded by S + P + D (see "Lease timing"), D is measured by task 2.27, and no Discovery Run starts without a valid measurement record.
 
 ### Interim until the Launcher locking exists (R24.1 to R24.3, R9.6)
 
@@ -1791,7 +2084,7 @@ MVP completion requires the mechanical lock and the test plan below (R21.18, R24
 
 ### Test plan for R24.13 and R24.14 (real named mutex, no mock, no external AI)
 
-The tests are PowerShell 7 scripts in `tests/discovery-loop/` in the style of `tests/legacy-sample/`. They use the real Launcher, the real conformance runner script (unmodified), the real named mutex, and a lease-probe container (the runtime image with an entry point that runs only the lease watcher module and waits), so a long-running "Run" is available without an AI provider. A full Mock Run is tested separately in M4.
+The tests are PowerShell 7 scripts in `tests/discovery-loop/` in the style of `tests/legacy-sample/`. They use the real Launcher, the real conformance runner script (unmodified), the real named mutex, and a lease-probe container (the runtime image with an entry point that runs only the lease watcher module and waits), so a long-running "Run" is available without an AI provider. A full Mock Run is tested separately in M4. This table is the acceptance plan (tasks 5.14 and 5.15, plus the runner measurement of 2.22) and uses the real mutex name. The Launcher unit tests of task 2.23 use a test-specific mutex name through `Enter-DiscoveryLocks` (see "Testable structure of the Launcher") and are not counted as this evidence.
 
 | Case | Setup | Expected result |
 |------|-------|-----------------|
@@ -1809,7 +2102,7 @@ Further unit-level tests (Vitest) cover the lease watcher module: states `missin
 
 1. The runtime cannot observe the mutex. The lease is a stand-in signal that the Launcher, which does own the mutex, is alive.
 2. The window described above is real until measured.
-3. Bind-mount change propagation for the lease directory on Docker Desktop for Windows is **UNVERIFIED** (OD-3). If propagation is slow, the staleness setting must be raised or the 10-second target is missed; M2 measures this before the Launcher is trusted.
+3. Bind-mount change propagation for the lease directory on Docker Desktop for Windows is **UNVERIFIED** (OD-3). If propagation is slow, the staleness setting must be raised or the 10-second target is missed; task 2.27 measures it, and no Discovery Run starts without a valid measurement record ("Lease timing").
 4. The conformance runner's behavior on an abandoned mutex is **UNVERIFIED** and observed in test (d, abandoned). It is read from the script (`WaitOne(0)` with no handling) as "throws, runs no scenario", which is not a measurement.
 5. The Launcher protects against concurrent use by itself and the unmodified runner. It does not stop a person from calling `docker compose` or `docker run` by hand; that path is outside the supported way (R24.7) and is covered by the procedure.
 6. The guarantee covers one host and one Windows logon session only (A11, `Local\` namespace). Exclusion across sessions, users or hosts is not provided and is a residual risk with status `unresolved`.
@@ -2231,11 +2524,19 @@ The reflection step removed redundancy: the encoding cases of R7.5, R8.4 and R8.
 
 **Validates: Requirements 9.4, 9.5, 24.9, 24.12, 24.15**
 
+The property is run over generated settings that satisfy the three rules of "Lease timing" (H from 500 to 2000, S from 3 H to 6000, P as defined), a fake monotonic clock, and scripted beat sequences. A healthy Launcher (beats at most H apart, propagation delays up to D, jitter up to J) is never judged invalid, at start or while the Run is in progress. A Launcher that has stopped is judged invalid no later than S + P (+ D) after the last change the runtime saw, and a lease whose Launcher was already stopped at start never passes the start-up proof and no request is sent. A counter that decreases is `malformed`. Transient read failures of `revoked` or `lease.json` shorter than U delay a request and never end the Run or let a request through; an indeterminate reading that lasts U ends the Run as `lease_unavailable`; failures of `heartbeat` are only "no observation".
+
 ### Property 35: Claim revisions without supporting evidence are listed by Evidence only
 
 *For any* set of applying Claim revisions with any four-fact values, a revision is in the "no supporting evidence" list if and only if neither its `source` nor its `experiment` Evidence_Status is `supported`, regardless of its Approval status and Origin; and each report entry carries the four facts as four separate fields with no combined field.
 
 **Validates: Requirements 6.10, 14.10**
+
+### Property 36: Preparation steps are validated and translated by one definition
+
+*For any* preparation table accepted by `loadPreparationTable` and *for any* preparation step (a kind and parameters, valid or not), the rule POL-011 of the Experiment_Policy accepts the step if and only if the runner's translation of the step succeeds, and both use the one loaded definition. In particular POL-011 rejects a step that gives only one of `product_n` and `quantity_n`; that leaves a gap in the numbering; that uses an index above the maximum, an index of 0, or an index written with a leading zero; that has fewer lines than the minimum; that has a value of the wrong type or outside its range; and that has a parameter the table does not define. For an accepted step the translated body lists the lines in numeric order with exactly the given values. A table that would allow more than 16 parameters for one kind is refused by the loader.
+
+**Validates: Requirements 7.3, 8.2, 8.3, 9.10, 9.12**
 
 ---
 
@@ -2288,7 +2589,7 @@ Error records never contain a secret, a canary, a decoy or a fingerprint value. 
 
 ### Property-based tests
 
-- One property-based test per Correctness Property (Properties 1 to 35), each configured for **at least 100 iterations**.
+- One property-based test per Correctness Property (Properties 1 to 36), each configured for **at least 100 iterations**.
 - Each test carries a comment with the tag `Feature: discovery-loop, Property N: <property title>`.
 - Deterministic modules take injected ports (`FileSystemPort`, `HttpPort`, `LeasePort`, `Clock`, `AiProvider`), so properties run without Docker, network or wall-clock time. Generators produce edge cases: mixed line endings, empty files, BOM, non-BMP characters, boundary line ranges, deeply nested JSON, duplicate keys, encodings of denied paths.
 - Properties 5 to 8 and 31 use generated sequences of store operations over an in-memory store with the real status functions; Property 6 compares the serialized representation of all four facts before and after each single update.
@@ -2339,11 +2640,11 @@ The MVP is **M0 to M5**. Implementation of M0 to M5 starts only on an explicit h
 
 | Milestone | Content | Acceptance (summary) | MVP | Gate before start | Properties and tests |
 |-----------|---------|----------------------|-----|-------------------|----------------------|
-| M0 | Prerequisites: Version_Pinning_Record, container-based Node.js runtime, drafted Discovery_Override (artifacts listed in M0 Artifacts; all versions are `candidate_observed` until verified) | Verified exact versions (**pending**: candidates only until the approved pull and install); `container-runtime` approved; `override-draft` approved; no host installation (R21.17) | Yes | `start-implementation` | Pinning consistency check; host has no new installation |
-| M1 | Schemas, Evidence_Store, Approval_Store and the PowerShell approval command, status engine | Fixtures validate; hash chains verify for both stores; round trips; altered record reported; every incomplete Approval_Record rejected (R21.2) | Yes | none beyond M0 | 5, 6, 7, 8, 14 to 17, 31 to 33, schema fixtures |
-| M2 | Source_Bundler, Experiment_Policy, Experiment_Runner, lease watcher module | Bundle equals allowlist; error cases; one Experiment executed after reset; policy rejects match; lease tests | Yes | User confirmation before any test that touches the Legacy_App (R21.3) | 1 to 4, 9 to 13, 34, runner tests |
+| M0 | Prerequisites: Version_Pinning_Record, container-based Node.js runtime, drafted Discovery_Override (artifacts listed in M0 Artifacts; a version counts as verified only when its entry in `docs/version-pinning.json` has the status `verified`, R20.13) | Verified exact versions (status per `docs/version-pinning.json`, tasks 0.9, 1.1 and 1.2; the toolchain packages were verified in 0.9 and `ajv` and `ajv-formats` in M1); `container-runtime` approved; `override-draft` approved; no host installation (R21.17). The M0 checkpoint (tasks.md 0.14) is still open because 0.13 (`override-apply` approval) is open | Yes | `start-implementation` | Pinning consistency check; host has no new installation |
+| M1 | Schemas, Evidence_Store, Approval_Store core (validator, chain, reader, golden vectors), status engine. The PowerShell approval command is not in M1: its minimal part is task 2.25 (M2) and the rest is task 4.10 (M4) | Fixtures validate; hash chains verify for both stores; round trips; altered record reported; every incomplete Approval_Record rejected by the validator (R21.2) | Yes | none beyond M0 | 5, 6, 7, 8, 14 to 17, 31 to 33, schema fixtures |
+| M2 | Source_Bundler, Citation_Verifier, Experiment_Policy, Comparator, Experiment_Runner, lease watcher module with the `LeasePort` and `HttpPort` adapters (task 2.15), Launcher scripts (2.18, 2.21, 2.22), minimal approval command with the store-layer request interface (2.25), policy amendment for numbered preparation parameters (2.26), lease timing measurement (2.27) | Bundle equals allowlist; error cases; one Experiment executed after reset; policy rejects match; lease tests; Launcher and approval command unit tests; a valid lease-timing record from the measurement of task 2.27 (every kill-to-stop sample at most 10 seconds) | Yes | User confirmation before any test that touches the Legacy_App (R21.3) | 1 to 4, 9 to 13, 34, runner tests |
 | M3 | AI client, Payload_Auditor, Mock_Provider | Identical responses; switch by configuration only; every blocked payload is blocked | Yes | none | 19 to 22 |
-| M4 | One full loop with the Mock_Provider: orchestrator, runtime image, Launcher (locks and lease), access-denial verification, `discovery-lab` measurement | Terminates with a reason; manifest verifies; both start-gate inputs pass; override applied under `override-apply`; `discovery-lab` measurement exists; two identical Runs | Yes | `override-apply` | 18, 23, 24, 25, isolation checks, end-to-end Mock Run |
+| M4 | One full loop with the Mock_Provider: orchestrator, runtime image wired to the Launcher (the Launcher itself is written in M2), access-denial verification, `discovery-lab` measurement | Terminates with a reason; manifest verifies; both start-gate inputs pass; override applied under `override-apply`; `discovery-lab` measurement exists; two identical Runs | Yes | `override-apply` | 18, 23, 24, 25, isolation checks, end-to-end Mock Run |
 | M5 | Independent_Evaluator, `report` entry point, **mechanical lock tests** | Refuses a bad hash; separate axes; reason codes and limitations; byte-identical output; lock tests (a) to (e) pass with the real mutex (R21.6, R24.13) | Yes | none | 26 to 30, 35, evaluator container checks, golden test on the committed baseline, lock tests |
 | M6 | AI_Sandbox build and measurement; no source sent | Measured rights recorded; Requirement 16 checked item by item; safety status recorded | **No** | `m6-start` | Environment checks only |
 | M7 | Real AI connection and one demonstration Run | Run with the Kiro_CLI_Provider terminates, passes the audit before every transmission, is scored | **No** | `m7-start` and `transmit-source` | One gated Run; the M4 Run is the regression baseline |
@@ -2423,16 +2724,239 @@ Decided and removed from this list: the form of the `discovery-lab` addition (se
 
 | ID | Decision | Options | Recommendation |
 |----|----------|---------|----------------|
-| OD-1 | Version pinning: **verification pending**. All pinned values are `candidate_observed` (see M0 Artifacts). Verification needs the approved image pull and the approved `npm ci`, then the compatibility checks of `pending_checks` | Verify each version, record evidence with date and source; replace a candidate only with a recorded change | Verify at the first approved pull and install; implementation of dependent parts does not start before |
+| OD-1 | Version pinning: **resolved** by tasks 0.9, 1.1 and 1.2 (status per entry in `docs/version-pinning.json`; the original wording follows). Original: all pinned values were `candidate_observed` (see M0 Artifacts). Verification needed the approved image pull and the approved `npm ci`, then the compatibility checks of `pending_checks` | Verify each version, record evidence with date and source; replace a candidate only with a recorded change | Verify at the first approved pull and install; implementation of dependent parts does not start before |
 | OD-2 | AI_Sandbox controller form and egress proxy product (M6) | Host PowerShell controller per call (recommended) versus a long-lived sandbox agent. Proxy product and destination list chosen in M6 | Controller per call; decide the proxy in M6 |
-| OD-3 | Windows and Docker Desktop file behavior: **directory rename atomicity on NTFS** (not assumed), **bind-mount behavior** (including the reported non-root append problem, https://github.com/microsoft/WSL/issues/41991, locally unverified), read-only enforcement for file and directory mounts, rename and fsync inside a named volume, volume ownership for the runtime uid, symbolic-link and junction handling, and **lease propagation latency** to the lease directory | Measure in M1, M2 and M4 | Measure before relying on any of it. A slow lease propagation raises the staleness setting or fails the 10-second kill target |
+| OD-3 | Windows and Docker Desktop file behavior: **directory rename atomicity on NTFS** (not assumed), **bind-mount behavior** (including the reported non-root append problem, https://github.com/microsoft/WSL/issues/41991, locally unverified), read-only enforcement for file and directory mounts, rename and fsync inside a named volume, volume ownership for the runtime uid, symbolic-link and junction handling, and **lease propagation latency** to the lease directory | Measure in M1, M2 and M4 | Measure before relying on any of it. A slow lease propagation raises the staleness setting or fails the 10-second kill target. Lease propagation and the time from a Launcher kill to the stop of the container are measured by the separate procedure of task 2.27 ("Lease timing"); the other items stay with tasks 2.18, 2.20, and 4.x |
 | OD-4 | Fingerprint policy for the Conformance_Baseline | Exclude observed-response subtrees (recommended; observed responses cannot be told from legitimate Observations) versus fingerprint everything and accept false blocks | Exclude and record the residual |
 | OD-5 | Evaluator implementation details: expression evaluator re-implementation versus a shared pure package, the mapping of Baseline units to the evaluator's input document, the reference matcher kinds, and the data that marks `fixture_not_reproducible` and `unsupported_request_form` | Re-implement with shared golden vectors (recommended); verify the mapping and the marker data against the real files in M5 | Re-implement; verify in M5 |
 | OD-6 | Dependency-analysis tool | dependency-cruiser plus a custom scanner (recommended), madge, or a custom scanner only | dependency-cruiser plus scanner; dependency-cruiser 18.7.2 is still `candidate_observed` |
-| OD-7 | Confirm the interpretation notes C1 to C8 and C11 (C9 and C10 are now stated explicitly in R24.12, R13.2 and R13.13) | Confirm or amend | Confirm |
-| OD-8 | **Lockfile creation pending.** `package-lock.json` does not exist. It is created by the first approved `npm ci`/`npm install` run in the toolchain container and then committed (R20.7, R20.13). The runtime image cannot be built before | Approve the install step with registry-only network | Approve when implementation starts (Gate `start-implementation`) |
+| OD-7 | Interpretation notes C1 to C8 and C11 (C9 and C10 are stated explicitly in R24.12, R13.2 and R13.13). **Decided by the human on 2026-11-12:** C5 (see "Source_Bundler decisions"), C2 ("Masking decisions"), C8 ("Lease timing", with the added conditions that no Discovery Run starts before the propagation delay D is measured and that the 10-second requirement is accepted only by measurement), and C11 ("Store-layer request interface"; the entry points are reserved: the request front end is a test harness, not a general command, and the human reviews the C11 design again before task 2.25 is implemented), all as written in this document; the POL-011 decision is in "Numbered line parameters and the single definition". **Still to confirm:** C3 before task 2.18; C4 and C6 at task 4.4; C7 at M6. C1 is implemented and tested in M1 (M1 review resolutions 9 and 10); that is not recorded here as a confirmation of OD-7 | Confirm or amend, note by note | Confirm C3 before 2.18 |
+| OD-8 | **Resolved** by task 0.11 (lockfile created and `npm ci` reproduced it) and re-run in 1.1 for the new workspaces. Original wording: the lockfile did not exist; it was to be created by the first approved `npm ci`/`npm install` run in the toolchain container and then committed (R20.7, R20.13) | Approve the install step with registry-only network | Done under its own approvals |
 | OD-9 | **VM memory headroom of 3.9 GB.** The Docker Desktop VM has about 3.9 GB of memory available. The memory limits of the runtime, the legacy containers, the toolchain and the helper containers must fit together with headroom, and a build or test that runs while the legacy stack is up may not fit | Measure peak memory of the toolchain build, the runtime and the legacy stack in M0/M4, set limits from the measurement, and run heavy steps one at a time | Measure before fixing the limits; do not start a build while the Legacy_App stack and a Run are active |
 | OD-10 | Single-session scope of the mutual exclusion (A11): exclusion across logon sessions, users or hosts is not provided; status `unresolved` | Accept as a documented residual risk (recommended), or add a host-wide lock later | Accept and keep listed in the Run_Manifest `residualRisks` |
-| OD-11 | Behavior of the unmodified conformance runner on an abandoned mutex (read from the script as throwing before any scenario; unmeasured) | Measure in test (d, abandoned); if a scenario would run, report it | Measure in M5 |
-
+| OD-11 | Behavior of the unmodified conformance runner on an abandoned mutex (read from the script as throwing before any scenario; unmeasured) | Measure in test (d, abandoned); if a scenario would run, report it | Measure first in task 2.22 (real mutex name, user confirmation, runner idle); the acceptance test stays in M5 (5.14, 5.15). Observation 2026-11-12: abandonment is reported only while another handle is open; real-name measurement deferred to M5 (see batch 1, item 5) |
+| OD-12 | **Container form of the Test API integration run (task 2.20) before the runtime image exists (4.9).** R18.14 lets only `discovery-runtime` and `reverse-proxy` join `discovery-lab`; R18.23 names a probe only for the isolation test; R24.7 makes the Launcher the only supported way to start the runtime. A toolchain-image probe is therefore not covered by the requirements as written, and the spec does not decide whether it is allowed | (a) allow a Launcher-started toolchain probe for 2.20 only, as an interim means with the conditions of task 2.20, which would need the human to state that R18.14 is read this way (a requirements amendment, if the human wants it written down); (b) build the runtime image early (4.9 approval) and start it with an entry-point override; (c) a dedicated probe image under `infra/` (approval) | **Decided 2026-11-12: option (a)**, a toolchain-image probe started by the Launcher (`-Probe`); see "Implementation decisions, batch 1 (2026-11-13)", item 3. Its result is not evidence for any M4 isolation requirement |
+| OD-13 | **Preparation line cap and fallback B.** A prepared state has at most 5 lines (numbered scalar parameters, POL-011). Fallback B (lists of flat scalar objects in `params`) is defined but **not approved** | B changes the M1 Experiment schema, its fixtures and security tests, the forbidden-key check for nested names, the policy rule vocabulary, and the runner translation | Keep the numbered parameters. If M4 shows `uncovered` units caused by the cap, report them with that reason; a switch to B needs a separate human approval and is never automatic |
+| OD-14 | **Mask token of the M5 evaluator against the constant of C2.** `EvaluatorConfig` (M5) has a field `maskToken`, while C2-1 makes the runtime token the code constant `MASK_TOKEN`. The evaluator is a separate package that must not import runtime modules, and it masks with the Ground_Truth list of non-deterministic fields | (a) the evaluator keeps its own token and compares only after masking both sides with it; (b) the token is a shared constant in a neutral package; (c) the token is removed from the configuration and fixed in the evaluator | Undecided. To be checked before M5 starts (task 5.1); it does not block M2 to M4 |
+| OD-15 | **Response paths cannot name a field of a body whose root is a list.** Three facts are kept apart: (1) `PATH_PATTERN` (a name first) is applied to the Claim `ResponsePath`, not to the Prediction field `path` of `prediction.schema.json` (length 1 to 128 only); (2) the Comparator reads a predicted path with `parseConcretePath`, which also starts with a name, so it cannot interpret a path into a root list; (3) mask entries may start with `[n]` or `[*]`. The sample Legacy_App answers with an object at the root (`{success, data}` or an error object, read from `legacy/src/utils.php`); the response shapes of the Test API are not yet checked | (a) leave as is; (b) allow a leading index in Prediction paths and in `ResponsePath` (M1 schemas, the Comparator path grammar and their tests change); (c) have the runner wrap a root list (changes what an Observation records) | Leave as is. No schema change before the M4 check of the Test API response shapes. A unit that needs a root list is reported as a limitation of the evaluation, not as an AI failure |
+| OD-16 | **A Prediction path that is valid in the schema but not for the Comparator.** `prediction.schema.json` accepts any path of 1 to 128 characters; the Comparator accepts only the `PATH_PATTERN` grammar and answers `not_comparable(prediction_missing)` otherwise, although the Prediction is present (the reason name says "missing" for a malformed path). The tested Claim then gets an `inconclusive` record (R6.7) | (a) keep; (b) apply `PATH_PATTERN` in `prediction.schema.json` (M1 change; the Experiment is then rejected before it runs); (c) add a reason code such as `prediction_malformed` (M1 comparison schema change) | Keep the current behavior. Reconsider in M4 together with OD-15 and the Test API response shapes |
+| OD-17 | **Identity of the Experiment and of the policy configuration between the decision and the execution** (R9.2, R8.3). **Decided 2026-11-12: P1 and P2 together.** Before: the `policy_decision` record carried the Experiment identifier, the decision, and the rule ids, and no hash; the configuration and the preparation table are baked into the image; the Run_Manifest `config` is a free object; `runtimeImageDigest` is a coarse binding | P1: the `policy_decision` payload also holds `experimentSha256`, `policyConfigSha256` and `preparationTableSha256`; the Run_Manifest `config` holds the two configuration hashes; `isAccepted` compares all three. P2: the Runner re-runs `decide(e, cfg)` before executing | **Decided and implemented in `packages/verifier` (identity module, Runner, task 2.26).** What remains for the Loop_Orchestrator (tasks 4.4 and 4.6): append the payload built by `evaluateForRecord`, and put the two configuration hashes into the Run_Manifest `config`. The hashes are computed by the process that is checked: they detect a different Experiment or configuration, not a compromised runtime |
+| OD-18 | **Expression of an Experiment that a forced stop or a fatal error interrupted, and of a communication failure** in the M1 Observation. `abortReason` has only `lease_unavailable` and `address_not_allowed`. **Decided 2026-11-12: alternative (a).** | (a) no Observation for an interrupted Experiment: the `error` or `termination` record names the cause and the Experiment, the Observations that were finished stay, no later Experiment is executed, and no `experiment` Evidence is created for it; (b) extend `abortReason` (an M1 schema change, a requirement change, a re-approval of the baseline) | **(a) is in effect and implemented** (`interrupted` outcome, latch). A communication failure in the request sequence stays provisionally `timed_out` with the real cause in an `error` record written by the Loop_Orchestrator; if that record cannot be written, no further Experiment starts and the Run ends with `error`. A dedicated reason code (b) is decided separately |
 The Run-vs-Run lock mechanism is fixed by this design (exclusive file handle, D5 and the Mutual Exclusion section), so it is not listed. If the human prefers a second named mutex `Local\ProjectPhoenixDiscoveryRun`, only the Launcher and test (c) change.
+
+
+---
+
+## Implementation decisions, batch 1 (2026-11-13)
+
+These decisions were approved by the user on 2026-11-12 and 2026-11-13 while implementing tasks 2.25, 2.18, 2.21, 2.22, 2.23, 2.27 and the preparation part of 2.20. They add detail to the Launcher, Run_Lease, Approval_Store and probe sections above and change no requirement and no M1 schema. Values marked **NEEDS HUMAN REVIEW** are working values and are not final.
+
+### 1. Run identifier (approved)
+
+The run id is `run-yyyyMMddTHHmmssZ-<12 lowercase hex>`: the UTC time plus 6 bytes from `RandomNumberGenerator.Fill`. A Run_Volume, `discovery/runs/<run-id>/`, `discovery/runs/.incoming/<run-id>/` or lease directory of the same name makes the start refuse (R12.2).
+
+### 2. Launcher (C3, approved)
+
+- Entry `discovery/tools/Start-DiscoveryRun.ps1` has the single switch `-Probe`. The mutex name `Local\ProjectPhoenixGroundTruthEvaluation` and the lock file `discovery/locks/discovery-run.lock` are fixed constants.
+- Every Docker call goes through one function, `Invoke-DockerCli`, in `DiscoveryLauncher.psm1`.
+- Lock order: the Run-versus-Run lock (exclusive file handle, zero wait) first, then the conformance mutex (zero wait).
+- Exit codes: 0 complete; 1 incomplete or error; 2 refused before any side effect (gate or lock); 3 refused after the locks were taken.
+- A Launcher record is written per start: start kind (`run` or `probe`), image digest, lease-timing record hash, export step, and volume disposition (`complete` or `kept_for_diagnosis`).
+
+### 3. Probe profile and helper images (OD-12 option a, approved)
+
+- The probe uses the toolchain image `phoenix/discovery-toolchain:m0`, the label `phoenix.discovery.start=probe`, `packages/` read-only and the lease directory read-only. A probe has no Run_Manifest, so its export is always incomplete and its volume is kept. The Run profile never uses the toolchain image.
+- **NEEDS HUMAN REVIEW:** the Run runtime image name `phoenix/discovery-runtime:m4` is an assumption. The image does not exist before M4.
+- The export and owner helper image is the pinned toolchain base `docker.io/library/node:26.13.0-trixie-slim@sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072`. A test checks that it equals the `FROM` of the toolchain Dockerfile.
+- **NEEDS HUMAN REVIEW:** the volume-owner helper runs as `--user 0:0 --cap-add CHOWN`. It is root only to `chown` the new Run_Volume to 10001:10001, with no network and no other capability.
+- The export helper copies with `cp -R /src/. /dst/`, with no network, a read-only root, a non-root user, and the volume mounted read-only.
+
+### 4. Export and host verification (task 2.21)
+
+- Order: copy to the Incoming_Export, host verification, the Completion_Marker `COMPLETE` (SHA-256 of `manifest.json`) written last, the final move, the final verify. The volume is removed only after a verified export.
+- `Test-RunDirectory` in `DiscoveryCommon.psm1` checks artifact hashes, unlisted files, the hash chain with a per-record hash recomputation, the manifest chain values and blob references.
+- The Reason_File `REASON.json` names the step: `copy`, `verify`, `marker`, `final_verify`, `interrupted` or `create_export`.
+- The PowerShell check recomputes each record hash as SHA-256 of `'{'` plus the text after `"hash":"<h>",`. It therefore requires canonical key order with `hash` first; any other form is a `chain_break` (fail closed). The full manifest schema check stays with the TypeScript readers.
+- Cross-check: the golden vector `packages/discovery-loop/test-vectors/sealed-run/`, written by the TypeScript Evidence_Store, is accepted by the PowerShell verification.
+
+### 5. Abandoned mutex (task 2.22)
+
+- An `AbandonedMutexException` makes the start fail with `conformance_mutex_abandoned`. Both locks are released and the next explicit start proceeds. The single-session scope (one host, one logon session, `Local\` namespace) is stated in the script header and the module.
+- **Observation (2026-11-12, for OD-11 and M5):** Windows reports abandonment only to a waiter while some handle to the named mutex is still open. If the owner process dies and no other handle is open, the named mutex is destroyed, and the next open creates a fresh, unowned mutex without reporting abandonment. The tests therefore use a dedicated thread that takes the mutex and exits while the test process keeps a handle.
+- Status: code and mock tests are DONE. The measurement with the real mutex name against the real conformance runner is DEFERRED TO M5 (OD-11 stays open).
+
+### 6. Lease timing measurement (task 2.27)
+
+- The tool is DONE: `discovery/tools/Measure-LeaseTiming.ps1`, `LeaseMeasure.psm1`, `LeaseWriter.ps1` and the container harness `packages/verifier/src/leaseMeasure/`. It runs about 26 short-lived toolchain containers, each with `--network none` and the label `phoenix.discovery.role=lease-measure`. It takes the Run lock only (no conformance mutex) and writes only `discovery/config/lease-timing.json` and `discovery/leases/measure-<id>[-ack]/`. The writer is a separate `pwsh` process killed with `Stop-Process -Force`.
+- The record has the kind `lease-timing-measurement`. Its settings hash is the SHA-256 of the canonical JSON of `{abortBudgetMs, heartbeatIntervalMs, jitterMs, staleAfterMs, watchIntervalMs}`. H must be even. The minimums are 300 beats, 10 healthy trials, 5 stopped trials and 10 kill samples. The record carries the fixed statement: "Measured under the recorded conditions only. Not verified for another machine, Docker version, setting, or load."
+- **The real measurement has NOT been done.** The 10-second stop of R24.12 remains UNVERIFIED, and no Discovery Run can start until a valid record from a real measurement exists. Mock tests produce a record that is never valid.
+
+### 7. Approval_Store (task 2.25, C11 re-approved)
+
+- `Invoke-ApprovalStoreRequest` is the only write path. The human-facing command is `discovery/tools/Add-ApprovalRecord.ps1`. The store mutex is `Local\ProjectPhoenixApprovalStore`, and the write is an atomic replace.
+- `modify` and `delete` requests are refused with the fixed reasons `modify_refused` and `delete_refused`. They are exercised only through a test-only harness that refuses the real `discovery/approvals/`. There is no general `-RequestFile` command.
+- The default target resolver resolves gate targets only in this part. `run:` and `claim:` targets stay unresolvable until task 4.10.
+- **Decision (user, 2026-11-12):** real approval data under `discovery/approvals/` is NOT tracked by Git. This supersedes the earlier "tracked in Git" statement in this document. **Pending, not done:** `.gitignore` still says that `discovery/approvals/` is intentionally not ignored, and `.kiro/steering/structure.md` still says "tracked in Git". Both need a separately approved change; neither has been edited.
+
+### 8. Preparation data for the probe (task 2.20 preparation)
+
+Files in `packages/verifier/data/`:
+
+- `policy-config.json`: the design example.
+- `mask-config.json`: `{"paths":["data.created_at","data[*].created_at"]}`, derived from `created_at` in `orders.php`. **NEEDS HUMAN REVIEW.**
+- `probe-config.json`: `baseAddress` `http://reverse-proxy:8080`, limits 10000 ms per request and 60000 ms per Experiment, lease H 1000 and S 4000. **NEEDS HUMAN REVIEW** for the address and the limits.
+- `probe-experiments.json`: 2 accepted Experiments (`GET /products`; `GET /orders` with a state check) and 9 rejected ones (POL-003, 004, 005, 006, 007, 008, 011, 012, 013).
+
+The probe result holds statuses and counts only, never response bodies. **The live probe run (2.20) is NOT done.** It needs the task 2.27 record, the 0.13 `override-apply` approval, task 2.19 and a run confirmation by the user. OD-12 is resolved as option (a) for task 2.20 only; the result is not evidence for any M4 isolation requirement.
+
+### 9. Heartbeat atomic replace on Windows (task 2.27 fix, 2026-11-13)
+
+- **Cause.** The first real run of `Measure-LeaseTiming.ps1` stopped at the first beat. `File.Move(tmp, heartbeat, overwrite)` failed with `UnauthorizedAccessException`, HRESULT `0x80070005`. Reproduced without Docker: Windows refuses a rename over a file while any other handle to it is open, for every reader share mode (Read, ReadWrite, ReadWrite|Delete, Read|Delete); the rename succeeds as soon as the handle is closed. Through a Docker Desktop bind mount (read-only, `--network none` throwaway container): a mount without reads, or reads every 500 ms (P), caused no refusal in 30 renames; reads every 5 ms (the propagation observer) caused 6 of 30 first-try refusals, all recovered on retry within 51 ms. The refusal is transient.
+- **Fix.** `Write-TextAtomically` (`DiscoveryLauncher.psm1`) keeps the atomic replace: a temporary file in the same directory, then a rename; the target is never written in place. It retries only a sharing or lock violation (`0x80070020`, `0x80070021`) and an access denial (`0x80070005`) while the target is an existing regular file without the read-only attribute; nothing else is retried. The retry budget is J = 250 ms. A new attempt starts only if elapsed + 50 ms guard <= 250 ms (the guard comes from host measurements: a failed rename took up to 9.5 ms, `Sleep(5)` up to 20.9 ms). When the budget is spent the original error is thrown (fail closed); the target keeps its previous complete content and the temporary file is removed. H, S, D, P, A, J, U and the three rules are unchanged (a delay up to J is already inside rule 2). The Launcher (`New-RunLease`, `Step-LeaseHeartbeat`, `Revoke-RunLease`) and the measurement (`LeaseMeasure.psm1`, `LeaseWriter.ps1`) use this one function.
+- **Verification.** `tests/discovery-loop/test_atomic_replace.ps1` passes 16 of 16 (8 repeated runs). The mutations "no retry", "retry everything", "no budget" and "keep temporary file" are detected. After the fix, 100 writes against a container reading every 5 ms through a bind mount all succeeded (10 needed a retry, maximum 58 ms), with 2937 container reads and 0 partial or decreasing values.
+- **Residual risk.** The 50 ms guard is based on this host. Under heavy load, OS scheduling may overrun the budget slightly; a late beat beyond H + J is counted as a delay. A denial that does not clear within the budget stops the heartbeat (fail closed), which aborts the Run or the measurement. Until the real task 2.27 measurement passes, the 10-second stop of R24.12 stays UNVERIFIED.
+
+### 10. Pre-integration batch (2026-11-13)
+
+1. **Approval data and Git.** Real Approval_Store data under `discovery/approvals/` is git-ignored (`.gitignore` entry added; human decision 2026-11-12). No approval file was tracked before the change (checked with `git ls-files`). The Approval_Store code (`discovery/tools/`), its tests (`tests/discovery-loop/`), and its test vectors (`packages/discovery-loop/test-vectors/`) stay tracked. The steering file `structure.md` was updated to match. This supersedes the "pending" note of item 7.
+2. **OD-3 split for M2 versus M4.**
+   - **M2 (host side, the directories the Launcher writes).** Tool `discovery/tools/Measure-FsBehavior.ps1` with module `FsBehavior.psm1`; record `discovery/config/fs-behavior-od3.json`, kind `fs-behavior-od3`. It measures: exclusive file create (a second CreateNew must fail with file-exists, code 80; CreateDirectory on an existing directory reports no error, so the export collision check of step 2 is the existence test under the Run lock); the exclusive Run-lock handle; file replace by rename under a concurrent reader with the bounded retry; Flush(true) (the call is observed; durability against power loss is not tested); and the export directory rename (a plain move; an existing target fails with the source intact; an open file inside never leaves a half-moved directory). Completion still rests on export step 7, and atomicity is not assumed.
+   - **Already measured by task 2.27.** Propagation of a host rename through the lease bind mount, and no partial reads.
+   - **M4 (tasks 4.11, 4.12, 4.15, 4.16, 4.19).** Rename and fsync inside a Run_Volume, the ownership of a new volume, read-only enforcement and non-root append on Docker Desktop mounts, and nlink through file mounts.
+   - **How the tool runs.** It starts no container and no Docker command and takes the Run-versus-Run lock only. It works in `od3-<id>` scratch directories under `discovery/locks/`, `discovery/leases/`, and `discovery/runs/.incoming/`, and removes them. The directory-rename target is a sibling under `.incoming/` on the same volume, so no run-like directory appears under `discovery/runs/`. Each execution needs user confirmation. The real record is made as part of 2.20, not yet.
+3. **Volume owner helper (CHOWN).** The function is `Invoke-VolumeOwnerHelper`. Privileges are unchanged from the existing design: uid 0 with only CAP_CHOWN after `--cap-drop ALL`, no new privileges, `--network none`, a read-only root, and only the new volume mounted. Small limits are added (64m, 0.5 CPU, 16 pids). It runs `chown` on the volume root only (not recursive) and checks the owner with `stat`. A non-zero exit stops the start with exit code 3 and the reason `volume_owner_failed`, before the lease and the container. The cause (exit code and stderr) goes into a Reason_File with the step `volume_owner` in the Incoming_Export and into the Launcher record (`volumeOwner`). The empty volume is kept (removal needs a human). CAP_CHOWN and uid 0 appear only in this helper (a test checks it). Alternative recorded for 4.9: a mount point owned by 10001 in the runtime image would make the helper unnecessary.
+4. **Probe diagnostic volumes.** A probe's Run_Volume has the labels `phoenix.discovery.start=probe` and `phoenix.discovery.volume-kind=probe-diagnostic` (a Run's volume kind is `run`). The Launcher record has `volumeKind` and, for a probe, `volumeRemoval: requires_human_approval`. No tool removes a probe volume: the export never runs `docker volume rm` for the probe profile, and the disposition would be `probe_diagnostic_kept` even if the export were complete. The recovery of the next start reports probe volumes in `probeDiagnosticVolumesKept`. It never writes into an existing probe Incoming_Export (its Reason_File and `probe-result.json` stay byte-identical), and it creates a Reason_File `interrupted` only when no export directory exists at all. Volume removal is a manual `docker volume rm` with human approval.
+
+### 11. Discovery_Override isolation test, written before 2.19 (2026-11-13)
+
+This item records the isolation test of the Network topology section (A13, R18.21 to R18.28), written ahead of tasks 2.19 and 4.15. It adds detail only and changes no requirement and no M1 schema. Nothing was run against the real environment.
+
+**Files.**
+
+| File | Role |
+|------|------|
+| `tests/discovery-loop/test_discovery_network_isolation.ps1` | Entry point |
+| `tests/discovery-loop/lib/labIsolation.psm1` | The checks |
+| `tests/discovery-loop/lib/labProbe.cjs` | In-container probe: TCP connect, fixed HTTP requests, DNS lookups. Result classes: `connected`, `closed` (refusal), `blocked` (timeout), `unreachable`, `dns_unresolved`, `error` |
+| `tests/discovery-loop/test_lab_isolation_checks.ps1` | Unit tests of the checks with a fake Docker CLI |
+
+The test is separate from `tests/legacy-sample/test_network_isolation.ps1`, which is unchanged (same Git blob as HEAD).
+
+**Modes and exit codes.**
+
+| Mode | When | Behavior |
+|------|------|----------|
+| `Baseline` | Before 2.19 | Read-only Docker CLI. Refuses if `phoenix-discovery-lab` exists. Writes `discovery/config/lab-isolation-baseline.json` with the network membership and published ports of `reverse-proxy`, `legacy-app` and `legacy-db`, and the hashes of the base and override files |
+| `Applied` | After 2.19 | Reports `NOT APPLIED` with exit 3 if the network does not exist. Otherwise runs groups A, B, C, D and F |
+| `Restored` | After a separately approved removal | Group E. Needs the output of the legacy test run after the removal (`-LegacyTestLog`). A missing, older or failing result is a FAIL |
+
+Exit codes: 0 pass; 1 any FAIL, a failing positive control included; 2 precondition not met (no baseline, services not running, probe image missing, leftover probe); 3 not applied. The record is `discovery/config/lab-isolation-<mode>.json` with the kind `lab-isolation`. Its format check rejects any status other than `NOT MEASURED` for group F, and rejects `NOT MEASURED` for a measured group B check.
+
+**Configuration checks (`docker inspect`).**
+- Group A, topology: the lab is internal; IPv6 is disabled and there is no IPv6 subnet; the driver is bridge with the override label; the members are exactly `reverse-proxy` (plus the probe while it runs); `reverse-proxy` is on exactly `legacy-internal`, `legacy-api` and the lab; the membership of `legacy-app` and `legacy-db` equals the baseline and neither is on the lab; the published ports equal the baseline and are exactly `127.0.0.1:8056 -> 8080/tcp`; the base compose hash equals the baseline; after the probes are removed the members are again exactly `reverse-proxy`.
+- Group D, rights of the runtime-equivalent probe: lab network only, non-root, not privileged, `CapDrop` ALL, no `CapAdd`, only the allowed read-only mount, no Docker socket, no published port, memory, CPU and pids limits, read-only root, `no-new-privileges`.
+
+**Traffic checks (a probe with the runtime's network flags, on the lab).**
+- Group B, reachability: the health endpoint of `reverse-proxy:8080` (positive control); a closed port is seen as `closed`; `legacy-app` and `legacy-db` by name and by IP address read from `docker inspect`, so a DNS failure is never taken alone as unreachable and an unknown IP is a FAIL; the `legacy-internal` and `legacy-api` addresses of `reverse-proxy`; external IPs 1.1.1.1:53 and :443, 8.8.8.8:53 and 9.9.9.9:443; the external name `example.com`; the lab gateway and `host.docker.internal` on ports 8056, 80, 2375 and 2376; a scan of `reverse-proxy` ports 1 to 1024 plus 3306, 8056, 8081, 8443, 9000, 9090, 9113, where 8080 is the only expected open port.
+- Group C, forwarding through `reverse-proxy`: an absolute-URI request, a request with a foreign Host header, and a CONNECT request must be answered by the fixed upstream `legacy-app` or refused, never forwarded.
+
+**Positive controls.**
+- A wrong expected member list fails; the attached probe is reported as an extra member.
+- A control probe on `legacy-internal` reaches `legacy-app` and `legacy-db` by IP address.
+- The non-compliant fixture (root, extra network, Docker socket, published port, no limits, privileged, capability added, writable root, no `no-new-privileges`) is reported for every property; a fixture that the check misses makes the control fail.
+- The external-route control (a container on `legacy-api` connecting to 1.1.1.1:443) runs only with `-ExternalControl`, which needs its own approval because it sends outbound traffic. Without it the control is `NOT MEASURED`, and the external negative checks then have no external positive control.
+
+**Safety rules of the test.** It never applies or removes the override. It never creates, removes, connects or disconnects a network. It never starts, stops, recreates or execs an existing container, and never pulls (`--pull never`). It only creates, starts, reads and removes its own containers, labelled `phoenix.discovery.role=isolation-probe`; it refuses to run if such containers already exist, and it repairs nothing on failure. The control probe joins `legacy-internal` for the duration of the test.
+
+**Not yet covered (completed in task 4.15 after the runtime image of 4.9 exists).** The runtime image itself, its mount table and the Run_Volume in group D. The probe uses the toolchain image with the same network flags (OD-12).
+
+**Residual risks (status `unresolved`; `NOT MEASURED` is not blocked).** A Docker internal network does not exclude:
+- UDP, ICMP and IPv6 paths;
+- other host addresses of Docker Desktop (the VM and host network beyond the checked gateway and `host.docker.internal` ports);
+- the dual-homed `reverse-proxy`, which keeps outbound access through the non-internal `legacy-api`, so a compromise of nginx would bridge the lab to the outside;
+- DNS through the embedded resolver beyond the one external name checked;
+- a container joined to the lab by hand outside the Launcher (procedure only);
+- kernel-level isolation of containers;
+- the time between the test and later use, because the state can change.
+
+### 12. Applied state of the Discovery_Override and the gateway finding (2026-11-14)
+
+This item records the first applied-state measurement (task 2.19) and the human decision about its gateway finding. It adds detail only and changes no requirement and no M1 schema.
+
+**Evidence.** Measured 2026-11-14; record `discovery/config/lab-isolation-applied.json`, SHA-256 `12a14fa6f80551e8993f38f98a4ffd4932ed8dc7beedc32717fdf0f3501cf6db`, unchanged. 45 checks, 0 FAIL.
+- The lab gateway 172.20.0.1 answered TCP on 8056, 80, 2375 and 2376 with a refusal (`closed`). `host.docker.internal` did not resolve.
+- The four external IPs (1.1.1.1:53, 1.1.1.1:443, 8.8.8.8:53, 9.9.9.9:443) were `unreachable`.
+- legacy-app 172.18.0.3 and legacy-db 172.18.0.2 by IP, and the legacy-internal and legacy-api addresses of reverse-proxy, were `unreachable`. The legacy names did not resolve. example.com did not resolve.
+- reverse-proxy has only port 8080 open (1032 ports scanned).
+- Absolute-URI, foreign Host, and CONNECT requests were answered by legacy-app or refused.
+- The external-route positive control (B-C5) was NOT run (no `-ExternalControl`, no outbound traffic), so the external negative checks have no external positive control.
+- nginx accepts connections on the lab interface and answers any Host value (`default_server`, `server_name _`). A request without a Host header was not tested.
+
+**Result classes (corrected 2026-11-14).**
+
+| Class | Meaning |
+|-------|---------|
+| `connected` | A TCP connection was established |
+| `closed` | A refusal, which is an IP-level answer |
+| `blocked` | A timeout, cause undetermined |
+| `unreachable` | No route, or an unreachable report |
+| `dns_unresolved` | Name resolution failed |
+
+A refusal is never taken as IP-level isolation. For legacy-app, legacy-db, the cross-network proxy addresses, and the external IPs, `closed` or `connected` is a FAIL; only `unreachable`, `blocked`, and (for names) `dns_unresolved` pass. The gateway check is split in two:
+- B10 "no TCP connection": PASS unless a connection is established.
+- B10-ip "IP-level isolation": PASS only if every target reports no route; FAIL if connected; otherwise `RESIDUAL` (a refusal or a timeout). `RESIDUAL` is a new status. It is never a PASS, it does not fail the run, and the record format check allows it for B10-ip only.
+
+The existing applied record is not rewritten. A supplementary record, `discovery/config/lab-isolation-applied-reevaluation.json` (SHA-256 `ec9d1045dc74443e303c01d8f9c4d5d9930354458e0fef253896e54e7b37dd3e`, kind `lab-isolation-reevaluation`), re-evaluates its gateway results without any new measurement: B10 PASS, B10-ip RESIDUAL. The NOT MEASURED items are carried unchanged.
+
+**Human decision (2026-11-14).** Keep the override applied. No full TCP port scan. No `inhibit_ipv4` or other network change. No automatic rollback. The IP-level reachability of the gateway is accepted as a residual risk. This does not certify that TCP connections to unknown services on the gateway address are safe.
+
+**Not guaranteed (residual, `unresolved`; NOT MEASURED is not blocked).**
+- UDP, ICMP, and IPv6 paths.
+- Other hosts, and other ports of the gateway and of the Docker Desktop VM beyond the four ports checked.
+- The external-route positive control.
+- DNS through the embedded resolver beyond example.com.
+- reverse-proxy is a member of three networks, including the non-internal `legacy-api` with outbound access, so a compromise of nginx would bridge `discovery-lab` to `legacy-internal` and to the outside (R18.4 (a), R18.19).
+- A container joined to the lab by hand outside the Launcher.
+- Kernel-level isolation.
+- State changes after the test.
+
+This early run uses the toolchain probe with the runtime's network flags. The measurement record of task 4.16 with the runtime image is still required.
+
+### 13. Launcher end of a start, and M2 closing decisions (2026-11-14)
+
+1. **End-of-start order** (`DiscoveryLauncher.psm1`, `Invoke-DiscoveryStart`, finally block):
+   1. The container has ended.
+   2. Stop it and confirm the stop; revoke the lease.
+   3. Export, then check that the evidence is saved (`Test-EvidenceSaved`). The evidence is saved when the Launcher record was written and the export got past the copy step, with a Completion_Marker or a Reason_File. A failed export creation or copy is not saved.
+   4. Write the Launcher record, with `containerId` from `docker create` and `containerRemoval`.
+   5. `Remove-OwnRunContainer` removes only this start's container, by the creation ID, with a plain `docker rm` (never `--force`, never `-v`). It acts only if the stop is confirmed, the evidence is saved, and `docker inspect` of that ID shows the same ID, the Run-identifier label, the runtime role label, and a not-running state. Otherwise the container is kept with one of these reasons and is reported as a remaining resource: `stop_not_confirmed`, `evidence_not_saved`, `identity_unknown`, `identity_mismatch`, `still_running`, `inspect_failed`, `rm_failed`. A container that no longer exists is `absent` (idempotent).
+   6. No volume is removed here. The export decides; a probe volume is always kept.
+   7. Release the conformance mutex and the Run lock. A container that is not confirmed stopped keeps both held until the process ends.
+
+   Before this change the Launcher stopped the container but did not remove it. The stopped container of the 2.20 probe was removed by hand with human approval.
+2. **Launcher record lists.** `leftoverContainersStopped` and `interruptedRunsMarked` are one-dimensional lists (`ConvertTo-FlatList`). Before the fix they were nested (`[[]]`) because the functions return their list with the unary comma. Existing records are not rewritten; the 2.20 record keeps `[[]]`.
+3. **Task 2.22.** The measurement with the real mutex name against the unmodified conformance runner is deferred to M5, tasks 5.14 and 5.15 (case (d), abandoned mutex). It needs the real name, which the conformance runner has built in, so it can only run while no conformance run is active and with human confirmation. The observation of 2026-11-12 shows that abandonment is reported only while another handle to the mutex is open, so the measurement must use the real runner and a real helper process, which belongs with the M5 lock tests. The Launcher code and the mock tests (test-specific names) are done in M2.
+4. **Runtime image.** `phoenix/discovery-runtime:m4` is a build target of M4 (task 4.9). M2 does not require it to exist. The Run profile refuses to start without it (`runtime_image_missing`); the probe profile does not use it.
+5. **Probe state.** The probe diagnostic volume of 2.20 is kept, and the override stays applied.
+
+### 14. M0 checkpoint exception for the M3 start, new Gate, and the Audit_Config_Builder location (2026-11-14)
+
+R21.20 was added. The new Gate `m0-checkpoint-exception` is defined in `packages/discovery-loop/src/schema/schemas.ts` (`GATE_IDS`; the M1 schema change was approved by the human) and in `discovery/tools/ApprovalStore.psm1`. The eight existing gates and the existing record (seq 1, `override-apply`) are unchanged.
+
+`discovery/tools/MilestoneGate.psm1` with `Test-M3StartGate.ps1` is read-only. It refuses with one of these reasons: `m2_not_accepted`, `store_invalid`, `not_approved`, `rejected`, `needs_changes`, `not_human`, `hashes_missing`, `hash_mismatch`, `spec_missing`. The check is made at the start of M3. A later edit of a spec file changes its hash, so a repeated check after the start reports `hash_mismatch` by design.
+
+Tests: `tests/discovery-loop/test_m3_start_gate.ps1` passes 26 of 26 checks, and five mutations are detected. Vitest reports 53 files and 1302 tests (three new approval fixtures).
+
+The Audit_Config_Builder moves out of `evaluation/` (see its section).
+
+### Decision log
+
+| Date | Entry |
+|------|-------|
+| 2026-11-13 | Batch 1 recorded: run id format, Launcher constants, lock order and exit codes, probe profile (OD-12 option a), helper images, host-side export verification, abandoned-mutex handling with the Windows observation, lease-timing tool (real measurement not done), Approval_Store write path, approval data not tracked by Git (steering and `.gitignore` change pending), probe preparation data. Needs human review: runtime image name, volume-owner helper rights, mask paths, probe base address and limits. Still open: the real lease-timing measurement, the live probe run, and the M5 measurement of OD-11 |
+| 2026-11-13 | Batch 1, item 9 recorded: heartbeat atomic replace on Windows (task 2.27 fix). A rename over a file that another handle has open is refused transiently; `Write-TextAtomically` retries only sharing, lock and access-denied errors inside J = 250 ms and then fails closed. Timing settings and rules unchanged. The real measurement is still not done and the 10-second stop of R24.12 stays UNVERIFIED |
+| 2026-11-13 | Batch 1, item 10 recorded: pre-integration batch (approval data git-ignored, OD-3 split between M2 host tool and M4 container measurements, volume owner helper hardening with `volume_owner_failed`, probe diagnostic volumes kept and protected in recovery). The real OD-3 record, the live probe run, and the real lease-timing measurement are still not done |
+| 2026-11-13 | Batch 1, item 11 recorded: the Discovery_Override isolation test (`Baseline`, `Applied` and `Restored` modes, groups A to F, positive controls, safety rules) was written ahead of 2.19 and 4.15. Not run against the real environment. The runtime image part of group D stays open for 4.15 |
+| 2026-11-14 | Batch 1, item 12 recorded: applied state of the Discovery_Override measured (45 checks, 0 FAIL), gateway refusals on 172.20.0.1 classified as a residual risk (B10 PASS, B10-ip RESIDUAL, supplementary re-evaluation record), human decision to keep the override applied with no network change or rollback. The task 4.16 record with the runtime image is still required |
+| 2026-11-14 | Batch 1, item 13 recorded: Launcher end-of-start order with removal of its own container, flat lists in the Launcher record, task 2.22 real-mutex measurement deferred to M5 (5.14, 5.15), runtime image `phoenix/discovery-runtime:m4` is an M4 build target, probe diagnostic volume kept and override stays applied |
+| 2026-11-14 | Batch 1, item 14 recorded: R21.20 M0 checkpoint exception for the M3 start only, new Gate `m0-checkpoint-exception`, read-only gate check `Test-M3StartGate.ps1`, and the Audit_Config_Builder moved to `packages/ai-client/src/audit-config-builder.ts` (human decision) |
