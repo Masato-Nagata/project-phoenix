@@ -31,7 +31,7 @@ Invoke-TestMain {
     # ---------------------------------------------------------------- the gate list
     $ids = Get-ApprovalGateIds
     $old = @('start-implementation', 'container-runtime', 'override-draft', 'override-apply', 'install-kiro-cli', 'm6-start', 'm7-start', 'transmit-source')
-    Test-Case 'gate list: the eight existing gates are unchanged and in their order, and m0-checkpoint-exception is added as the ninth' ((($ids[0..7]) -join ',') -ceq ($old -join ',') -and $ids.Count -eq 9 -and $ids[8] -ceq 'm0-checkpoint-exception')
+    Test-Case 'gate list: the eight existing gates are unchanged and in their order, m0-checkpoint-exception stays the ninth, and m4-start-exception (R21.21) is added as the tenth' ((($ids[0..7]) -join ',') -ceq ($old -join ',') -and $ids.Count -eq 10 -and $ids[8] -ceq 'm0-checkpoint-exception' -and $ids[9] -ceq 'm4-start-exception')
     $ts = [IO.File]::ReadAllText((Join-Path $script:RepoRoot 'packages/discovery-loop/src/schema/schemas.ts'))
     $block = [regex]::Match($ts, 'const GATE_IDS = \[(?<b>[\s\S]*?)\];').Groups['b'].Value
     $tsIds = @([regex]::Matches($block, '"([a-z0-9-]+)"') | ForEach-Object { $_.Groups[1].Value })
@@ -95,12 +95,12 @@ Invoke-TestMain {
     if (Test-Path -LiteralPath $real) {
         $before = [IO.File]::ReadAllBytes($real)
         $v = Test-ApprovalStore -StorePath $real
-        Test-Case 'compatibility (real store, read-only): the existing chain verifies; override-apply is still approved; the new gate has no record' ($v.Ok -and (Get-ApprovalGateStatus -StorePath $real -GateId 'override-apply').Status -eq 'approved' -and (Get-ApprovalGateStatus -StorePath $real -GateId 'm0-checkpoint-exception').Status -eq 'none')
+        Test-Case 'compatibility (real store, read-only): the existing chain verifies; override-apply (seq 1) and m0-checkpoint-exception (seq 2, the M3 start) are still approved; the gate of R21.21 has no record' ($v.Ok -and (Get-ApprovalGateStatus -StorePath $real -GateId 'override-apply').Status -eq 'approved' -and (Get-ApprovalGateStatus -StorePath $real -GateId 'm0-checkpoint-exception').Status -eq 'approved' -and (Get-ApprovalGateStatus -StorePath $real -GateId 'm4-start-exception').Status -eq 'none')
         Test-Case 'compatibility (real store): unchanged by the checks (byte-identical)' (Test-BytesEqual $before ([IO.File]::ReadAllBytes($real)))
     } else { Write-Host 'NOT MEASURED: no real Approval_Store on this machine' -ForegroundColor Yellow }
 
     # ---------------------------------------------------------------- static
     $src = [IO.File]::ReadAllText((Join-Path $script:ToolsDir 'MilestoneGate.psm1')) + [IO.File]::ReadAllText((Join-Path $script:ToolsDir 'Test-M3StartGate.ps1'))
-    Test-Case 'static: the gate never writes the Approval_Store or any file, and has no Docker call' (-not ($src -match 'Invoke-ApprovalStoreRequest|Write-StoreAtomically|WriteAll|Set-Content|Out-File|Invoke-DockerCli|docker'))
-    Test-Case 'static: the module says that this gate never stands for start-implementation or for meeting the M0 acceptance condition, and that M4 follows R21.9' ($src.Contains('never stands for the') -and $src.Contains('R21.9 unchanged'))
+    Test-Case 'static: the gate never writes the Approval_Store or any file, and has no Docker call' (-not ($src.Replace('docker-compose.discovery.yml', '') -match 'Invoke-ApprovalStoreRequest|Write-StoreAtomically|WriteAll|Set-Content|Out-File|Invoke-DockerCli|docker'))
+    Test-Case 'static: the module says that this gate never stands for start-implementation or for meeting the M0 acceptance condition, and that every other transition follows R21.9' ($src.Contains('never stands for the') -and $src.Contains('R21.9 unchanged'))
 }

@@ -28,7 +28,7 @@ const SEED = 23_033;
 const NUM_RUNS = 120;
 const TIMEOUT_MS = 120_000;
 
-const GATES = ["start-implementation", "container-runtime", "override-draft", "override-apply", "install-kiro-cli", "m6-start", "m7-start", "transmit-source", "m0-checkpoint-exception"];
+const GATES = ["start-implementation", "container-runtime", "override-draft", "override-apply", "install-kiro-cli", "m6-start", "m7-start", "transmit-source", "m0-checkpoint-exception", "m4-start-exception"];
 const RUNS = ["run-0001", "run-0002"];
 const CLAIMS = [{ run_id: "run-0001", claim_revision_id: "clm-0001-r1" }];
 

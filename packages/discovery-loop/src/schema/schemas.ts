@@ -650,6 +650,8 @@ const GATE_IDS = [
   "m7-start", "transmit-source",
   // R21.20 (2026-11-14): one-time exception for the M0 checkpoint, allowing only the start of M3. Not the start-implementation gate.
   "m0-checkpoint-exception",
+  // R21.21 (2026-11-15): one-time exception for the M0 checkpoint, allowing only the start of M4. Not the start-implementation gate, and not carried over to M5 or later.
+  "m4-start-exception",
 ];
 
 const approvalRecord: Schema = {
