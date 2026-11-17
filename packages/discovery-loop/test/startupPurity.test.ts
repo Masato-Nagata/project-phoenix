@@ -32,6 +32,9 @@ describe("stage B: no dependency on the other packages, no I/O", () => {
     // the words may appear in comments that explain the rule; no code (import or identifier) may name another package
     const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
     expect(code).not.toMatch(/ai-client|verifier|analyzer|@phoenix/);
+    // the strict run id pattern is a private copy: nothing is imported from the isolation or gate modules (a test pins the copy to the original)
+    expect(code).not.toMatch(/isolation|gate\//);
+    expect([...source.matchAll(/^\s*import\b[^;]*?\bfrom\s+["']([^"']+)["']/gm)].map((m) => m[1]).sort()).toEqual(["../schema/types.js", "./limits.js", "./runConfig.js"]);
   });
   it("positive control: the checker reports each forbidden use and each foreign import", () => {
     for (const bad of [

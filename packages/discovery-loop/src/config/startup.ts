@@ -101,7 +101,11 @@ export type LeaseTimingView =
   | { readonly ok: true; readonly heartbeatIntervalMs: number; readonly staleAfterMs: number; readonly propagationDelayMs: number }
   | { readonly ok: false; readonly errors: readonly string[] };
 
-export type LeaseCheckView = { readonly valid: true } | { readonly valid: false; readonly reason: string };
+/**
+ * The answer of the start-up lease proof. A valid answer names the Run it proves (`runId`); stage B validates its format and keeps it in the
+ * approval. An invalid answer carries only a reason; any `runId` it might carry is never read.
+ */
+export type LeaseCheckView = { readonly valid: true; readonly runId: string } | { readonly valid: false; readonly reason: string };
 
 export interface StartupPorts<TPolicy = unknown, TTable = unknown, TAudit = unknown, TLease = unknown> {
   readonly policy: { load(): Maybe<PolicyLoad<TPolicy, TTable>> };
@@ -143,6 +147,8 @@ export interface StartupApproval<TPolicy = unknown, TTable = unknown, TAudit = u
   readonly sandbox: { readonly applicable: false } | { readonly applicable: true; readonly destinations: readonly string[] };
   readonly lease: {
     readonly port: TLease;
+    /** The run id that the proof reported and that matched the strict Launcher format (stage B validated it). Never a value from an invalid answer. */
+    readonly runId: string;
     readonly heartbeatIntervalMs: number;
     readonly staleAfterMs: number;
     readonly propagationDelayMs: number;
@@ -165,6 +171,16 @@ const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object
 const isBool = (v: unknown): v is boolean => typeof v === "boolean";
 const isPosInt = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 1;
 const isSha256 = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
+/**
+ * The strict Launcher run id format. A MODULE-PRIVATE copy of `RUN_ID_PATTERN` of `src/isolation/attestation.ts` (this module must not import from
+ * `src/isolation/`); a test (`startup.test.ts`, "parity of the module-private run id pattern") pins the two to be equal. `$` without the `m` flag does not match before a trailing newline.
+ *
+ * LIMIT (documented, not a guarantee): stage B cannot prove that the run id returned by `check()` is the one used to construct the RunLease,
+ * because `RunLease` exposes no run id. The guarantee rests on the adapter (ONE captured constant used for both `createLeasePort({ runId })` and
+ * the `runId` of a valid `check()` response) plus the proof of the RunLease against `lease.json`.
+ * task 4.9: re-verify in the real-adapter integration test that the runId passed to createLeasePort equals the runId of the check() response.
+ */
+const STRICT_RUN_ID = /^run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const CREDENTIAL_VARIABLE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const inList = (list: readonly string[], v: unknown): v is string => typeof v === "string" && list.includes(v);
@@ -254,6 +270,7 @@ export async function checkStartupRefusals<TPolicy, TTable, TAudit, TLease>(
       timing?: { heartbeatIntervalMs: number; staleAfterMs: number; propagationDelayMs: number };
       leaseEnvOk?: boolean;
       leasePort?: TLease;
+      leaseRunId?: string;
       sandboxAvailable?: boolean;
       sandboxDestinations?: string[];
       sandboxAnswered: number;
@@ -471,17 +488,28 @@ export async function checkStartupRefusals<TPolicy, TTable, TAudit, TLease>(
         threw = true; // the message is dropped; `LeaseCheckInterrupted` and any other failure are the same refusal
       }
       if (threw) add(c, "lease", "lease_check_failed");
-      else if (!isObj(view) || !isBool(view["valid"])) add(c, "lease", "port_failed");
-      else if (view["valid"] === false) {
-        const reason = view["reason"];
-        add(c, "lease", "lease_invalid", inList(STARTUP_NAME_VOCABULARY.leaseReasons, reason) ? reason : undefined);
+      else {
+        // Reading the answer can throw (a getter, a Proxy): `step` turns that into `port_failed` of the lease check.
+        await step(c, "lease", async () => {
+          if (!isObj(view) || !isBool(view["valid"])) return shape();
+          if (view["valid"] === false) {
+            // The `runId` of an invalid answer is never read, trusted or kept.
+            const reason = view["reason"];
+            add(c, "lease", "lease_invalid", inList(STARTUP_NAME_VOCABULARY.leaseReasons, reason) ? reason : undefined);
+            return;
+          }
+          // A valid answer must name the Run in the strict Launcher format; anything else is not trusted (the value is never echoed).
+          const runId = view["runId"];
+          if (typeof runId !== "string" || !STRICT_RUN_ID.test(runId)) return shape();
+          got.leaseRunId = runId;
+        });
       }
     }
     if (c.refusals.length > 0) return { ok: false, error: finish(c.refusals) };
 
     // issue: every check ran and passed (a missing piece here would be a defect, and it fails closed) ---
-    const { policy, audit, credentials, flags, sandbox, timing, leasePort } = got;
-    if (policy === undefined || audit === undefined || credentials === undefined || flags === undefined || sandbox === undefined || timing === undefined || got.leaseEnvOk !== true || leasePort === undefined) {
+    const { policy, audit, credentials, flags, sandbox, timing, leasePort, leaseRunId } = got;
+    if (policy === undefined || audit === undefined || credentials === undefined || flags === undefined || sandbox === undefined || timing === undefined || got.leaseEnvOk !== true || leasePort === undefined || leaseRunId === undefined) {
       return { ok: false, error: finish([{ code: "port_failed", check: "config" }]) };
     }
     const envVarsRead = [...flags];
@@ -496,6 +524,7 @@ export async function checkStartupRefusals<TPolicy, TTable, TAudit, TLease>(
       sandbox,
       lease: Object.freeze({
         port: leasePort,
+        runId: leaseRunId,
         heartbeatIntervalMs: timing.heartbeatIntervalMs,
         staleAfterMs: timing.staleAfterMs,
         propagationDelayMs: timing.propagationDelayMs,

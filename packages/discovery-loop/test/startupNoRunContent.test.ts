@@ -9,7 +9,7 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync }
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { checkStartupRefusals, validateRunConfig, type RunConfig, type StartupRefusal } from "../src/index.js";
-import { makeTempDir, syntheticAuditConfig, toBytes } from "./support/startupAdapters.js";
+import { SYNTHETIC_RUN_ID, makeTempDir, syntheticAuditConfig, toBytes } from "./support/startupAdapters.js";
 import { scene, snapshotDirs, type Scene, type SceneOptions } from "./support/startupWorld.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -44,10 +44,10 @@ const CASES: readonly Case[] = [
   { name: "preparation table invalid", codes: ["preparation_table_invalid"], options: { table: () => ({ schemaVersion: 2 }) } },
   { name: "audit configuration missing", codes: ["audit_config_missing"], options: { audit: () => undefined } },
   { name: "audit configuration invalid", codes: ["audit_config_invalid"], options: { audit: () => new TextEncoder().encode("not json") } },
-  { name: "credential unset and no provider (kiro-cli)", codes: ["credential_unset", "provider_not_available"], options: { env: { PHOENIX_RUN_ID: "run-synthetic-0001", PHOENIX_LEASE_NONCE: "synthetic-nonce-0001", PHOENIX_LEASE_D_MS: "50" } }, cfg: KIRO },
+  { name: "credential unset and no provider (kiro-cli)", codes: ["credential_unset", "provider_not_available"], options: { env: { PHOENIX_RUN_ID: SYNTHETIC_RUN_ID, PHOENIX_LEASE_NONCE: "synthetic-nonce-0001", PHOENIX_LEASE_D_MS: "50" } }, cfg: KIRO },
   { name: "no destination list (kiro-cli)", codes: ["sandbox_destinations_undetermined"], options: {}, cfg: KIRO },
   { name: "lease variables missing", codes: ["lease_env_missing"], options: { env: { PHOENIX_LEASE_D_MS: "50" } } },
-  { name: "lease timing invalid", codes: ["lease_timing_invalid"], options: { env: { PHOENIX_RUN_ID: "run-synthetic-0001", PHOENIX_LEASE_NONCE: "synthetic-nonce-0001" } } },
+  { name: "lease timing invalid", codes: ["lease_timing_invalid"], options: { env: { PHOENIX_RUN_ID: SYNTHETIC_RUN_ID, PHOENIX_LEASE_NONCE: "synthetic-nonce-0001" } } },
   { name: "lease heartbeat stale (the proof ran and refused)", codes: ["lease_invalid"], options: { beat: false } },
   { name: "lease revoked", codes: ["lease_invalid"], options: { revoked: true } },
   { name: "volume not empty (existing files must survive)", codes: ["run_volume_not_empty"], options: { volume: "populated" } },

@@ -14,6 +14,7 @@ import type { MonotonicClock, Sleeper } from "../../../verifier/src/lease/types.
 import { loadPolicyConfig } from "../../../verifier/src/policy/config.js";
 import { loadPreparationTable } from "../../../verifier/src/prep/table.js";
 import type { AuditLoad, LeaseCheckView, LeaseTimingView, PolicyLoad, StartupPorts } from "../../src/index.js";
+import { OTHER_SYNTHETIC_RUN_ID, SYNTHETIC_RUN_ID } from "./syntheticRunId.js";
 
 const dataFile = (name: string): unknown => JSON.parse(readFileSync(new URL(`../../../verifier/data/${name}`, import.meta.url), "utf8")) as unknown;
 
@@ -125,6 +126,8 @@ export class FakeTime {
   };
 }
 
+export { SYNTHETIC_RUN_ID, OTHER_SYNTHETIC_RUN_ID };
+
 export interface FakeLeaseDir {
   readonly directory: string;
   readonly runId: string;
@@ -134,7 +137,7 @@ export interface FakeLeaseDir {
 /** A lease directory as the Launcher writes it (`lease.json`, `heartbeat`), in a temporary directory. */
 export function makeLeaseDir(opts: { runId?: string; nonce?: string; heartbeatIntervalMs?: number; staleAfterMs?: number; runIdInFile?: string } = {}): FakeLeaseDir {
   const directory = mkdtempSync(join(tmpdir(), "phoenix-lease-"));
-  const runId = opts.runId ?? "run-synthetic-0001";
+  const runId = opts.runId ?? SYNTHETIC_RUN_ID;
   const nonce = opts.nonce ?? "synthetic-nonce-0001";
   const leaseJson = {
     heartbeat_interval_ms: opts.heartbeatIntervalMs ?? DEFAULT_LEASE_SETTINGS.heartbeatIntervalMs,
@@ -163,22 +166,29 @@ export type RealLeasePort = ReturnType<typeof createLeasePort>;
 /**
  * The lease port as the composition root builds it: H and S are DEFAULT_LEASE_SETTINGS, D is the environment variable PHOENIX_LEASE_D_MS
  * (only `^[0-9]{1,6}$`), the timing is `checkLeaseTiming`, and ONE `RunLease` (`createLeasePort`) is created and reused by `port()` and `check()`.
+ *
+ * Run id (safety condition): `PHOENIX_RUN_ID` is read from the environment ONCE, into `runId` below. That single constant is used for
+ * `createLeasePort({ runId })`, for the "variables" answer, and for the `runId` of a valid `check()` response. The environment is never re-read.
+ * LIMIT: `RunLease` exposes no run id, so stage B cannot prove the response id is the constructor id; this adapter's single constant is what
+ * guarantees it, together with the proof against lease.json.
+ * task 4.9: re-verify in the real-adapter integration test that the runId passed to createLeasePort equals the runId of the check() response.
  */
 export function leasePort(env: FakeEnv, directory: string, time: FakeTime, counters?: { created: number }): StartupPorts<unknown, unknown, unknown, RealLeasePort>["lease"] {
   const nonEmpty = (v: string | undefined): boolean => typeof v === "string" && v.length > 0;
   const dText = env["PHOENIX_LEASE_D_MS"] ?? "";
   const d = /^[0-9]{1,6}$/.test(dText) ? Number(dText) : undefined;
+  const runId = env["PHOENIX_RUN_ID"] ?? ""; // the ONLY read of PHOENIX_RUN_ID
   let instance: RealLeasePort | undefined;
   const build = (): RealLeasePort => {
     if (instance !== undefined) return instance;
     const timing = checkLeaseTiming(DEFAULT_LEASE_SETTINGS, d);
     if (!timing.ok) throw new Error("timing");
     if (counters !== undefined) counters.created += 1;
-    instance = createLeasePort({ directory, runId: env["PHOENIX_RUN_ID"] ?? "", nonce: env["PHOENIX_LEASE_NONCE"] ?? "", timing: timing.value, clock: time.clock, sleeper: time.sleeper });
+    instance = createLeasePort({ directory, runId, nonce: env["PHOENIX_LEASE_NONCE"] ?? "", timing: timing.value, clock: time.clock, sleeper: time.sleeper });
     return instance;
   };
   return {
-    variables: () => ({ runId: nonEmpty(env["PHOENIX_RUN_ID"]), nonce: nonEmpty(env["PHOENIX_LEASE_NONCE"]) }),
+    variables: () => ({ runId: nonEmpty(runId), nonce: nonEmpty(env["PHOENIX_LEASE_NONCE"]) }),
     timing(): LeaseTimingView {
       const t = checkLeaseTiming(DEFAULT_LEASE_SETTINGS, d);
       return t.ok
@@ -188,7 +198,7 @@ export function leasePort(env: FakeEnv, directory: string, time: FakeTime, count
     port: build,
     async check(): Promise<LeaseCheckView> {
       const state = await build().check();
-      return state.valid ? { valid: true } : { valid: false, reason: state.reason };
+      return state.valid ? { valid: true, runId } : { valid: false, reason: state.reason };
     },
   };
 }

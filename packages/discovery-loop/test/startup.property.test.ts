@@ -5,6 +5,7 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { STARTUP_CHECK_ORDER, checkStartupRefusals, validateRunConfig, type RunConfig, type StartupRefusal } from "../src/index.js";
 import { isStartupApproval } from "../src/config/startup.js";
+import { SYNTHETIC_RUN_ID } from "./support/syntheticRunId.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -49,7 +50,7 @@ function build(failing: ReadonlySet<Fail>, delays: readonly number[]) {
       variables: () => { calls.push("leaseVars"); return wait({ runId: !failing.has("leaseVars"), nonce: true }); },
       timing: () => { calls.push("leaseTiming"); return wait(failing.has("leaseTiming") ? { ok: false, errors: ["propagation_delay_unmeasured"] } : { ok: true, heartbeatIntervalMs: 1000, staleAfterMs: 4000, propagationDelayMs: 1 }); },
       port: () => { calls.push("leasePort"); return lease; },
-      check: () => { calls.push("leaseCheck"); return wait(failing.has("leaseCheck") ? { valid: false, reason: "heartbeat_stale" } : { valid: true }); },
+      check: () => { calls.push("leaseCheck"); return wait(failing.has("leaseCheck") ? { valid: false, reason: "heartbeat_stale" } : { valid: true, runId: SYNTHETIC_RUN_ID }); },
     },
     io: { runVolume: () => { calls.push("io"); return wait(failing.has("io") ? { exists: false, writable: false, empty: false } : { exists: true, writable: true, empty: true }); }, configFiles: () => wait(["audit-config.json", "run-config.json"]) },
   };
@@ -76,6 +77,7 @@ describe("Property: the refusals are exactly the failing ports, in the fixed ord
           expect(r.ok && isStartupApproval(r.value)).toBe(true);
           expect(proofCalls).toBe(1);
           expect(r.ok && r.value.lease.port).toBe(b.lease);
+          expect(r.ok && r.value.lease.runId).toBe(SYNTHETIC_RUN_ID);
           return;
         }
         expect(r.ok).toBe(false);

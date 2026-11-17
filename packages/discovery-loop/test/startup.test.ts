@@ -1,5 +1,6 @@
 // Task 4.1, stage B: `checkStartupRefusals` with FAKE ports (design: "Stage B contract"). Synthetic data only. Assertions compare codes, check ids,
 // names, call counts and object identity; the canary of every test is a string that must never appear in a result.
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   STARTUP_CHECK_ORDER,
@@ -12,6 +13,8 @@ import {
   type StartupRefusal,
 } from "../src/index.js";
 import { isStartupApproval } from "../src/config/startup.js";
+import { RUN_ID_PATTERN } from "../src/isolation/attestation.js";
+import { OTHER_SYNTHETIC_RUN_ID, SYNTHETIC_RUN_ID } from "./support/syntheticRunId.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -52,7 +55,7 @@ function fake(over: Record<string, Impl> = {}) {
     "lease.variables": () => ({ runId: true, nonce: true }),
     "lease.timing": () => ({ ok: true, heartbeatIntervalMs: 1000, staleAfterMs: 4000, propagationDelayMs: 123 }),
     "lease.port": () => objects.lease,
-    "lease.check": () => Promise.resolve({ valid: true }),
+    "lease.check": () => Promise.resolve({ valid: true, runId: SYNTHETIC_RUN_ID }),
     "io.runVolume": () => ({ exists: true, writable: true, empty: true }),
     "io.configFiles": () => ["run-config.json", "audit-config.json"],
   };
@@ -147,7 +150,7 @@ describe("group 1: a passing run, and one case per refusal code", () => {
     expect(a.envVarsRead).toEqual([{ name: "EXAMPLE_ONE", set: true }, { name: "EXAMPLE_TWO", set: true }]);
     expect(a.credentials).toEqual([]);
     expect(a.sandbox).toEqual({ applicable: false });
-    expect(a.lease).toEqual({ port: f.objects.lease, heartbeatIntervalMs: 1000, staleAfterMs: 4000, propagationDelayMs: 123, proven: true });
+    expect(a.lease).toEqual({ port: f.objects.lease, runId: SYNTHETIC_RUN_ID, heartbeatIntervalMs: 1000, staleAfterMs: 4000, propagationDelayMs: 123, proven: true });
     expect(Object.keys(a).sort()).toEqual(["auditConfig", "config", "credentials", "envVarsRead", "lease", "payloadAuditConfig", "policy", "sandbox"]);
   });
 
@@ -338,6 +341,139 @@ describe("group 4: the lease start-up proof", () => {
     f.objects.lease.checks += 1; // the Runner may keep using the instance
     expect(f.objects.lease.checks).toBe(1);
   });
+
+  describe("the run id of the proof (task 4.1 reopened, case C1)", () => {
+    const valid = (runId: unknown): Record<string, Impl> => ({ "lease.check": () => Promise.resolve({ valid: true, runId }) });
+    const portFailed = (over: Record<string, Impl>): Promise<void> => one(over, "port_failed", "lease", undefined, config(), 1);
+
+    it("a strictly formatted run id is kept in the approval, exactly as the proof reported it", async () => {
+      for (const id of [SYNTHETIC_RUN_ID, OTHER_SYNTHETIC_RUN_ID, "run-20991231T235959Z-ffffffffffff", "run-00000000T000000Z-000000000000"]) {
+        const f = fake(valid(id));
+        const a = await approvalOf(config(), f.ports);
+        expect(a.lease.runId).toBe(id);
+        expect(f.calls.n["lease.check"]).toBe(1);
+      }
+    });
+    it("a malformed run id with valid: true is port_failed of the lease check, the proof ran once, and no value is echoed", async () => {
+      const malformed: string[] = [
+        `job-20250101T000000Z-0123456789ab`, // wrong prefix
+        `Run-20250101T000000Z-0123456789ab`,
+        `run-20250101T000000Z-0123456789AB`, // uppercase hex
+        `run-20250101T000000Z-0123456789a`, // short hex
+        `run-20250101T000000Z-0123456789abc`, // long hex
+        `run-2025010T000000Z-0123456789ab`, // short date
+        `run-202501011T000000Z-0123456789ab`, // long date
+        `run-20250101t000000Z-0123456789ab`, // lowercase T
+        `run-20250101T000000-0123456789ab`, // no Z
+        `run-20250101T000000Z-0123456789ag`, // not hex
+        `${SYNTHETIC_RUN_ID}\n`, // trailing newline
+        `${SYNTHETIC_RUN_ID} `, // trailing space
+        ` ${SYNTHETIC_RUN_ID}`, // leading space
+        `\n${SYNTHETIC_RUN_ID}`,
+        `${SYNTHETIC_RUN_ID}\u0000`,
+        `${SYNTHETIC_RUN_ID}-${CANARY}`, // suffix carrying a canary
+        `${SYNTHETIC_RUN_ID}${SYNTHETIC_RUN_ID}`, // too long
+        "run-synthetic-0001", // the old, non-strict synthetic id
+        "",
+        "r",
+      ];
+      for (const id of malformed) {
+        const f = fake(valid(id));
+        const r = await refusalsOf(config(), f.ports);
+        expect(r, JSON.stringify(id)).toEqual([{ code: "port_failed", check: "lease" }]);
+        expect(f.calls.n["lease.check"], JSON.stringify(id)).toBe(1);
+        expect(JSON.stringify(r)).not.toContain(CANARY);
+        if (id.trim().length > 8) expect(JSON.stringify(r)).not.toContain(id.trim());
+      }
+      await portFailed(valid(`${SYNTHETIC_RUN_ID}-${CANARY}`));
+    });
+    it("a missing or non-string run id with valid: true is port_failed", async () => {
+      const notStrings: unknown[] = [undefined, null, 42, 0, true, {}, [], [SYNTHETIC_RUN_ID], { toString: () => SYNTHETIC_RUN_ID }, new String(SYNTHETIC_RUN_ID), Symbol("x")];
+      for (const id of notStrings) await portFailed(valid(id));
+      await portFailed({ "lease.check": () => Promise.resolve({ valid: true }) }); // the field is absent
+    });
+    it("a run id whose getter throws is port_failed of the lease check and the message is dropped", async () => {
+      const evil = { valid: true, get runId(): string { throw new Error(CANARY); } };
+      const f = fake({ "lease.check": () => Promise.resolve(evil) });
+      const r = await refusalsOf(config(), f.ports);
+      expect(r).toEqual([{ code: "port_failed", check: "lease" }]);
+      expect(JSON.stringify(r)).not.toContain(CANARY);
+    });
+    it("valid: false never uses a run id: the reason maps as before, and the id appears nowhere", async () => {
+      for (const runId of [SYNTHETIC_RUN_ID, `${SYNTHETIC_RUN_ID}-${CANARY}`, 42, null, CANARY]) {
+        const f = fake({ "lease.check": () => Promise.resolve({ valid: false, reason: "heartbeat_stale", runId }) });
+        const r = await refusalsOf(config(), f.ports);
+        expect(r).toEqual([{ code: "lease_invalid", check: "lease", name: "heartbeat_stale" }]);
+        expect(JSON.stringify(r)).not.toContain(CANARY);
+        expect(JSON.stringify(r)).not.toContain(SYNTHETIC_RUN_ID);
+      }
+      // an unknown reason keeps the old mapping (no name), and a getter for runId on an invalid answer is never run
+      const evil = { valid: false, reason: CANARY, get runId(): string { throw new Error(CANARY); } };
+      const g = fake({ "lease.check": () => Promise.resolve(evil) });
+      const r = await refusalsOf(config(), g.ports);
+      expect(r).toEqual([{ code: "lease_invalid", check: "lease" }]);
+      expect(JSON.stringify(r)).not.toContain(CANARY);
+    });
+    it("the proof still runs exactly once and last, and not at all when another check refused (also with a valid run id in the answer)", async () => {
+      const f = fake();
+      await approvalOf(config(), f.ports);
+      expect(f.calls.n["lease.check"]).toBe(1);
+      expect(f.calls.order.slice(-2)).toEqual(["lease.port", "lease.check"]);
+      const g = fake({ "io.configFiles": () => [] });
+      await refusalsOf(config(), g.ports);
+      expect(g.calls.n["lease.check"] ?? 0).toBe(0);
+    });
+    it("the run id of the approval cannot be changed, and the lease instance keeps its identity and stays unfrozen", async () => {
+      const f = fake();
+      const a = await approvalOf(config(), f.ports);
+      expect(Object.isFrozen(a.lease)).toBe(true);
+      expect(Object.isFrozen(a)).toBe(true);
+      expect(() => { a.lease.runId = OTHER_SYNTHETIC_RUN_ID; }).toThrow(TypeError);
+      expect(() => { delete a.lease.runId; }).toThrow(TypeError);
+      expect(() => Object.defineProperty(a.lease, "runId", { value: OTHER_SYNTHETIC_RUN_ID })).toThrow(TypeError);
+      expect(() => { a.lease = { ...a.lease, runId: OTHER_SYNTHETIC_RUN_ID }; }).toThrow(TypeError);
+      expect(a.lease.runId).toBe(SYNTHETIC_RUN_ID);
+      expect(a.lease.port).toBe(f.objects.lease);
+      expect(Object.isFrozen(a.lease.port)).toBe(false);
+    });
+    it("a copy of the approval with another run id is not an approval", async () => {
+      const a = await approvalOf(config(), fake().ports);
+      const forged = { ...a, lease: { ...a.lease, runId: OTHER_SYNTHETIC_RUN_ID } };
+      expect(isStartupApproval(forged)).toBe(false);
+      expect(isStartupApproval(Object.freeze({ ...forged, lease: Object.freeze(forged.lease) }))).toBe(false);
+    });
+    it("the refusal codes are unchanged: still the 23 codes, and no code for the run id", () => {
+      expect(STARTUP_REFUSAL_CODES).toHaveLength(23);
+      expect(STARTUP_REFUSAL_CODES.filter((c) => /run_?id/i.test(c))).toEqual([]);
+    });
+  });
+
+  describe("parity of the module-private run id pattern with RUN_ID_PATTERN of src/isolation/attestation.ts", () => {
+    const privateSource = (): RegExp => {
+      const text = readFileSync(new URL("../src/config/startup.ts", import.meta.url), "utf8");
+      const m = /^const STRICT_RUN_ID = \/(.+)\/([a-z]*);$/m.exec(text);
+      if (m === null) throw new Error("STRICT_RUN_ID not found in startup.ts");
+      return new RegExp(m[1] as string, m[2] as string);
+    };
+    it("has the same source and the same flags", () => {
+      const copy = privateSource();
+      expect(copy.source).toBe(RUN_ID_PATTERN.source);
+      expect(copy.flags).toBe(RUN_ID_PATTERN.flags);
+    });
+    it("accepts and refuses the same strings, both as a regular expression and through checkStartupRefusals", async () => {
+      const copy = privateSource();
+      const strings = [
+        SYNTHETIC_RUN_ID, OTHER_SYNTHETIC_RUN_ID, `${SYNTHETIC_RUN_ID}\n`, `${SYNTHETIC_RUN_ID} `, ` ${SYNTHETIC_RUN_ID}`, "", "run-", "run-synthetic-0001",
+        "run-20250101T000000Z-0123456789AB", "run-20250101T000000Z-0123456789a", "run-20250101T000000Z-0123456789abc", "run-2025010T000000Z-0123456789ab",
+        "run-20250101T000000-0123456789ab", "job-20250101T000000Z-0123456789ab", "run-２０２５０１０１T000000Z-0123456789ab",
+      ];
+      for (const s of strings) {
+        expect(copy.test(s), JSON.stringify(s)).toBe(RUN_ID_PATTERN.test(s));
+        const r = await checkStartupRefusals(config(), fake({ "lease.check": () => Promise.resolve({ valid: true, runId: s }) }).ports);
+        expect(r.ok, JSON.stringify(s)).toBe(RUN_ID_PATTERN.test(s));
+      }
+    });
+  });
 });
 
 describe("group 2: several refusals, in the fixed order, deterministically", () => {
@@ -505,7 +641,7 @@ describe("the approval is unforgeable and its references are stable", () => {
     const copies: Any[] = [
       { ...a }, JSON.parse(JSON.stringify({ ...a, lease: { ...a.lease, port: null } })), Object.freeze({ ...a }), Object.create(a), new Proxy(a, {}),
       Object.freeze({ ...a, policy: { ...a.policy }, auditConfig: { ...a.auditConfig }, lease: { ...a.lease } }), Object.assign(Object.create(null), a),
-      null, undefined, 42, "x", [], {}, { payloadAuditConfig: "pass", lease: { proven: true } },
+      null, undefined, 42, "x", [], {}, { payloadAuditConfig: "pass", lease: { proven: true, runId: SYNTHETIC_RUN_ID } },
     ];
     for (const c of copies) expect(isStartupApproval(c)).toBe(false);
   });
