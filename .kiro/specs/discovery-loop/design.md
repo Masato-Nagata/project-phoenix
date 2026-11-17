@@ -184,7 +184,7 @@ flowchart LR
 | Limits | CPU and memory limits (values chosen at implementation) |
 | Ports | None published |
 | Docker socket | Never mounted |
-| Environment | Only the variable **names** listed in the run configuration, plus `PHOENIX_RUN_ID` and `PHOENIX_LEASE_NONCE` (not secrets). No credential for the Mock_Provider (R19.10) |
+| Environment | Only the variable **names** listed in the run configuration, plus `PHOENIX_RUN_ID`, `PHOENIX_LEASE_NONCE` and `PHOENIX_LEASE_D_MS` (none of them secret; the last is a number). No credential for the Mock_Provider (R19.10) |
 | Labels | `phoenix.discovery.role=runtime`, `phoenix.discovery.run-id=<run-id>`. The Launcher finds leftover containers by these labels (R24.12) |
 | Networks | `phoenix-discovery-lab` only (R18.14) |
 
@@ -289,6 +289,8 @@ The script uses only the Docker CLI and PowerShell 7 and prints one line per che
 | `reverse-proxy` could open connections to `discovery-runtime` on `discovery-lab` | `unresolved` | Peers on one Docker network can reach each other; the runtime has no listener, which is a property of the image and is checked by a port scan in M4 |
 
 The AI_Sandbox is on `ai-egress-inner` only. Docker cannot filter by destination name, so a forward proxy with a destination allowlist sits between `ai-egress-inner` and `ai-egress-outer` (R18.7). The proxy product is chosen in M6 (OD-2). The destination list comes from the Kiro CLI documentation and is **UNVERIFIED** until measured (R18.9). The Run_Manifest and the M7 completion record list the residual risks above (R18.8, R18.11).
+
+**Canonical source of the `discovery-lab` isolation evidence (2026-11-16).** The check definitions live in the script `tests/discovery-loop/test_discovery_network_isolation.ps1` (task 4.15) and are not duplicated elsewhere. The single measurement record for the internal-only isolation of `discovery-lab` is written once, by task 4.16, from the output of that script (groups A to D and F) plus the supplementary results of task 4.12. Those supplementary results are the measurements the script does not cover: no listener of `discovery-runtime` by TCP and UDP port scan, and `--network none` of the Independent_Evaluator and the Audit_Config_Builder. Task 4.12 writes no record of its own and does not repeat a check of the script. The result of group E (task 4.17, after the override is removed, together with the legacy-sample isolation test) is its own result file and is not part of the record of task 4.16. Task 4.19 requires the record of task 4.16 and the group E result. The early applied-state run of task 2.19 is not this record. Paths that are not measured stay `unresolved`. The location of the record is fixed when task 4.16 starts, following the convention of the existing `discovery/config/lab-isolation-*.json` files.
 
 ### Data flow per Iteration
 
@@ -1112,34 +1114,247 @@ A requested change of an existing Origin is rejected and recorded with the compo
     "schemaVersion": { "const": 1 },
     "provider": { "enum": ["mock", "kiro-cli"] },
     "mockFixtureSet": { "type": "string" },
-    "limits": { "type": "object", "additionalProperties": false, "required": ["iterations", "experiments"],
+    "limits": { "type": "object", "additionalProperties": false,
       "properties": {
         "iterations": { "type": "integer", "minimum": 1, "maximum": 10, "default": 3 },
         "experiments": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
-        "rejectedExperiments": { "type": "integer", "minimum": 1, "default": 20 },
-        "runSeconds": { "type": "integer", "minimum": 1, "default": 1800 },
-        "providerCallSeconds": { "type": "integer", "minimum": 1, "default": 120 },
-        "providerRetries": { "type": "integer", "minimum": 0, "default": 2 },
-        "responseBytes": { "type": "integer", "minimum": 1, "default": 262144 },
-        "claimsPerHypothesis": { "type": "integer", "minimum": 1, "default": 50 },
-        "citationsPerClaim": { "type": "integer", "minimum": 1, "default": 5 },
-        "experimentsPerResponse": { "type": "integer", "minimum": 1, "default": 10 },
-        "requestsPerExperiment": { "type": "integer", "minimum": 1, "default": 10 },
-        "requestBodyBytes": { "type": "integer", "minimum": 1, "default": 8192 },
-        "perRequestSeconds": { "type": "integer", "minimum": 1, "default": 10 },
-        "perExperimentSeconds": { "type": "integer", "minimum": 1, "default": 60 } } },
+        "rejectedExperiments": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+        "runSeconds": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 1800 },
+        "providerCallSeconds": { "type": "integer", "minimum": 1, "maximum": 600, "default": 120 },
+        "providerRetries": { "type": "integer", "minimum": 0, "maximum": 10, "default": 2 },
+        "responseBytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 262144 },
+        "claimsPerHypothesis": { "type": "integer", "minimum": 1, "maximum": 50, "default": 50 },
+        "citationsPerClaim": { "type": "integer", "minimum": 1, "maximum": 5, "default": 5 },
+        "experimentsPerResponse": { "type": "integer", "minimum": 1, "maximum": 100, "default": 10 },
+        "requestsPerExperiment": { "type": "integer", "minimum": 1, "maximum": 10, "default": 10 },
+        "requestBodyBytes": { "type": "integer", "minimum": 1, "maximum": 8192, "default": 8192 },
+        "perRequestSeconds": { "type": "integer", "minimum": 1, "maximum": 60, "default": 10 },
+        "perExperimentSeconds": { "type": "integer", "minimum": 1, "maximum": 600, "default": 60 } } },
     "testApi": { "type": "object", "additionalProperties": false, "required": ["baseAddress"],
       "properties": { "baseAddress": { "enum": ["http://127.0.0.1:8056", "http://reverse-proxy:8080"] } } },
-    "mask": { "type": "object", "additionalProperties": false, "required": ["token", "paths"],
-      "properties": { "token": { "type": "string" }, "paths": { "type": "array", "items": { "type": "string" } } } },
-    "envNames": { "type": "array", "items": { "type": "string" } }
+    "mask": { "type": "object", "additionalProperties": false, "required": ["paths"],
+      "properties": { "paths": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*|\\[(?:0|[1-9][0-9]{0,3}|\\*)\\])(?:\\.[A-Za-z_][A-Za-z0-9_]*|\\[(?:0|[1-9][0-9]{0,3}|\\*)\\])*$" } } } },
+    "envNames": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" } }
   }
 }
 ```
 
 The run configuration holds no lock setting and no attestation: locking belongs to the Launcher (Mutual Exclusion). The interim attestation of R24.2 is recorded by the Launcher, not taken from the run configuration.
 
-A missing limit uses the documented default only when the key is **absent**. A present but invalid value (non-integer, out of range) refuses the Run and is never replaced by a default (R11.8). The `baseAddress` enumeration is the closed set of R18.2/R18.3. The `mask.paths` values are chosen by a human from the public Test API design, not read from evaluation files at run time.
+Cross-field rule of R9.14: `perExperimentSeconds` is not smaller than `perRequestSeconds`. The maxima 60 and 600 are the existing range of R9.14 and are already enforced by `validateRunnerLimits` in `packages/verifier`. The ranges of the other limits are listed in the table "Limits of the run configuration" below, which separates existing ranges from new decisions.
+
+Defaults are applied by explicit code of `validateRunConfig` only when a key is **absent**. The `default` entries of the schema are documentation. The Ajv option `useDefaults` is not used, so that an absent key and a `null` value stay distinguishable. `null` is invalid for every key and is never read as absent. A present value that is invalid (wrong type, non-integer, out of range) refuses the Run and is never replaced by a default (R11.8). The required keys without defaults are `schemaVersion`, `provider`, `limits`, `testApi`, `mask`, `envNames`, and inside them `testApi.baseAddress`, `mask.paths`; an absent required key refuses the Run. Unknown keys are refused at every level (`additionalProperties: false` at every object, checked before defaults are applied). A refusal reports the setting by name (JSON pointer; an unknown key is reported by the placeholder `<unknown>`, never by its own name) and never by its value, and creates no Run content (R11.8, R15.11). The `baseAddress` enumeration is the closed set of R18.2/R18.3. The `mask.paths` values are chosen by a human from the public Test API design, not read from evaluation files at run time.
+
+**Mask and environment names (DECIDED, design decision of 2026-11-16, second batch).** `mask.token` is not a run configuration setting (C2-1): the mask token is the constant `MASK_TOKEN`. A `token` key is an unknown key and is refused, which agrees with `validateMaskConfig` of `packages/verifier`; the existing masking code is not changed. The `mask.paths` keep their meaning (JSON paths into Test API response bodies, authored by a human, C2-2) and are limited only by the existing grammar of `parseMaskPattern` and `validateMaskConfig` in `packages/verifier`: at most 64 entries, each entry valid for `parseMaskPattern` (at most 128 characters; a name segment, an index `[n]`, or `[*]`). Duplicates stay allowed (the hash removes them). Stage A keeps a local copy of that grammar, because `packages/discovery-loop` has no runtime dependency on `packages/verifier`, and a parity test that imports the verifier source keeps the two equal, as `aiClientJsonParity.test.ts` does for `packages/ai-client`. The JSON schema above states only the bounds 64 and 128; the full grammar is checked by that stage A copy. The `envNames` keep their meaning (names of environment variables the runtime reads; the Run_Manifest records only the name and the set or unset flag) and are limited only to the character class and length `^[A-Za-z_][A-Za-z0-9_]{0,127}$`. No limit on the number of names is added. The `pattern` of `mask.paths.items` is the grammar of `parseMaskPattern` of `packages/verifier` written as one regular expression: the first segment is a name or an index `[n]` / `[*]`, with n being 0 or a number of 1 to 4 digits without a leading zero; each later segment is `.name` or an index; at most 128 characters. A parity test proves that the regular expression, the whole of stage A, `parseMaskPattern` and `validateMaskConfig` accept the same strings (an exhaustive enumeration of all strings of up to 5 characters over a 9-character alphabet and of up to 6 characters over a 7-character alphabet, generated strings, and the boundaries of 128 characters and of the index digits). If the two ever differ, C2-1 and the existing masking code are authoritative and the expression is corrected.
+
+The names `limits.responseBytes`, `claimsPerHypothesis`, `citationsPerClaim`, `experimentsPerResponse`, `requestsPerExperiment` and `requestBodyBytes` map to `maxResponseBytes`, `maxClaims`, `maxCitationsPerClaim`, `maxExperiments`, `maxRequestsPerExperiment` and `maxRequestBodyBytes` of `resolveResponseLimits` (`packages/ai-client`). `perRequestSeconds` and `perExperimentSeconds` map to `requestTimeoutMs` and `experimentTimeoutMs` of `RunnerLimits` (seconds times 1000).
+
+**Limits of the run configuration.** "Existing" means a range already defined by the spec or the code before 2026-11-16. "New decision" means a range decided by the human on 2026-11-16 (R8.11, R11.10, R17.2 of requirements.md).
+
+| Key | Range | Default | Origin |
+|-----|-------|---------|--------|
+| `iterations` | 1 to 10 | 3 | Existing (R11.7) |
+| `experiments` | 1 to 100 | 20 | Existing (R11.7) |
+| `rejectedExperiments` | 1 to 100 | 20 | New decision |
+| `runSeconds` | 1 to 3600 | 1800 | New decision |
+| `providerCallSeconds` | 1 to 600, and not above the effective `runSeconds` | 120 | New decision |
+| `providerRetries` | 0 to 10 | 2 | New decision |
+| `responseBytes` | 1 to 1048576 | 262144 | New decision |
+| `claimsPerHypothesis` | 1 to 50 | 50 | Existing: fixed schema bound (Hypothesis schema `claims` `maxItems`) |
+| `citationsPerClaim` | 1 to 5 | 5 | Existing: fixed schema bound |
+| `requestsPerExperiment` | 1 to 10, and not above the loaded policy `limits.requests` (dynamic) | 10 | Existing: fixed schema bound (Experiment schema `requests` `maxItems`) |
+| `requestBodyBytes` | 1 to 8192, and not above the loaded policy `limits.bodyBytes` (dynamic) | 8192 | Existing: 8192 is the maximum that the policy loader accepts (`LIMIT_MAXIMA.bodyBytes`) |
+| `experimentsPerResponse` | 1 to 100 | 10 | New decision (second batch of 2026-11-16). A Run can consume at most 100 Experiments (R11.7); the gate checks the count before any per-Experiment validation; no cross-check against `experiments`, because R11.9 defines the behavior when a response supplies more Experiments than the Run can accept |
+| `perRequestSeconds` | 1 to 60 | 10 | Existing (R9.14) |
+| `perExperimentSeconds` | 1 to 600, and not below `perRequestSeconds` | 60 | Existing (R9.14) |
+
+A fixed schema bound is a static value, checked in stage A. A policy limit is a dynamic value baked into the image and checked in stage B against the loaded policy. A configured value above either one is refused. Nothing is truncated, ignored or relaxed, and the policy is never widened (R17.2, R8.6, R11.8).
+
+The cross-field rules `providerCallSeconds` <= `runSeconds` and `perExperimentSeconds` >= `perRequestSeconds` are evaluated on the effective values after the defaults are applied. A configuration that sets only `runSeconds` below 120 (the default per-call limit) is therefore refused.
+
+The `stateChecks` and `preparationSteps` of the Experiment_Policy are not run configuration keys.
+
+`mockFixtureSet`: when the key is absent and `provider` is `mock`, the effective value is `DEFAULT_MOCK_FIXTURE_SET_NAME` (`default-widget-v1`), which is the behavior of `createProvider` in `packages/ai-client` today. `null` is invalid (as in `createProvider`). An unknown name is refused: `MOCK_FIXTURE_SETS` is a closed set with no fallback. The effective name is recorded in the Run_Manifest `config`. The key is refused when `provider` is not `mock`.
+
+### Run configuration validation: stage A, stage B, and who checks what (2026-11-16)
+
+**Stage A.** `validateRunConfig(raw: unknown): Result<RunConfig, ConfigIssue[]>` in `packages/discovery-loop` is pure: no I/O and no clock. The order is:
+
+1. Plain object check.
+2. Schema validation by `createSchemaValidator()` with a schema `run-config` registered in `SCHEMAS` (unknown keys at every level, `null`, type, integer, range, enum, required).
+3. Cross-field rules.
+4. Explicit defaults for absent optional keys.
+5. The static fixed-bound checks (the maxima of the table above).
+
+`ConfigIssue = { code, path }`, where `path` is a JSON Pointer and never a value. The codes are `required_missing`, `unknown_key`, `null_value`, `wrong_type`, `not_integer`, `out_of_range`, `enum_mismatch`, `pattern_mismatch`, `cross_field` and `above_fixed_bound`. Issues are sorted by path, then by code. A key name of the input is NEVER echoed, because a key name is free text and can be a secret: a key that the schema does not define is written in the pointer as the fixed placeholder `<unknown>` (a valid JSON Pointer token). Only the names that the schema defines (the property names of the schema, and `token`, the removed `mask.token`) are written as they are, for example `/mask/token` or `/limits/paths` for a key at the wrong level; these names are constants of the package, not text of the input. Several unknown keys under one parent give ONE issue (`/<unknown>`, `/limits/<unknown>`, `/mask/<unknown>`), so the number of unknown keys is not reported, and the issue list does not depend on the key order of the input; the order of the issues is by pointer (code point order) and then by code.
+
+**Stage B.** `checkStartupRefusals(cfg: RunConfig, ports: StartupPorts): Promise<Result<StartupApproval, StartupRefusal[]>>`. All I/O goes through injected ports, so the stage is testable offline:
+
+| Port | Content and check |
+|------|-------------------|
+| `policy` | The baked policy data and preparation table, validated with `loadPolicyConfig`; then `requestsPerExperiment` and `requestBodyBytes` against its limits (code `above_policy_limit`) |
+| `auditConfig` | The bytes of `/run/config/audit-config.json`, validated with `parseAuditConfig` |
+| `env` | Credential names and set flags only, `checkProviderCredentials(provider, env)`. The message names the variable, never its value |
+| `sandbox` | The permitted AI_Sandbox destinations, only for provider `kiro-cli`. In M4 `kiro-cli` has no registered provider and `createProvider` already refuses it |
+| `lease` | The start-up proof of the existing RunLease (`createLeasePort`); see "Stage B contract" |
+| `io` | The fixed locations: `/run/out` exists, is writable and is EMPTY, and only the two config files exist under `/run/config`. No configured location is read |
+
+`StartupApproval` is a branded value that `LoopOrchestrator.run` requires, so no Run starts without it. `mayStartRun(payloadAuditConfig, accessDenial)` (task 4.3) stays separate: stage B calls the audit-configuration check of `ai-client` and passes its result to `mayStartRun`. Stage B never evaluates access denial, and the two modules do not import each other. Refusals of stage B carry `{ code, check, name? }`; a name is a setting or variable name, never a value. The contract of stage B (ports, signatures, codes, order and fail-closed rules) is now specified in the subsection "Stage B contract" below.
+
+**Who checks what.**
+
+| Launcher (host, PowerShell 7, before the Run_Volume is created) | Runtime (container, before the first record) |
+|------|------|
+| The gates of `Test-LaunchGate` (override-apply approval, a valid lease-timing record whose settings hash equals the current settings, the image exists); the locks; the lease-timing rules; the collision check | Stage A, then stage B, then `mayStartRun` |
+| Proposed (task 4.9; TO VERIFY at task 4.9, not decided): pre-start checks of the two mounted config files `discovery/config/run-config.json` and `discovery/config/audit-config.json`. Each file is a regular file, is not a reparse point (symbolic link or junction), has a link count of 1, has a resolved full path equal to the expected path of the mount table (an equality test against the closed table, not a prefix or name blacklist), and has a size within a fixed bound. `run-config.json` is a JSON object whose `limits.runSeconds` (the only value the Launcher consumes) is absent or an integer of 1 to 3600. The hashes of both files go into the Launcher record | |
+
+Items the Launcher does not verify, with the reason and the alternative control (the division of work between the Launcher and the runtime is TO VERIFY at task 4.9 together with the Launcher pre-start checks above):
+
+| Item | Reason | Alternative control |
+|------|--------|---------------------|
+| Semantic checks of stage A | They would need a second implementation in PowerShell (drift risk) | The runtime runs them; an invalid configuration leaves the Run_Volume empty |
+| Baked Experiment_Policy and preparation table | They are inside the image, so only the runtime can load them | Validated at build and by stage B |
+| Run_Lease start-up proof | It needs the runtime's own monotonic clock | The Launcher's heartbeat and revocation |
+| Ground_Truth access-denial result | It can only be measured inside the runtime | The Launcher's `mount_inspection` attestation and task 4.2 |
+| Credentials | The Mock_Provider needs none; the credential of a real provider is outside the runtime (R19.6, C7) | Stage B `env` port for the names and set flags |
+
+**Run_Volume rule.** The Run_Volume is NOT created when a gate, a lock, the lease-timing rules, a collision, the image check or a Launcher pre-start check fails. When only the runtime refuses (stage A or stage B), the volume exists but stays empty (C3: the Evidence_Store refuses to start unless the mounted volume is empty). The runtime exits non-zero with no record. DECIDED (design decision of 2026-11-16, second batch): the guarantee of R15.11 (an invalid configuration creates no Run_Volume) is maintained. A runtime-only refusal after the Launcher created the volume (an empty volume, then its removal) is NOT accepted as full satisfaction of R15.11. The option of validating the configuration in a short-lived `--network none` container before the Run_Volume is created needs a design review BEFORE task 4.9 starts, covering mounts, permissions, network and Docker Desktop behavior. Until that review, no Docker run, no Launcher change and no relaxation of R15.11 is allowed. TO VERIFY at task 4.9: the outcome of that review and the resulting Launcher behavior.
+
+**Evaluation data isolation.** The run configuration has NO key that takes a file-system location: the output location is the fixed mount `/run/out`, and the inputs are the fixed mount table. A configuration that names an evaluation output location is therefore refused structurally as an unknown key (R11.8 (d), R15.10), not by a name or path blacklist. String values (`mask.paths`, `envNames`, `mockFixtureSet`, `provider`) are never used as file-system locations; `mockFixtureSet` and `provider` are closed enumerations. DECIDED (design decision of 2026-11-16, second batch): `mask.paths` and `envNames` are limited by the grammars stated in "Mask and environment names (DECIDED)" above, and by nothing else. The real boundary stays the container: the mount list equals the table (Launcher inspection, task 2.18), `evaluation/` is not mounted (R15.2), and the runtime measures read, list and stat denial (task 4.2, R15.13). A path-string check is not evidence. Mount sources are bind mounts of host files, so the Launcher resolves each source and refuses a symbolic link, junction or hard link (see the Launcher pre-start checks above). How Docker Desktop treats links in bind-mount sources is UNVERIFIED and is measured in M4 (requirements OPEN item 10); the symbolic-link and hard-link residual risks stay `unresolved` until measured.
+
+**Mock Run audit configuration (human decision of 2026-11-16).** The Mock Run uses a DEDICATED synthetic audit-configuration fixture: fictitious canaries, decoys and fingerprints written by hand, built without reading `evaluation/`. The Audit_Config_Builder is NOT run against real restricted data in M4 without a separate explicit human approval. A Mock Run with the fixture is not evidence that the real audit configuration works: the Run_Manifest records the audit configuration kind (`fixture`) next to `auditConfigSha256`. How the fixture reaches the fixed mount source `discovery/config/audit-config.json` without overwriting it or being mistaken for a real configuration is TO VERIFY at task 4.9 (not decided; proposal: a second fixed host path `discovery/config/audit-config.mock.json`, chosen by a Launcher switch between exactly two fixed paths, with the choice recorded in the Launcher record).
+
+**Decisions and open points of the run configuration (2026-11-16).** None of the code named here is changed by this edit.
+
+DECIDED (design decision of 2026-11-16, second batch):
+
+1. The Launcher run-time cap (`MaxRunSeconds`, today 1800 + 120 in `DiscoveryLauncher.psm1`) will follow the validated `runSeconds` plus 120 seconds in task 4.9. BEFORE that change, its consistency with the existing lease and stop conditions must be checked and recorded: R11.12 (stop within 30 s of the deadline), R11.17, the lease stop limit of 10 s and the abort budget, R24.12, and `Wait-RuntimeContainer`. The constant 1800 + 120 is not changed now.
+2. Task 4.4 passes the effective `responseBytes` explicitly to every parse of an AI response. `DEFAULT_PARSE_LIMITS.maxBytes` (262144) is not changed.
+3. The Payload_Auditor ceiling of 4 MiB (`AUDIT_LIMITS_CEILING`) is kept, and an over-limit payload is blocked (fail closed). Hand-over item 1 stays a measurement of the Mock Run.
+4. R15.11 is maintained (see the Run_Volume rule above).
+5. The Mock Run uses a dedicated synthetic audit-configuration fixture, distinguished from real data in the Run_Manifest.
+6. `experimentsPerResponse` is 1 to 100, default 10.
+7. The grammars of `mask.paths` and `envNames` are those of "Mask and environment names (DECIDED)" above; `mask.token` is not a setting.
+8. `discovery/config/run-config.json` is the explicit configuration file that the Launcher receives. A human authors it; no tool or AI generates it; the Launcher never creates a default one; a missing file refuses the start before any Run_Volume exists; the Launcher records its hash.
+
+TO VERIFY at task 4.9 or later (not decided now):
+
+- The design review of the pre-validation container (Run_Volume rule above), before task 4.9 starts.
+- The check of the Launcher cap against the lease and stop conditions (decision 1).
+- The path and identification mechanism of the audit-configuration fixture in the Launcher (proposal: two fixed host paths and a Launcher switch).
+- The Launcher pre-start file checks (regular file, no reparse point, link count 1, resolved path equal to the mount table, size bound) and how Docker Desktop treats links in bind-mount sources.
+- The stage B ports (`checkStartupRefusals`, `StartupPorts`, `StartupApproval`), which are not implemented in this batch.
+
+Verification note (2026-11-16): the repository has no lint configuration (no eslint or dependency-cruiser configuration file); lint was therefore NOT RUN (environment not provisioned) for stage A; type checking and the tests were run in the pinned toolchain container.
+
+### Stage B contract (task 4.1; design decision of 2026-11-16, third batch)
+
+This subsection specifies stage B of "Run configuration validation: stage A, stage B, and who checks what". It is design text only; no code is changed by this edit.
+
+**(a) Placement and dependencies.** Stage B is one module of `packages/discovery-loop` (`src/config/startup.ts`) that orchestrates ports. It imports NOTHING from `packages/verifier`, `packages/ai-client` or `packages/analyzer`: discovery-loop has no runtime dependency on them, and the port types are structural. Adapters that wrap the real functions (`loadPreparationTable`, `loadPolicyConfig`, `policyConfigSha256`, `preparationTableSha256`, `parseAuditConfig`, `checkProviderCredentials`, `createProvider`, `checkLeaseTiming`, `createLeasePort`) belong to the composition root of the runtime (`discovery-loop/dist/main.js`, the entry point named in `infra/discovery/runtime.Dockerfile`, created with task 4.4 and wired with task 4.9). The dependency on those packages is decided there: a workspace dependency and a `tsc` project reference need a lockfile change, which needs its own approval. For task 4.1 the adapters exist only as TEST SUPPORT (`test/support/startupAdapters.ts`, which imports the sibling sources as `aiClientJsonParity.test.ts` does), so stage B is built and tested with the real functions without a new dependency.
+
+**(b) Signatures.** TypeScript, as design text:
+
+```ts
+checkStartupRefusals<TPolicy, TTable, TAudit, TLease>(
+  cfg: RunConfig,
+  ports: StartupPorts<TPolicy, TTable, TAudit, TLease>
+): Promise<Result<StartupApproval<TPolicy, TTable, TAudit, TLease>, StartupRefusal[]>>
+
+type StartupCheckId =
+  "config" | "policy" | "auditConfig" | "env" | "sandbox" | "lease" | "io"; // the fixed order of the list
+
+type StartupRefusal = {
+  readonly code: StartupRefusalCode;
+  readonly check: StartupCheckId;
+  readonly name?: string;
+};
+```
+
+`checkStartupRefusals` never throws and never rejects.
+
+`StartupPorts` has exactly these members. Each has read-only methods and no method that writes.
+
+| Port | Shape |
+|------|-------|
+| `policy` | `{ load(): PolicyLoad<TPolicy, TTable> }`, with `PolicyLoad = { ok: true; policy: TPolicy; table: TTable; limits: { requests: number; bodyBytes: number }; policySha256: string; preparationTableSha256: string } \| { ok: false; code: "unavailable" \| "invalid" \| "table_invalid" }` |
+| `auditConfig` | `{ load(): AuditLoad<TAudit> }`, with `AuditLoad = { ok: true; load: TAudit; sha256: string } \| { ok: false; reason: "missing" \| "unreadable" \| "empty" \| "invalid"; detail?: string }`. This is the shape of `AuditConfigLoadResult`; `load` is the whole `AuditConfigLoadResult` of ai-client with `ok: true`, which `auditPayload` takes as its `cfg` |
+| `env` | `{ isSet(name: string): boolean; credentials(provider: "mock" \| "kiro-cli"): { ok: true; referenced: readonly { name: string; set: boolean }[] } \| { ok: false; code: "credential_unset" \| "unknown_provider"; variable?: string } }`. No method returns the value of a variable |
+| `sandbox` | `{ providerAvailable(provider: "mock" \| "kiro-cli"): boolean; destinations(): readonly string[] \| undefined }` |
+| `lease` | `{ variables(): { runId: boolean; nonce: boolean }; timing(): { ok: true; heartbeatIntervalMs: number; staleAfterMs: number; propagationDelayMs: number } \| { ok: false; errors: readonly string[] }; port(): TLease; check(): Promise<{ valid: true } \| { valid: false; reason: string }> }` |
+| `io` | `{ runVolume(): { exists: boolean; writable: boolean; empty: boolean } \| undefined; configFiles(): readonly string[] \| undefined }` |
+
+`StartupApproval<...>` is an unforgeable value (a module-private brand or WeakSet, with `isStartupApproval(x)`; a copy or a structural look-alike is not an approval), and `LoopOrchestrator.run` accepts nothing else. Implementation note (2026-11-16): the existing isolation guards of R6.11 (`m1Acceptance.test.ts` and `model.test.ts`) allow no runtime export whose name contains "approv" except `deriveApprovalStatus`, and they are not weakened; therefore `isStartupApproval` is exported by the module `src/config/startup.ts` only and is NOT re-exported from the package entry `src/index.ts` (the orchestrator of this package imports it from the module path); the types `StartupApproval` and the function `checkStartupRefusals` are re-exported (a type has no runtime name). `isValidatedRunConfig` is exported from the package entry. It carries only VALIDATED data, never raw bytes:
+
+- `config: RunConfig`.
+- `policy: { value: TPolicy; table: TTable; limits; policySha256; preparationTableSha256 }`.
+- `auditConfig: { load: TAudit; sha256: string }`.
+- `payloadAuditConfig: "pass"`. This is the first argument of `mayStartRun(payloadAuditConfig, accessDenial)`, whose existing signature is NOT changed. It is `"pass"` only because stage B refuses otherwise. A Run that is refused at start-up therefore has no manifest, and the value `blocked` of the manifest field exists only for the truth table and for an audit configuration that fails after the start.
+- `envVarsRead: readonly { name: string; set: boolean }[]`: the names of `envNames` and of the credentials, set or unset only (R19.3).
+- `credentials: readonly { name: string; set: boolean }[]`.
+- `sandbox: { applicable: false } | { applicable: true; destinations: readonly string[] }`.
+- `lease: { port: TLease; heartbeatIntervalMs: number; staleAfterMs: number; propagationDelayMs: number; proven: true }`.
+
+Single use of validated data. The orchestrator builds the Runner from `approval.policy.value` and `approval.policy.table`; it does not call `loadPolicyConfig` again, and `createRunner` keeps its own defensive `checkRunnerStart`. It audits every payload with `approval.auditConfig.load`; it never reads or parses `/run/config/audit-config.json` itself, so there is no second reading and no unverified data. It passes `approval.lease.port` (the SAME RunLease instance whose start-up proof passed) to the Runner. `mayStartRun` and the access-denial module do not import stage B or each other; `mayStartRun` receives `approval.payloadAuditConfig` as a plain value.
+
+Precondition of stage A. Stage A adds `isValidatedRunConfig(x)`: a module-private WeakSet filled only by `validateRunConfig` on success, with no change of any behavior of `validateRunConfig`. Stage B refuses a `cfg` that is not one (`config_not_validated`). This addition is a proposal that needs the human's approval before it is implemented (see "Open points of stage B" below).
+
+**(c) The codes (`StartupRefusalCode`), by check.** `name`, when present, comes from a CLOSED vocabulary of constants and is never text of the input, of an exception or of a value.
+
+| check | code | name |
+|-------|------|------|
+| config | `config_not_validated` | none |
+| policy | `policy_unavailable`, `policy_invalid`, `preparation_table_invalid` | none |
+| policy | `above_policy_limit` | `/limits/requestsPerExperiment` or `/limits/requestBodyBytes` |
+| auditConfig | `audit_config_missing`, `audit_config_empty`, `audit_config_unreadable` | none |
+| auditConfig | `audit_config_invalid` | one of the fixed details of `parseAuditConfig`: `fields`, `schemaVersion`, `tokenizer`, `allowlist`, `canaries`, `decoys`, `fingerprints`, `restrictedPathPrefixes`, `size_exceeded`, `invalid_utf8`, `invalid_json`, `depth_exceeded`, `duplicate_key`, `unsafe_number` (any other detail: no name) |
+| env | `credential_unset` | the variable name of `PROVIDER_CREDENTIALS` (today `KIRO_API_KEY`); never the value |
+| env | `provider_unknown` | none |
+| sandbox | `provider_not_available` (in M4 `kiro-cli` has no registered factory; the `ProviderSelectionError` code of ai-client is `provider_not_available`), `sandbox_destinations_undetermined` (R18.9) | none |
+| lease | `lease_env_missing` | `PHOENIX_RUN_ID` or `PHOENIX_LEASE_NONCE` |
+| lease | `lease_timing_invalid` | one code of `checkLeaseTiming`: `heartbeat_interval_out_of_range`, `stale_after_out_of_range`, `propagation_delay_unmeasured`, `rule_1_stale_below_three_heartbeats`, `rule_2_healthy_launcher_could_be_judged_stale`, `rule_3_stop_exceeds_ten_seconds` |
+| lease | `lease_invalid` | the `LeaseReason`: `missing`, `malformed`, `run_mismatch`, `nonce_mismatch`, `revoked`, `heartbeat_stale`, `unreadable` |
+| lease | `lease_check_failed` (the check threw, for example `LeaseCheckInterrupted`) | none |
+| io | `run_volume_missing`, `run_volume_not_writable`, `run_volume_not_empty`, `config_files_unexpected`, `io_unreadable` | none |
+| any | `port_failed` (the port is missing, threw, or returned a value of an unexpected shape) | none |
+
+A refusal is a START refusal, not a termination reason. A lease that is invalid before the first record gives `lease_invalid` and the Run does not start (R24.9: no request, no Experiment record). The termination reasons `lease_unavailable` and `launcher_killed` apply only to a lease that becomes invalid while a Run is in progress (R24.15), and they are written by the Runner and the orchestrator.
+
+**(d) Order and multiple refusals.** The checks run in the fixed order config, policy, auditConfig, env, sandbox, lease (static part), io. A check whose precondition failed is skipped without a second refusal; for example, `above_policy_limit` is not evaluated when the policy did not load. Every independent refusal is collected. The result is sorted by the order of `StartupCheckId`, then by code, then by name, without duplicates, so it never depends on timing or on the order in which a port answers. The start-up PROOF of the Run_Lease (`ports.lease.check()`, which waits up to S for the counter to change) runs LAST, exactly once, and only when no other refusal exists; a Run that is already refused does not wait for it.
+
+Fail closed. No `StartupApproval` exists unless every check ran and passed. A port that throws, rejects, is missing, or returns an unexpected shape gives `port_failed` for its check, and the exception message and any value are discarded (never copied, never logged). The function itself never throws. A port is called at most once per call (the lease check once), and the ports have no method that writes.
+
+**(e) Policy.** The policy and the preparation table are the EXISTING baked data `packages/verifier/data/policy-config.json` and `preparation-table.json`, which the runtime image already contains because `infra/discovery/runtime.Dockerfile` copies `/build/packages`. No new format, location or storage is added. The adapter reads them (as `probe/main.ts` does with `new URL("../../data/...", import.meta.url)`), calls `loadPreparationTable` and then `loadPolicyConfig(raw, table)` (as `probe.ts` does), and computes `policyConfigSha256` and `preparationTableSha256` of `packages/verifier` for the Run_Manifest (OD-17).
+
+Stage B compares the EFFECTIVE values of the run configuration with the loaded policy: `limits.requestsPerExperiment <= policy.limits.requests` and `limits.requestBodyBytes <= policy.limits.bodyBytes` (equal passes). A larger value is `above_policy_limit` with the pointer as name. The baked values today are 10 and 8192, equal to the fixed maxima (`LIMIT_MAXIMA`), so the check refuses nothing until the policy is narrowed; it is tested with a narrowed fake policy. The check never changes the policy, never lets the run configuration widen it (R8.6), and never lowers a configured value (R17.2). `stateChecks` and `preparationSteps` are policy settings, not run configuration keys.
+
+**(f) Audit configuration.** `parseAuditConfig(bytes)` returns `{ ok: true; config; sha256 } | { ok: false; reason: "missing" | "unreadable" | "empty" | "invalid"; detail? }`. The reason `unreadable` comes from the host reader of the adapter, which reads `/run/config/audit-config.json`. Stage B calls the port ONCE. On success `approval.auditConfig.load` is that same result, which `auditPayload(bytes, kind, cfg, ctx)` takes per payload; `approval.payloadAuditConfig` is `"pass"`, and `approval.auditConfig.sha256` becomes `payload_audit.auditConfigSha256`.
+
+The check is structural: the strict parse, the exact keys and the fixed minimum counts. It does not say whether the configuration is a fixture or was built from real data, and it does not replace the per-payload check A01. How the runtime learns the audit configuration KIND (`fixture`) for the Run_Manifest is not defined yet. It cannot be read from the file and needs the Launcher's attestation; it is TO VERIFY at task 4.9.
+
+**(g) Lease.** Stage B reuses the existing safety mechanism unchanged: `timing.ts`, `watcher.ts`, `runLease.ts`, `fsLeaseView.ts`, `LeaseTiming.psm1` and `DiscoveryLauncher.psm1` are not modified.
+
+Sources of the values:
+
+- H and S are `DEFAULT_LEASE_SETTINGS` of `packages/verifier` (1000 ms and 4000 ms). This is a second definition that must equal the Launcher's `Get-LeaseSettings`.
+- D is the environment variable `PHOENIX_LEASE_D_MS`, the measured propagation delay, which the Launcher passes (`New-ContainerCreateArgs`). It is parsed only as `^[0-9]{1,6}$`; anything else is undefined, which `checkLeaseTiming` refuses as `propagation_delay_unmeasured`.
+- The run identifier and the nonce are `PHOENIX_RUN_ID` and `PHOENIX_LEASE_NONCE` (not secrets).
+- The directory is `/run/lease`.
+
+The adapter builds the timing with `checkLeaseTiming(DEFAULT_LEASE_SETTINGS, D)` and the port with `createLeasePort({ directory: "/run/lease", runId, nonce, timing, clock, sleeper })`, as `probe/main.ts` does.
+
+Validation times. The Launcher validates the rules and the lease-timing record before the Run_Volume exists. The runtime validates the rules again at start-up (stage B `lease` check, `lease_timing_invalid`) and proves liveness once with `RunLease.check()`: the counter must change within S, and the nonce, the run identifier, `revoked`, and the equality of H and S with `lease.json` are checked. Any difference is `malformed` with the cause `timing_differs`, which fails closed. The same RunLease instance then applies the running rule before every request (R24.15). The mapping from `LeaseState` to refusal is: `valid: false` gives `lease_invalid` with the reason as name. The port boundary is exactly the existing `LeasePort` (`check()`), the timing is a plain record, and the environment is read only by the adapter.
+
+**(h) What stage B does not do.** It does not compute access denial (task 4.2), does not decide `mayStartRun` (task 4.3), does not create any file or record, does not read or write `discovery/approvals/`, does not read `evaluation/`, and does not start a Run. The Run_Volume rule and R15.11 remain as written above: the volume exists and stays empty when only the runtime refuses, and the pre-validation container option is reserved for the design review before task 4.9.
+
+**Open points of stage B (2026-11-16, third batch).** None of these is changed by this edit.
+
+1. The proposal `isValidatedRunConfig` for stage A needs the human's approval. Approved by the human on 2026-11-16 and implemented (a module-private WeakSet filled only by validateRunConfig on success).
+2. Whether the start-up lease proof (up to S = 4 s) belongs to stage B as designed or to the first request. This design puts it in stage B because R24.9 says the runtime refuses to start the Run without a valid lease. Confirmed by the human on 2026-11-16: the proof runs in stage B, last, once.
+3. The workspace dependency of discovery-loop on verifier and ai-client for the composition root (task 4.4 or 4.9). It needs its own approval because it changes the lockfile.
+4. The channel for the audit configuration kind (`fixture`) (TO VERIFY at task 4.9).
+5. The second definition of H and S in `packages/verifier` and in `LeaseTiming.psm1`. A drift is caught at run time by `timing_differs`; a parity test is proposed for task 4.9.
+6. The baked policy limits (10, 8192) equal the fixed maxima, so `above_policy_limit` cannot trigger on the baked data; it is tested with a fake policy only.
 
 ### Run_Manifest (R12.8, R22.3)
 
@@ -2022,7 +2237,9 @@ Three rules are checked, with the measured D, by the Launcher before it starts a
 
 With the defaults, rule 2 allows D up to 1750 ms and rule 3 up to 3500 ms, so D <= 1750 ms. If the measured D is larger, S must be raised, but never above 6000 ms and never so far that rule 3 fails; if that is impossible the 10-second requirement cannot be met on that machine and the Launcher does not start Runs. The runtime clock is a monotonic clock (`MonotonicClock { nowMs(): number }`, injected); the wall-clock `Clock` is not used.
 
-**Start-up liveness proof.** Before the first request of a Run, the runtime must see the counter change. It reads `lease.json` (it must parse, name `PHOENIX_RUN_ID`, carry the hash of `PHOENIX_LEASE_NONCE`, and carry the same H and S as the run configuration), checks that `revoked` does not exist, reads the counter c0 and the time t0, and polls every P until a read shows a value greater than c0. If no change is seen within S of t0, the lease is `heartbeat_stale` and the Run does not start; no request has been sent. A healthy Launcher increments within H, so the proof takes about H + D + P (about 1.5 to 2.5 seconds with the defaults, and it scales with H); a stopped Launcher cannot produce a change, so no value of S lets a stopped Launcher pass, and a copied or old directory is also stopped by the nonce.
+**Source of H and S (2026-11-16).** H and S are NOT run configuration keys. The single source is the Launcher: `Get-LeaseSettings` in `discovery/tools/LeaseTiming.psm1` (H = 1000 ms, S = 4000 ms), validated by `Test-LeaseTimingRules` and by the lease-timing record `discovery/config/lease-timing.json`. Its `settingsSha256` must equal the hash of the current settings; otherwise the Launcher refuses with `lease_timing_invalid` before any Run_Volume exists. The Launcher writes the values into `lease.json` (`heartbeat_interval_ms`, `stale_after_ms`) and passes the measured propagation delay D as the environment variable `PHOENIX_LEASE_D_MS`. The runtime builds its timing with `checkLeaseTiming(settings, D)` from `DEFAULT_LEASE_SETTINGS` of `packages/verifier` (a second definition that must equal the Launcher's) and takes D from the environment. The lease watcher compares that timing with `lease.json`; any difference is `malformed` with the cause `timing_differs`, which fails closed. Validation duties: the Launcher validates before the volume exists, the runtime validates at start-up and while running, and the lease watcher validates `lease.json` against its own timing.
+
+**Start-up liveness proof.** Before the first request of a Run, the runtime must see the counter change. It reads `lease.json` (it must parse, name `PHOENIX_RUN_ID`, carry the hash of `PHOENIX_LEASE_NONCE`, and carry the same H and S as the runtime's own timing, see "Source of H and S" below), checks that `revoked` does not exist, reads the counter c0 and the time t0, and polls every P until a read shows a value greater than c0. If no change is seen within S of t0, the lease is `heartbeat_stale` and the Run does not start; no request has been sent. A healthy Launcher increments within H, so the proof takes about H + D + P (about 1.5 to 2.5 seconds with the defaults, and it scales with H); a stopped Launcher cannot produce a change, so no value of S lets a stopped Launcher pass, and a copied or old directory is also stopped by the nonce.
 
 **Running rule.** The lease is valid if and only if the content of `lease.json` is the content checked at start (compared by hash), `revoked` does not exist, and less than S has passed on the monotonic clock since the poll that first saw the current counter value.
 
@@ -2582,7 +2799,7 @@ The property is run over generated settings that satisfy the three rules of "Lea
 
 | Situation | Behavior | Requirement |
 |-----------|----------|-------------|
-| Invalid or missing run configuration, limit out of range, unset credential for a real provider, unknown base address | Refuse to start. Report the setting by name. No Run content, no default substituted | R11.8, R18.3, R19.6 |
+| Invalid run configuration (a required key absent, a present value that is null or invalid, an unknown key), limit out of range, unset credential for a real provider, unknown base address | Refuse to start. Report the setting by name. No Run content, no default substituted | R11.8, R18.3, R19.6 |
 | Policy configuration missing, malformed, or lists reset or test operations | Every Experiment rejected; Run refuses to start | R8.6 |
 | Isolation check fails or cannot complete before the Run | Refuse to start, name the check, create no Run content | R15.11 |
 | Source_Bundler error | Stop, no bundle, no manifest | R1.3 to R1.5 |
@@ -2799,15 +3016,36 @@ Written at the end of M3 (task 3.11). These points are open or decided but not y
 | 5 | `audit_violation` | The orchestrator never retries it and does not count it against the retry limit (R11.10); it stops the Run at once with termination reason `error` (R11.15), writes the violation (`code`, `requestKind`, hashes only, never payload bytes) and the Run_Manifest. It records three separate facts: the audit passed (an `AuditedRequest` exists), the request was consumed (the guard marked it used), the provider was really called. `gateProviderResult` returns it as its own outcome (`audit_violation`, `retryable: false`, `stopRun: true`). |
 | 6 | Static check of expressions | The check that an expression parses and refers only to declared derived values and tables (R4.8) is done by the orchestrator when it accepts a Hypothesis, with the validator of `packages/analyzer`. The gate checks structure only. |
 | 7 | No adoptable Experiment | When the gate accepts a response whose Experiments are all rejected on their own, or that has none, the orchestrator decides what follows (R7.8, R11.14: `no_further_experiments` is the termination reason that the requirements name). Each rejected Experiment is an `experiment_invalid` record and is not a failed provider call. |
-| 8 | Fixed schema bounds and configured limits | The schemas fix 50 Claims, 5 Citations per Claim and 10 requests per Experiment as constants. The effective limit is the smaller of the configured value and the bound; a configured value above a bound has no effect. To let a larger value take effect the schema would have to be built from the configuration. Decide it, or leave it as it is and state it in the Run_Manifest. |
+| 8 | Fixed schema bounds and configured limits | Decided on 2026-11-16: the bounds are written into the table "Limits of the run configuration" (see "Run configuration (summary)"). The schemas fix 50 Claims, 5 Citations per Claim and 10 requests per Experiment as constants, and a configured value above a fixed schema bound or above the loaded policy limit is refused (stage A and stage B); nothing is truncated or ignored. The upper bound of `experimentsPerResponse` is also decided (1 to 100, default 10; second batch of 2026-11-16). |
 | 9 | `ai_content_discarded` | The gate reports the removed authority-like properties of an accepted Hypothesis (`discarded`: index, `/claims/<i>`, name or `<key>`, rule). The orchestrator writes them as `ai_content_discarded` records: at most 100 `fields` per record (split a longer list), `aiOutputRecordId` of the stored `ai_output`. After the gate, `EvidenceStore.createClaimRevision` finds nothing to remove and records nothing itself, so the report of the gate is the only source. |
 | 10 | Credentials at the start of a Run | `checkProviderCredentials(provider, env)` is the refusal rule of R19.6 and gives the name and set flag for the Run_Manifest (R19.3). The Launcher or the orchestrator must call it with the real environment before any provider call. The runtime side of the Kiro_CLI_Provider holds no credential (C7): the host-side sandbox controller reads `KIRO_API_KEY` (M6). |
 | 11 | One complete Run with the Mock_Provider | R3.2 asks the Mock_Provider to pass its own suite, including one complete Run, before any real provider is built. M3 tests the pipeline up to the gate; the complete Run is the acceptance of M4. |
 | 12 | The wiring of the gate | `gateResponse` takes the schema validator as a port. The orchestrator passes the validator of `packages/discovery-loop` (`createSchemaValidator()`), with the limits from `resolveResponseLimits` of the Run configuration (an invalid value refuses the Run, R11.8). |
-| 13 | Run step of the Audit_Config_Builder | The builder is code only. The container image, the host launcher and any run against the real restricted files need a separate human approval; its output is never committed. A run is also needed before the first Run that uses the real audit configuration (`auditConfigSha256` in the Run_Manifest). |
-| 14 | Known limits of the auditor | The path prefix scan treats a `%` that is directly followed by two hexadecimal digits forming invalid UTF-8 as an invalid escape and blocks (`5%ABC`); the fingerprints of JSON files are made of decoded strings and might block a payload by an accidental window (measure with real data after the approval of item 13); `AuditContext.allowlist` and the audit configuration allowlist are intersected. |
-| 15 | Gate of M4 itself | R21.9 applies from the start of M4: the M0 checkpoint (task 0.14) is still open, and the exception of R21.20 covered the start of M3 only. The Approval_Record seq 1 for the Gate `override-apply` exists (2026-11-14T10:28:15.630+09:00, approved SHA-256 `1fce63d07e8dafffa47578d91cbdb8c27d0c0f1b6af6a81621b777fa6dd10e6d`, equal to the current override file) and the Discovery_Override is applied (task 2.19); the checkbox of task 0.13 stays `[ ]` (evidence note under task 0.13). The M3 checkpoint (task 3.12) is not an approval to start M4, and no M4 start gate is defined in this spec or in `discovery/tools/`. |
+| 13 | Run step of the Audit_Config_Builder | The builder is code only. The container image, the host launcher and any run against the real restricted files need a separate human approval; its output is never committed. Decided on 2026-11-16: the Mock Run uses a dedicated synthetic audit-configuration fixture (see "Run configuration validation"); the real-data Builder run needs a separate approval and is not done in M4. A run is needed before the first Run that uses the real audit configuration (`auditConfigSha256` in the Run_Manifest). |
+| 14 | Known limits of the auditor | The path prefix scan treats a `%` that is directly followed by two hexadecimal digits forming invalid UTF-8 as an invalid escape and blocks (`5%ABC`); the fingerprints of JSON files are made of decoded strings and might block a payload by an accidental window (evaluate only after a measurement with real data under the separate approval of item 13, which is not part of M4); `AuditContext.allowlist` and the audit configuration allowlist are intersected. |
+| 15 | Gate of M4 itself | M4 started under R21.21, the one-time exception for the M0 checkpoint, for the start of M4 only. The Gate is `m4-start-exception`. The read-only check `discovery/tools/Test-M4StartGate.ps1` (module `MilestoneGate.psm1`) is implemented. Run on 2026-11-16 against the real repository and Approval_Store, it returned `allowed` (record seq 3). The tasks 0.13 and 0.14 stay `[ ]`: the exception does not close them, does not meet the M0 acceptance condition, approves no earlier operation, and is not carried over to M5 or later (R21.9 applies). The Approval_Record seq 1 for the Gate `override-apply` exists (2026-11-14T10:28:15.630+09:00, approved SHA-256 `1fce63d07e8dafffa47578d91cbdb8c27d0c0f1b6af6a81621b777fa6dd10e6d`) and equals the current override file, which is applied (task 2.19). The gate binds the SHA-256 of requirements.md, design.md and tasks.md, so a later edit of a spec file makes a repeated check report `hash_mismatch`; this is expected after the start. Changes after the start go through the change management of the spec and are reviewed at task 4.19 (R21.21). |
 | 16 | Record the audit result before the call (found at the M3 checkpoint) | The data-flow diagram records the audit result (`payload_audit`: hash and checks) and only then calls the provider; R12.14 and R11.15 make a failed record write an unrecoverable error that stops the Run with no further provider request. In M3 the auditor returns the complete result and the record store returns a failure result and stops after a failed write (tests: `m3AuditRecord.test.ts`, Property 17 of M1), but nothing in M3 code forces the order, because the auditor has no store and the orchestrator does not exist. The orchestrator must write the `payload_audit` record first, call the provider only after that write succeeded, and the Mock Run tests must include a failed audit-record write (no provider call, termination reason `error`) with a positive control. The stop condition of R21.4 ("the audit result is not recorded") is checked in M4 end to end. |
+### Assignment of the hand-over items to M4 tasks (2026-11-16)
+
+| # | M4 task | Note |
+|---|---------|------|
+| 1 | 4.4, 4.14 | The ceiling stays 4 MiB and an over-limit payload is blocked (fail closed); measured in the Mock Run |
+| 2 | 4.4 | `lookupRecord` adapter |
+| 3 | 4.4 | Fix the `experiment_generation` envelope and change fixture, gate and tests together |
+| 4 | 4.4, 4.14 | Test that the Mock Experiment is accepted by the Experiment_Policy (R3.13), confirmed in the first Mock Run |
+| 5 | 4.4, 4.5, 4.14 | `audit_violation`: immediate stop with `error`, no retry, no provider fallback |
+| 6 | 4.4 | Static check of expressions (R4.8) with the validator of `packages/analyzer` |
+| 7 | 4.4, 4.5 | No adoptable Experiment (R7.8, R11.14) |
+| 8 | 4.1, 4.6 | All bounds decided, including `experimentsPerResponse` (1 to 100, default 10); see the table "Limits of the run configuration" |
+| 9 | 4.4 | `ai_content_discarded` records |
+| 10 | 4.1, 4.6, 4.13 | Credential check and set flags |
+| 11 | 4.14, 4.19 | One complete Run with the Mock_Provider (R3.2) |
+| 12 | 4.1, 4.4 | Wiring of the gate and `resolveResponseLimits` |
+| 13 | none (separate human approval) | The Audit_Config_Builder is not run against real restricted files without a separate human approval; the Mock Run uses the dedicated synthetic fixture (decided 2026-11-16); the real-data Builder run needs a separate approval and is not done in M4; the path and identification of the fixture are TO VERIFY at task 4.9 |
+| 14 | none | Known limits of the auditor are evaluated only after a measurement with real data, which needs the approval of item 13 |
+| 15 | settled | See row 15 (R21.21, `Test-M4StartGate.ps1`) |
+| 16 | 4.4, 4.14, 4.19 | Write the `payload_audit` record first, call the provider only after that write succeeded, zero provider calls after a failed write |
+
 ## Implementation decisions, batch 1 (2026-11-13)
 
 These decisions were approved by the user on 2026-11-12 and 2026-11-13 while implementing tasks 2.25, 2.18, 2.21, 2.22, 2.23, 2.27 and the preparation part of 2.20. They add detail to the Launcher, Run_Lease, Approval_Store and probe sections above and change no requirement and no M1 schema. Values marked **NEEDS HUMAN REVIEW** are working values and are not final.
@@ -3039,3 +3277,8 @@ R21.21 was added, forward-looking and for the start of M4 only. The new Gate `m4
 | 2026-11-15 | Batch 1, item 25 recorded (task 3.12, the M3 checkpoint): the acceptance condition of R21.4 is met on the evidence of the M3 tests (378 tests in 24 files, 1680 tests in 77 files in the full run); the stop condition of R21.4 was not observed. The ordering "record the audit result, then call the provider" is not enforced in M3 and is added to the hand-over as item 16. The M3 checkpoint is not the approval to start M4: the M0 checkpoint (task 0.14) and the approval for applying the Discovery_Override (task 0.13) are open, and the exception of R21.20 does not apply to M4. The approval record of the M3 start (seq 2) is unchanged. |
 | 2026-11-15 | Fact corrections (human instruction): the M0 row of the phased-delivery table and hand-over item 15 said that the `override-apply` approval was open and was the gate of M4. Corrected to the verified state: the Approval_Record seq 1 for `override-apply` exists (2026-11-14T10:28:15.630+09:00, SHA-256 `1fce63d0...10e6d`, equal to the current override file), the Discovery_Override is applied (task 2.19), the task 0.13 stays `[ ]`, and whether the removal procedure and the isolation test without the override were presented at the approval is unconfirmed. An evidence note was added under 0.13. No approval time, content, or operation history was changed |
 | 2026-11-15 | Batch 1, item 26 recorded (human decision after the M3 commit `0d695ed567ca9c02e59def2e3b28bbe9af7d3772`): R21.21 (M0 checkpoint exception for the start of M4 only, forward-looking, no retroactive approval, no closing of 0.13 or 0.14, no relaxation of the M4 acceptance, no carry-over to M5 or later), the Gate `m4-start-exception` in `GATE_IDS` and in the Approval_Store gate list, the read-only `Test-M4StartGate.ps1` with 61 tests, and the M3 gate tests adjusted (ten gates; the real-store check now expects the existing seq 2 as `approved`). No approval record of the new Gate was created; the approval records seq 1 and seq 2 are unchanged; 0.13 and 0.14 are `[ ]` |
+| 2026-11-16 | M4 started under R21.21 (gate `allowed`, record seq 3; tasks 0.13 and 0.14 stay open). R11.8 and the run configuration schema aligned to Plan B: an absent key uses its default, a present invalid value including `null` is refused, an absent required key is refused, an unknown key is refused; `iterations` and `experiments` are optional; the maxima 60 and 600 for `perRequestSeconds` and `perExperimentSeconds` are taken from R9.14, with its cross-field rule. Hand-over row 15 updated and the assignment table of the hand-over items to M4 tasks added. The canonical source of the `discovery-lab` isolation evidence is defined (script of task 4.15, one record by task 4.16). Open decisions, none of them invented here: upper bounds of the limits without a range, hand-over item 8, and the audit configuration of the Mock Run. The Approval_Records are unchanged. The three spec hashes of the M4 start record no longer match after these edits, which is expected (R21.21) |
+| 2026-11-16 | Run configuration limits and start-up validation. Existing ranges (unchanged; now written into the schema): `iterations` 1-10, `experiments` 1-100 (R11.7); `perRequestSeconds` 1-60, `perExperimentSeconds` 1-600 and not below the request limit (R9.14); `claimsPerHypothesis`, `citationsPerClaim`, `requestsPerExperiment` at most the fixed schema bounds 50, 5, 10; `requestBodyBytes` at most 8192 (policy loader maximum). New decisions of 2026-11-16 (not in the spec before): `rejectedExperiments` 1-100; `runSeconds` 1-3600; `providerCallSeconds` 1-600 and not above `runSeconds`; `providerRetries` 0-10; `responseBytes` 1-1048576; refusal of a configured value above the fixed schema bound or the loaded policy limit (no truncation, no ignoring, no widening); `limits` required and `limits: {}` allowed; two-stage validation (stage A and stage B); H and S are not run configuration keys; the Mock Run uses a dedicated audit-configuration fixture. Still open: see the list of open points in "Run configuration validation". Approval_Records unchanged; the hash mismatch of the M4 start record is expected (R21.21) and is reviewed at task 4.19 |
+| 2026-11-16 | Second batch of run configuration decisions (DECIDED, design decision of 2026-11-16, second batch). `mask.token` is removed from the run configuration: C2-1 and the existing `validateMaskConfig` of `packages/verifier` are authoritative, the mask token is the constant `MASK_TOKEN`, a `token` key is an unknown key and is refused, and the masking code is unchanged. Grammars: `mask.paths` at most 64 entries, each valid for `parseMaskPattern` (at most 128 characters), with a local copy in stage A and a parity test against the verifier source; `envNames` limited to `^[A-Za-z_][A-Za-z0-9_]{0,127}$` with no limit on their number; the issue code `pattern_mismatch` is added. `experimentsPerResponse` is 1 to 100, default 10. Further decisions of the batch: (1) the Launcher run-time cap will follow the validated `runSeconds` plus 120 seconds in task 4.9, after a recorded check against the lease and stop conditions, and is not changed now; (2) task 4.4 passes the effective `responseBytes` explicitly to every parse of an AI response; (3) the Payload_Auditor ceiling of 4 MiB is kept and an over-limit payload is blocked (fail closed); (4) `providerCallSeconds` is compared with `runSeconds` on the effective values; (5) `mockFixtureSet` is refused for a provider that is not `mock`; (6) the Mock Run uses a dedicated synthetic audit-configuration fixture, distinguished from real data in the Run_Manifest; (7) `discovery/config/run-config.json` is the explicit, human-authored file that the Launcher receives (never generated, no default, a missing file refuses the start before any Run_Volume exists, its hash is recorded); (8) the grammars above. R15.11 is maintained; the pre-validation container is reserved for a design review before task 4.9, and until then no Docker run, no Launcher change and no relaxation of R15.11 is allowed. TO VERIFY at task 4.9 or later (not decided): that design review, the check of the Launcher cap, the path and identification of the audit-configuration fixture, the Launcher pre-start file checks and Docker Desktop link behavior. Stage B (`checkStartupRefusals`, `StartupPorts`, `StartupApproval`) is not implemented in this batch. Approval_Records unchanged; the M4 start record (seq 3) is unchanged; the hash mismatch is expected (R21.21) and is reviewed at task 4.19 |
+| 2026-11-16 | Third batch: stage B contract added as the subsection "Stage B contract" (ports, signatures, refusal codes, order, fail-closed rules, and the connections to the Experiment_Policy, the audit configuration and the Run_Lease), with the open points of stage B. The `lease` row of the stage B port table and the stage B paragraph point to it. No code changed, no requirement changed. The status tool `task_update` was unavailable in this environment: stage A was implemented under a human-approved one-time exception and task 4.1 stays open; neither the checkbox nor tasks.meta.json was touched. Approval_Records unchanged; the hash mismatch of the M4 start record is expected (R21.21) |
+| 2026-11-16 | Acceptance follow-up of task 4.1 (human-approved; Kiro implemented tests and corrections directly because task_update was unavailable, a one-time exception limited to this follow-up): the reference of the AI_Sandbox destination rule is corrected from R16.9 to R18.9 (design and the header comment of startup.ts; no behavior change); tests were added for the three acceptance items G1 (a refused start-up leaves the output directories byte-identical, with positive controls; stage A and stage B only, NOT the Launcher or the Run_Volume creation, so R15.11 as a whole is still verified with tasks 4.9 and 4.14), G2 (R15.10 positive control: a configuration that names an evaluation output location is refused as an unknown key, and nothing is echoed) and G3 (the SHA-256 values reported by the policy port equal the existing hash functions applied to the approval's own objects; no mismatch was found). No requirement and no source behavior changed. Approval_Records unchanged; the hash mismatch of the M4 start record is expected (R21.21) and is reviewed at task 4.19. |

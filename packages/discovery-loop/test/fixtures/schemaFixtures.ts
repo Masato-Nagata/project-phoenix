@@ -456,6 +456,42 @@ const manifestRunSet: FixtureSet = {
 };
 
 // ---------------------------------------------------------------------------------------------
+// Run configuration (task 4.1, stage A). Neutral names only; `mask.token` does not exist (C2-1), so it is an unknown key.
+const runConfig = {
+  schemaVersion: 1,
+  provider: "mock",
+  limits: {},
+  testApi: { baseAddress: "http://reverse-proxy:8080" },
+  mask: { paths: ["widget.created_at", "items[*].serial"] },
+  envNames: ["EXAMPLE_NAME"],
+};
+const runConfigSet: FixtureSet = {
+  schema: "run-config",
+  valid: [
+    { id: "minimal with limits: {}", value: runConfig },
+    {
+      id: "every limit given",
+      value: edit(runConfig, (v) => {
+        v.provider = "kiro-cli";
+        v.testApi.baseAddress = "http://127.0.0.1:8056";
+        v.limits = {
+          iterations: 10, experiments: 100, rejectedExperiments: 100, runSeconds: 3600, providerCallSeconds: 600, providerRetries: 10,
+          responseBytes: 1048576, claimsPerHypothesis: 50, citationsPerClaim: 5, experimentsPerResponse: 100, requestsPerExperiment: 10,
+          requestBodyBytes: 8192, perRequestSeconds: 60, perExperimentSeconds: 600,
+        };
+      }),
+    },
+  ],
+  invalid: [
+    bad("missing limits", edit(runConfig, (v) => { delete v.limits; }), "missing_field", "/limits"),
+    bad("a mask token", edit(runConfig, (v) => { v.mask.token = "x"; }), "undefined_field", "/mask/token"),
+    bad("provider outside the set", edit(runConfig, (v) => { v.provider = "other"; }), "bad_value", "/provider"),
+    bad("limit below its minimum", edit(runConfig, (v) => { v.limits.runSeconds = 0; }), "bad_value", "/limits/runSeconds"),
+    bad("non-integer limit", edit(runConfig, (v) => { v.limits.iterations = 1.5; }), "bad_type", "/limits/iterations"),
+    bad("an environment name with a dash", edit(runConfig, (v) => { v.envNames = ["BAD-NAME"]; }), "bad_value", "/envNames/0"),
+  ],
+};
+// ---------------------------------------------------------------------------------------------
 export const FIXTURE_SETS: readonly FixtureSet[] = [
   factsSet,
   manifestSet,
@@ -470,4 +506,5 @@ export const FIXTURE_SETS: readonly FixtureSet[] = [
   envelopeSet,
   approvalSet,
   manifestRunSet,
+  runConfigSet,
 ];

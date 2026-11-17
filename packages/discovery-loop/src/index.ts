@@ -32,3 +32,5 @@ export type {
 } from "./model/index.js";
 // Evidence_Store write path: record envelope, hash chain, atomic JSONL writes, secret rejection (M1 task 1.9).
 export * from "./store/index.js";
+// Run configuration validation, stage A (task 4.1). Stage B is a later step of the same task.
+export * from "./config/index.js";

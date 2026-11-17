@@ -4,6 +4,16 @@
 //
 // Neutral by construction: no field name, enumeration value or example here names a business rule
 // of the legacy app (R7.6).
+import {
+  ENV_NAME_PATTERN,
+  MASK_PATH_PATTERN,
+  MAX_MASK_PATHS,
+  MAX_MASK_PATH_LENGTH,
+  MOCK_FIXTURE_SET_NAMES,
+  RUN_CONFIG_PROVIDERS,
+  RUN_LIMITS,
+  TEST_API_BASE_ADDRESSES,
+} from "../config/limits.js";
 import type { SchemaName } from "./types.js";
 
 type Schema = Record<string, unknown>;
@@ -905,6 +915,47 @@ const runManifest: Schema = {
 };
 
 // ---------------------------------------------------------------------------------------------
+// Run configuration (task 4.1, stage A; design: "Run configuration (summary)"). Defaults are documentation: they are applied by explicit
+// code in `config/runConfig.ts` and only when a key is absent (R11.8). `mask.token` does not exist (C2-1); a `token` key is an unknown key.
+const runConfig: Schema = {
+  $schema: DRAFT,
+  $id: "run-config.schema.json",
+  type: "object",
+  additionalProperties: false,
+  required: ["schemaVersion", "provider", "limits", "testApi", "mask", "envNames"],
+  properties: {
+    schemaVersion: { const: 1 },
+    provider: { type: "string", enum: [...RUN_CONFIG_PROVIDERS] },
+    mockFixtureSet: { type: "string", enum: [...MOCK_FIXTURE_SET_NAMES] },
+    limits: {
+      type: "object",
+      additionalProperties: false,
+      properties: Object.fromEntries(
+        Object.entries(RUN_LIMITS).map(([key, spec]) => [key, { type: "integer", minimum: spec.min, maximum: spec.max, default: spec.default }]),
+      ),
+    },
+    testApi: {
+      type: "object",
+      additionalProperties: false,
+      required: ["baseAddress"],
+      properties: { baseAddress: { type: "string", enum: [...TEST_API_BASE_ADDRESSES] } },
+    },
+    mask: {
+      type: "object",
+      additionalProperties: false,
+      required: ["paths"],
+      properties: {
+        paths: {
+          type: "array",
+          maxItems: MAX_MASK_PATHS,
+          items: { type: "string", minLength: 1, maxLength: MAX_MASK_PATH_LENGTH, pattern: MASK_PATH_PATTERN },
+        },
+      },
+    },
+    envNames: { type: "array", items: { type: "string", pattern: ENV_NAME_PATTERN } },
+  },
+};
+// ---------------------------------------------------------------------------------------------
 /** All schemas by short name. The order puts referenced schemas first, which Ajv does not require but keeps reading easy. */
 export const SCHEMAS: Readonly<Record<SchemaName, Schema>> = Object.freeze({
   common: commonSchema,
@@ -921,4 +972,5 @@ export const SCHEMAS: Readonly<Record<SchemaName, Schema>> = Object.freeze({
   "record-envelope": recordEnvelope,
   "approval-record": approvalRecord,
   "run-manifest": runManifest,
+  "run-config": runConfig,
 });

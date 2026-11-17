@@ -21,6 +21,7 @@ export const SCHEMA_NAMES = [
   "record-envelope",
   "approval-record",
   "run-manifest",
+  "run-config",
 ] as const;
 export type SchemaName = (typeof SCHEMA_NAMES)[number];
 
