@@ -35,14 +35,14 @@ const files = readdirSync(ORCH).filter((f) => f.endsWith(".ts")).sort();
 const text = (f: string): string => readFileSync(join(ORCH, f), "utf8");
 
 describe("the folder", () => {
-  it("holds exactly the six planned files", () => {
-    expect(files).toEqual(["consume.ts", "envAllowlist.ts", "session.ts", "startGate.ts", "terminationLatch.ts", "types.ts"]);
+  it("holds exactly the eight planned files", () => {
+    expect(files).toEqual(["consume.ts", "envAllowlist.ts", "recordWriter.ts", "session.ts", "startGate.ts", "terminate.ts", "terminationLatch.ts", "types.ts"]);
   });
 });
 
 describe("(a) the import boundary", () => {
   const ALLOWED: readonly RegExp[] = [
-    /^\.\/(?:consume|envAllowlist|session|startGate|terminationLatch|types)\.js$/,
+    /^\.\/(?:consume|envAllowlist|recordWriter|session|startGate|terminate|terminationLatch|types)\.js$/,
     /^\.\.\/gate\/mayStartRun\.js$/,
     /^\.\.\/isolation\/(?:index|types)\.js$/,
     /^\.\.\/config\/(?:startup|runConfig)\.js$/,
