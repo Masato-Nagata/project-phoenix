@@ -1,7 +1,7 @@
 // Task 4.4, stage 2: static checks of `src/orchestrator/` (source text only, each with a positive control; nothing is executed except pure
 // reads of constants). Covers: the import boundary, no clock / process / dynamic code, no reverse import of the orchestrator, the narrow use of
 // `config/startup.js`, the shape of the start gate (one call per step, in order, consume before the first await, only `loopDeps.isolation`),
-// no exported name that contains "approv" (R6.11), and the thirteen keys of `LoopDeps`.
+// no exported name that contains "approv" (R6.11), and the seventeen keys of `LoopDeps` (task 4.4 unit U0).
 // **Validates: Requirements 2.14, 2.15, 2.16, 15.14, 15.15, 15.16**
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
@@ -48,6 +48,7 @@ describe("(a) the import boundary", () => {
     /^\.\.\/config\/(?:startup|runConfig)\.js$/,
     /^\.\.\/schema\/types\.js$/,
     /^\.\.\/store\/fileSystemPort\.js$/,
+    /^\.\.\/store\/runRecordStore\.js$/, // type-only, for `RunRecordStore` and `OpenError` (checked in its own test below)
   ];
   const outside = (source: string): string[] => specifiersOf(source).filter((s) => !ALLOWED.some((re) => re.test(s)));
   it("every import of every file is on the list (no verifier, ai-client, analyzer, @phoenix, nodeDeps or node:)", () => {
@@ -60,13 +61,35 @@ describe("(a) the import boundary", () => {
       'import { z } from "@phoenix/analyzer";',
       'import { n } from "../isolation/nodeDeps.js";',
       'import fs from "node:fs";',
-      'import { s } from "../store/runRecordStore.js";',
+      'import { s } from "../store/secretScanner.js";',
       'import { i } from "../index.js";',
       'export * from "../isolation/verify.js";',
     ]) {
       expect(outside(bad).length, bad).toBeGreaterThan(0);
     }
     expect(outside('import type { Result } from "../schema/types.js";\nimport { a } from "./consume.js";')).toEqual([]);
+  });
+  it("the run record store is imported as a type, and only RunRecordStore and OpenError (U0)", () => {
+    const storeViolations = (source: string): string[] => {
+      const bad: string[] = [];
+      for (const m of stripComments(source).matchAll(/^\s*import\s+(type\s+)?([^;]*?)\s*\bfrom\s*["']\.\.\/store\/runRecordStore\.js["']/gm)) {
+        const braces = /^\{([^}]*)\}$/.exec((m[2] as string).trim());
+        if (m[1] === undefined || braces === null) {
+          bad.push("not a type-only named import");
+          continue;
+        }
+        for (const n of (braces[1] as string).split(",").map((x) => x.trim()).filter((x) => x !== "")) if (n !== "RunRecordStore" && n !== "OpenError") bad.push(n);
+      }
+      return bad;
+    };
+    for (const f of files) expect(storeViolations(text(f)), f).toEqual([]);
+    expect(text("types.ts")).toMatch(/import type \{ OpenError, RunRecordStore \} from "\.\.\/store\/runRecordStore\.js";/);
+    // positive control
+    expect(storeViolations('import { RunRecordStore } from "../store/runRecordStore.js";')).toEqual(["not a type-only named import"]);
+    expect(storeViolations('import type { RunRecordStore, WriteError } from "../store/runRecordStore.js";')).toEqual(["WriteError"]);
+    expect(storeViolations('import type { SealedManifest } from "../store/runRecordStore.js";')).toEqual(["SealedManifest"]);
+    expect(storeViolations('import type * as S from "../store/runRecordStore.js";')).toEqual(["not a type-only named import"]);
+    expect(storeViolations('import type { RunRecordStore, OpenError } from "../store/runRecordStore.js";')).toEqual([]);
   });
   it("runConfig, fileSystemPort and the schema types are imported as types only", () => {
     const typeOnlyViolations = (source: string): string[] => {
@@ -234,7 +257,7 @@ describe("exported names (R6.11) and the vocabularies", () => {
     expect(exportsOf(text("startGate.ts"))).toEqual(["startGate"]);
     expect(exportsOf(text("consume.ts"))).toEqual(["ConsumeResult", "consumeStartup"]);
     expect(exportsOf(text("envAllowlist.ts"))).toEqual(["buildAllowedEnvNames"]);
-    expect(Object.keys(typesModule).sort()).toEqual(["LEASE_REASONS", "START_GATE_REFUSAL_CODES", "TERMINATION_REASONS"]);
+    expect(Object.keys(typesModule).sort()).toEqual(["LEASE_REASONS", "START_GATE_REFUSAL_CODES", "TERMINATION_REASONS", "UNSEALED_FAILURE_CODES"]);
   });
   it("the lease reasons equal those of stage B; the refusal codes and termination reasons are closed and distinct", () => {
     expect([...LEASE_REASONS]).toEqual([...STARTUP_NAME_VOCABULARY.leaseReasons]);
@@ -248,20 +271,23 @@ describe("exported names (R6.11) and the vocabularies", () => {
 });
 
 describe("types", () => {
-  const KEYS = ["analysis", "audit", "clock", "comparator", "fs", "isolation", "manifest", "policy", "provider", "responseGate", "runVolumeDir", "runnerFactory", "wallClock"];
+  const KEYS = [
+    "analysis", "analysisFs", "audit", "clock", "comparator", "fs", "isolation", "manifest", "policy", "provider", "repoRoot", "responseGate", "runVolumeDir", "runnerFactory",
+    "storeFactory", "timers", "wallClock",
+  ];
   const keysOf = (source: string): string[] => {
     const body = /export interface LoopDeps<[^>]*> \{([\s\S]*?)\n\}/.exec(stripComments(source))?.[1] ?? "";
     return [...body.matchAll(/^ {2}readonly (\w+)\??:/gm)].map((m) => m[1] as string).sort();
   };
-  it("LoopDeps has exactly the 13 listed keys", () => {
+  it("LoopDeps has exactly the 17 listed keys", () => {
     expect(keysOf(text("types.ts"))).toEqual(KEYS);
-    expect(KEYS).toHaveLength(13);
+    expect(KEYS).toHaveLength(17);
     // compile-time form (checked by tsc when this file is type-checked): a missing or an extra key is an error
     const all: Record<keyof LoopDeps, true> = {
-      isolation: true, fs: true, runVolumeDir: true, clock: true, wallClock: true, provider: true, audit: true,
-      responseGate: true, policy: true, runnerFactory: true, comparator: true, analysis: true, manifest: true,
+      isolation: true, fs: true, runVolumeDir: true, clock: true, wallClock: true, timers: true, provider: true, audit: true,
+      responseGate: true, policy: true, runnerFactory: true, comparator: true, analysisFs: true, repoRoot: true, analysis: true, storeFactory: true, manifest: true,
     };
-    expect(Object.keys(all)).toHaveLength(13);
+    expect(Object.keys(all)).toHaveLength(17);
   });
   it("positive control: the key extractor sees a missing and an extra key", () => {
     expect(keysOf("export interface LoopDeps<T = unknown> {\n  readonly a: number;\n  readonly b?: string;\n}")).toEqual(["a", "b"]);
