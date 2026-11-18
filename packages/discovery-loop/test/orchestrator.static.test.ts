@@ -35,8 +35,8 @@ const files = readdirSync(ORCH).filter((f) => f.endsWith(".ts")).sort();
 const text = (f: string): string => readFileSync(join(ORCH, f), "utf8");
 
 describe("the folder", () => {
-  it("holds exactly the eight planned files", () => {
-    expect(files).toEqual(["consume.ts", "envAllowlist.ts", "recordWriter.ts", "session.ts", "startGate.ts", "terminate.ts", "terminationLatch.ts", "types.ts"]);
+  it("holds exactly the nine planned files", () => {
+    expect(files).toEqual(["consume.ts", "envAllowlist.ts", "observeReads.ts", "recordWriter.ts", "session.ts", "startGate.ts", "terminate.ts", "terminationLatch.ts", "types.ts"]);
   });
 });
 
