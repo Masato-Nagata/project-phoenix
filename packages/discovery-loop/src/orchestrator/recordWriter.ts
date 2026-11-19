@@ -20,7 +20,8 @@
 //
 // CAPABILITY SEPARATION. `createRecordWriter(store)` returns TWO frozen objects that share one private closure and nothing else:
 //   `writer`   the public RecordWriter: `append` (never kind `termination`: that is `termination_reserved`), `putBlob`, `putAiOutput`, `drain`,
-//              `state`. It has no `seal`, no way to write the termination record and no way to close admission.
+//              `state`, and (unit U4) the read-only snapshot `records`. It has no `seal`, no way to write the termination record and no way to
+//              close admission.
 //   `channel`  the TerminationChannel: `closeAdmission`, `drain`, `state`, `appendTermination`, `seal`.
 // There is no exported function, registry, map, symbol or property that leads from `writer` to `channel`; only the store reference inside the
 // closure writes. COMPOSITION RULE (unit U7): hand `writer` to the phases and callers, and hand `channel` ONLY to `createTerminator`.
@@ -42,6 +43,18 @@ type AppendOk = OkOf<StoreResultOf<"append">>;
 type BlobOk = OkOf<StoreResultOf<"putBlob">>;
 type AiOutputOk = OkOf<StoreResultOf<"putAiOutput">>;
 type SealOk = OkOf<StoreResultOf<"seal">>;
+type StoreEnvelope = ReturnType<RunRecordStore["list"]>[number];
+
+/**
+ * A COMMITTED record as the phases may read it (task 4.4 unit U4): its id, its kind and its payload, nothing else (no sequence number, no
+ * hashes, no store object). It is structurally assignable to the verifier `RecordView` (`{ id, kind, payload }`) that `createAcceptanceCheck`
+ * reads. Every level is frozen.
+ */
+export interface WriterRecordView {
+  readonly id: string;
+  readonly kind: string;
+  readonly payload: StoreEnvelope["payload"];
+}
 
 /** Closed list of the writer answers (the store's own messages are never passed on). */
 export const WRITER_ERROR_CODES = Object.freeze([
@@ -84,6 +97,15 @@ export interface RecordWriter {
   /** Resolves when every job accepted before this call has completed. Never rejects, never calls the store. */
   drain(): Promise<void>;
   state(): WriterState;
+  /**
+   * A deeply frozen snapshot of the records the store has COMMITTED, oldest first (unit U4; R12.14, R24.15). Synchronous: it does not wait for
+   * the queue, so a job that is still pending, or that failed, is not visible. A caller that relies on a record must `await` its `append` and
+   * check `ok` first. It never throws. The answer is a frozen `Result`: `{ ok: true, value }` with the snapshot, or, if the store cannot be read
+   * (or the snapshot cannot be frozen), `{ ok: false, error: { code: "records_unavailable" } }`; in that case the writer also goes `down` with
+   * failure `store_failed` (the first failure is kept). A failure is never an empty array, so an empty `value` always means "no committed
+   * record". It stays readable after `down` and after the admission was closed.
+   */
+  records(): Result<readonly WriterRecordView[], { readonly code: "records_unavailable" }>;
 }
 
 /** The termination capability: only `createTerminator` receives it. */
@@ -105,6 +127,17 @@ export interface RecordWriterParts {
 
 const noop = (): void => undefined;
 const withComponent = (component: string | undefined): { component?: string } => (component === undefined ? {} : { component });
+
+/** Deeper than any record the store accepts; a deeper value is a defect and makes `records()` fail closed. */
+const MAX_FREEZE_DEPTH = 256;
+/** Freezes a JSON value in place, every level. The value is the store's own fresh clone, so nothing shared is frozen. */
+function deepFreeze<T>(v: T, depth: number): T {
+  if (typeof v !== "object" || v === null) return v;
+  if (depth > MAX_FREEZE_DEPTH) throw new Error("too deep");
+  for (const k of Object.keys(v)) deepFreeze((v as Record<string, unknown>)[k], depth + 1);
+  Object.freeze(v as object);
+  return v;
+}
 
 export function createRecordWriter(store: RunRecordStore): RecordWriterParts {
   let down = false;
@@ -164,6 +197,19 @@ export function createRecordWriter(store: RunRecordStore): RecordWriterParts {
   // The tail never rejects, so neither does the drain. It takes the tail AT CALL TIME: later jobs are not awaited.
   const drain = (): Promise<void> => tail.then(noop, noop);
   const state = (): WriterState => Object.freeze({ down, sealed, terminationWritten, secretRejections, ...(failure === undefined ? {} : { failure }) });
+  // `store.list()` returns a fresh structured clone of the committed records (a record is added to it only after a successful persist), so the
+  // projection is built from that clone without a second copy and then frozen at every level. The store and its envelope fields stay hidden.
+  // A failure (a throwing `list()`, or a value too deep to freeze) is a typed refusal, never an empty array (task 4.4 unit U4; R12.14, R24.15).
+  const records = (): Result<readonly WriterRecordView[], { readonly code: "records_unavailable" }> => {
+    try {
+      const out: WriterRecordView[] = store.list().map((r) => Object.freeze({ id: r.id, kind: r.kind, payload: deepFreeze(r.payload, 0) }));
+      return Object.freeze({ ok: true as const, value: Object.freeze(out) });
+    } catch {
+      down = true;
+      failure ??= "store_failed";
+      return Object.freeze({ ok: false as const, error: Object.freeze({ code: "records_unavailable" as const }) });
+    }
+  };
 
   const writer = Object.freeze({
     append: (kind, payload, component) =>
@@ -180,6 +226,7 @@ export function createRecordWriter(store: RunRecordStore): RecordWriterParts {
     putAiOutput: (data, component) => admit(() => exec<AiOutputOk>(afterTermination, () => store.putAiOutput(data, withComponent(component)), noop)),
     drain,
     state,
+    records,
   } satisfies RecordWriter);
 
   const channel = Object.freeze({

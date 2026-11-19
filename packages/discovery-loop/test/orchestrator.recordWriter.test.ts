@@ -5,7 +5,8 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { MemoryFileSystem, RunRecordStore, type FileSystemPort, type JsonObject } from "../src/index.js";
-import { WRITER_ERROR_CODES, createRecordWriter } from "../src/orchestrator/recordWriter.js";
+import { WRITER_ERROR_CODES, createRecordWriter, type RecordWriter, type WriterRecordView } from "../src/orchestrator/recordWriter.js";
+import { createAcceptanceCheck } from "../../verifier/src/identity/acceptance.js";
 import { manifestInput } from "./helpers/runFixtures.js";
 
 const DIR = "/run/out";
@@ -361,7 +362,7 @@ describe("state and vocabulary", () => {
     expect(Object.isFrozen(down)).toBe(true);
     expect(Object.keys(down).sort()).toEqual(["down", "failure", "secretRejections", "sealed", "terminationWritten"].sort());
     expect(Object.isFrozen(writer)).toBe(true);
-    expect(Object.keys(writer).sort()).toEqual(["append", "drain", "putAiOutput", "putBlob", "state"]);
+    expect(Object.keys(writer).sort()).toEqual(["append", "drain", "putAiOutput", "putBlob", "records", "state"]);
   });
   it("the closed codes are pinned, and every failure result is a frozen object with exactly one key `code`", async () => {
     expect([...WRITER_ERROR_CODES]).toEqual([
@@ -559,7 +560,7 @@ describe("queue-time gates (secret rejection that happens during the drain windo
 describe("authority: two separate capabilities", () => {
   it("the public writer has exactly the pinned keys and none of the termination capabilities; both objects are frozen and distinct", async () => {
     const { writer, channel } = await setup();
-    expect(Object.keys(writer).sort()).toEqual(["append", "drain", "putAiOutput", "putBlob", "state"]);
+    expect(Object.keys(writer).sort()).toEqual(["append", "drain", "putAiOutput", "putBlob", "records", "state"]);
     expect(Object.keys(channel).sort()).toEqual(["appendTermination", "closeAdmission", "drain", "seal", "state"]);
     for (const k of ["seal", "appendTermination", "closeAdmission", "channel"]) expect(k in writer, k).toBe(false);
     expect(writer as unknown).not.toBe(channel as unknown);
@@ -584,5 +585,151 @@ describe("authority: two separate capabilities", () => {
     a.channel.closeAdmission();
     expect(code(await a.writer.append("error", { n: 1 }))).toBe("admission_closed");
     expect((await b.writer.append("error", { n: 1 })).ok).toBe(true);
+  });
+});
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Loose = any;
+const H64 = (c: string): string => c.repeat(64);
+
+/** Unwraps an OK answer of `records()` (task 4.4 unit U4): the answer must be `{ ok: true, value }`; anything else fails the test. */
+const snapOf = (writer: RecordWriter): readonly WriterRecordView[] => {
+  const res = writer.records();
+  expect(res.ok).toBe(true);
+  if (!res.ok) throw new Error("records() was not ok");
+  return res.value;
+};
+
+describe("records(): a read-only snapshot of the committed records (unit U4)", () => {
+  it("shows only committed records, in order, as exactly { id, kind, payload }; a pending write is not visible until it is committed", async () => {
+    const { writer, hold } = await setup();
+    expect(snapOf(writer)).toEqual([]);
+    expect((await writer.append("run_started", {})).ok).toBe(true);
+    const release = hold("writeFileSynced");
+    const pending = writer.append("error", { n: 2 });
+    await flush();
+    expect(snapOf(writer).map((r) => r.kind)).toEqual(["run_started"]); // the held job is not committed yet
+    release();
+    expect((await pending).ok).toBe(true);
+    const snap = snapOf(writer);
+    expect(snap.map((r) => [r.id, r.kind])).toEqual([
+      ["rec-000001", "run_started"],
+      ["rec-000002", "error"],
+    ]);
+    for (const r of snap) expect(Object.keys(r).sort()).toEqual(["id", "kind", "payload"]);
+    expect(snap[1]?.payload).toEqual({ n: 2 });
+  });
+  it("does not expose the envelope fields or the store", async () => {
+    const { writer, store } = await setup();
+    await writer.append("error", { n: 1 });
+    const text = JSON.stringify(writer.records());
+    const env = store.list()[0];
+    expect(env).toBeDefined();
+    for (const k of ["seq", "prevHash", "schemaVersion"]) expect(text).not.toContain(`"${k}"`);
+    expect(text).not.toContain(env?.hash as string);
+    expect(Object.values(snapOf(writer)[0] as object)).not.toContain(store as never);
+  });
+  it("is frozen at every level; a change attempt throws and changes neither the next snapshot nor the store", async () => {
+    const { writer, store } = await setup();
+    await writer.append("error", { a: { b: [1, { c: "x" }] } });
+    const res = writer.records();
+    expect(Object.keys(res).sort()).toEqual(["ok", "value"]);
+    expect(Object.isFrozen(res)).toBe(true); // the result object itself is frozen
+    const snap = snapOf(writer);
+    const r = snap[0] as Loose;
+    expect(Object.isFrozen(snap)).toBe(true);
+    expect(Object.isFrozen(r)).toBe(true);
+    expect(Object.isFrozen(r.payload)).toBe(true);
+    expect(Object.isFrozen(r.payload.a)).toBe(true);
+    expect(Object.isFrozen(r.payload.a.b)).toBe(true);
+    expect(Object.isFrozen(r.payload.a.b[1])).toBe(true);
+    expect(() => {
+      (snap as Loose).push({});
+    }).toThrow(TypeError);
+    expect(() => {
+      r.kind = "termination";
+    }).toThrow(TypeError);
+    expect(() => {
+      delete r.payload.a;
+    }).toThrow(TypeError);
+    expect(() => {
+      r.payload.a.b.push(2);
+    }).toThrow(TypeError);
+    expect(() => {
+      r.payload.a.b[1].c = "y";
+    }).toThrow(TypeError);
+    const expected = [{ id: "rec-000001", kind: "error", payload: { a: { b: [1, { c: "x" }] } } }];
+    expect(snapOf(writer)).toEqual(expected);
+    expect(store.list()[0]?.payload).toEqual(expected[0]?.payload);
+  });
+  it("every call returns new objects", async () => {
+    const { writer } = await setup();
+    await writer.append("error", { n: 1 });
+    const a = snapOf(writer);
+    const b = snapOf(writer);
+    expect(a).not.toBe(b);
+    expect(a[0]).not.toBe(b[0]);
+    expect((a[0] as Loose).payload).not.toBe((b[0] as Loose).payload);
+    expect(a).toEqual(b);
+  });
+  it("a failed write is not visible, and the snapshot stays readable after the writer went down and after closeAdmission", async () => {
+    const { writer, channel, arm } = await setup();
+    expect((await writer.append("run_started", {})).ok).toBe(true);
+    arm("rename");
+    expect((await writer.append("error", { n: 1 })).ok).toBe(false);
+    expect(writer.state().down).toBe(true);
+    expect(snapOf(writer).map((r) => r.kind)).toEqual(["run_started"]);
+    channel.closeAdmission();
+    expect(snapOf(writer).map((r) => r.kind)).toEqual(["run_started"]);
+  });
+  it("a store that cannot be read gives a frozen records_unavailable failure (never an empty array) and takes the writer down with store_failed", async () => {
+    const { writer, store } = await setup();
+    await writer.append("error", { n: 1 });
+    vi.spyOn(store, "list").mockImplementation(() => {
+      throw new Error(CANARY);
+    });
+    const res = writer.records();
+    expect(res).toEqual({ ok: false, error: { code: "records_unavailable" } });
+    expect(Object.keys(res).sort()).toEqual(["error", "ok"]);
+    expect(Object.keys((res as Loose).error)).toEqual(["code"]);
+    expect(Array.isArray(res)).toBe(false);
+    expect(Object.isFrozen(res)).toBe(true);
+    expect(Object.isFrozen((res as Loose).error)).toBe(true);
+    expect(writer.state()).toMatchObject({ down: true, failure: "store_failed" });
+    expect(code(await writer.append("error", { n: 2 }))).toBe("writer_down");
+    expect(has(res, CANARY)).toBe(false);
+    expect(has(writer.state(), CANARY)).toBe(false);
+    expect(has(res, "boom")).toBe(false);
+  });
+  it("a records() failure keeps the first failure: a writer that was already down for io_failure stays io_failure", async () => {
+    const { writer, store, arm } = await setup();
+    expect((await writer.append("run_started", {})).ok).toBe(true);
+    arm("rename");
+    expect(code(await writer.append("error", { n: 1 }))).toBe("io_failure");
+    expect(writer.state()).toMatchObject({ down: true, failure: "io_failure" });
+    vi.spyOn(store, "list").mockImplementation(() => {
+      throw new Error("boom");
+    });
+    expect(writer.records()).toEqual({ ok: false, error: { code: "records_unavailable" } });
+    expect(writer.state()).toMatchObject({ down: true, failure: "io_failure" });
+  });
+  it("feeds the real verifier acceptance check: missing before the policy_decision record, accepted after it, refused for a changed hash", async () => {
+    const { writer } = await setup();
+    const identity = { experimentSha256: H64("a"), policyConfigSha256: H64("b"), preparationTableSha256: H64("c") };
+    const check = createAcceptanceCheck(() => {
+      const r = writer.records();
+      if (!r.ok) throw new Error("x");
+      return r.value;
+    });
+    expect(check("exp-1", "rec-000001", identity)).toEqual({ accepted: false, code: "record_missing" });
+    const w = await writer.append("policy_decision", { experimentId: "exp-1", decision: "accept", ruleIds: [], ...identity });
+    expect(w.ok && w.value.id).toBe("rec-000001");
+    expect(check("exp-1", "rec-000001", identity)).toEqual({ accepted: true });
+    expect(check("exp-1", "rec-000001", { ...identity, experimentSha256: H64("d") })).toEqual({ accepted: false, code: "experiment_content_changed" });
+  });
+  it("is a member of the public writer only, never of the channel", async () => {
+    const { writer, channel } = await setup();
+    expect(typeof writer.records).toBe("function");
+    expect("records" in channel).toBe(false);
   });
 });

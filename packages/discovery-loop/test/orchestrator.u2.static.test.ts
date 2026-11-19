@@ -102,11 +102,20 @@ describe("imports", () => {
 });
 
 describe("exported names", () => {
-  const WRITER_NAMES = ["WRITER_ERROR_CODES", "WriterErrorCode", "WriterResult", "WriterState", "RecordWriter", "TerminationChannel", "RecordWriterParts", "createRecordWriter"];
+  const WRITER_NAMES = ["WRITER_ERROR_CODES", "WriterErrorCode", "WriterResult", "WriterState", "WriterRecordView", "RecordWriter", "TerminationChannel", "RecordWriterParts", "createRecordWriter"];
   const TERMINATE_NAMES = ["TerminationBase", "TerminatorInput", "Terminator", "createTerminator"];
   const SECRETISH = /secret|password|token|apikey|path|payload|response|body|message/i;
-  // The pinned counter of the writer state (a number of rejections, never a value) is the one member that has a forbidden word in it.
-  const ALLOWED_COUNTER = ["secretRejections"];
+  // Two exceptions, each bound to ONE interface (task 4.4 unit U4 final fix): the pinned counter `secretRejections` of `WriterState` (a number of
+  // rejections, never a value) and `payload` of `WriterRecordView` (the verifier `RecordView` contract names it so; it holds a committed record
+  // payload). A member with the same name in any other interface is NOT excepted.
+  const EXCEPTIONS: readonly { readonly iface: string; readonly member: string }[] = [
+    { iface: "WriterState", member: "secretRejections" },
+    { iface: "WriterRecordView", member: "payload" },
+  ];
+  const secretishMembers = (byInterface: Readonly<Record<string, readonly string[]>>): string[] =>
+    Object.entries(byInterface).flatMap(([iface, names]) =>
+      names.filter((n) => SECRETISH.test(n) && !EXCEPTIONS.some((e) => e.iface === iface && e.member === n)).map((n) => `${iface}.${n}`),
+    );
   it("the exported names of each file are pinned (text and runtime)", () => {
     expect(exportsOf(raw("recordWriter.ts")).sort()).toEqual([...WRITER_NAMES].sort());
     expect(exportsOf(raw("terminate.ts")).sort()).toEqual([...TERMINATE_NAMES].sort());
@@ -124,23 +133,50 @@ describe("exported names", () => {
       TerminationChannel: membersOf(raw("recordWriter.ts"), "TerminationChannel"),
       RecordWriterParts: membersOf(raw("recordWriter.ts"), "RecordWriterParts"),
       WriterState: membersOf(raw("recordWriter.ts"), "WriterState"),
+      WriterRecordView: membersOf(raw("recordWriter.ts"), "WriterRecordView"),
       Terminator: membersOf(raw("terminate.ts"), "Terminator"),
       TerminatorInput: membersOf(raw("terminate.ts"), "TerminatorInput"),
     };
-    expect(members.RecordWriter.sort()).toEqual(["append", "drain", "putAiOutput", "putBlob", "state"]);
+    expect(members.RecordWriter.sort()).toEqual(["append", "drain", "putAiOutput", "putBlob", "records", "state"]);
+    expect(members.WriterRecordView.sort()).toEqual(["id", "kind", "payload"]);
     expect(members.TerminationChannel.sort()).toEqual(["appendTermination", "closeAdmission", "drain", "seal", "state"]);
     expect(members.RecordWriterParts.sort()).toEqual(["channel", "writer"]);
     expect(members.WriterState.sort()).toEqual(["down", "failure", "sealed", "secretRejections", "terminationWritten"]);
     expect(members.Terminator).toEqual(["terminate"]);
     expect(members.TerminatorInput.sort()).toEqual(["base", "channel", "manifest", "runId", "session", "startedAt", "wallClock"]);
     for (const f of FILES) expect(exportsOf(raw(f)).filter((n) => SECRETISH.test(n)), f).toEqual([]);
-    const all = Object.values(members).flat().filter((n) => !ALLOWED_COUNTER.includes(n));
-    expect(all.filter((n) => SECRETISH.test(n))).toEqual([]);
+    expect(secretishMembers(members)).toEqual([]);
     // the `append` signature has a parameter named payload; it is a parameter, not a member
     expect(code(raw("recordWriter.ts"))).toMatch(/append\(kind: [^,]+, payload: /);
     // positive control
     expect(membersOf("export interface V {\n  readonly apiKey: string;\n  send(message: string): void;\n  body(): void;\n}", "V")).toEqual(["apiKey", "send", "body"]);
     expect(["apiKey", "send", "body", "ok"].filter((n) => SECRETISH.test(n))).toEqual(["apiKey", "body"]);
+  });
+  it("the `payload` exception applies to WriterRecordView only; the `secretRejections` exception to WriterState only (positive controls)", () => {
+    const view = membersOf("export interface WriterRecordView {\n  readonly id: string;\n  readonly payload: string;\n}", "WriterRecordView");
+    const other = membersOf("export interface Other {\n  readonly payload: string;\n}", "Other");
+    expect(view).toEqual(["id", "payload"]);
+    expect(other).toEqual(["payload"]);
+    // the real exception: `payload` in WriterRecordView is allowed
+    expect(secretishMembers({ WriterRecordView: view })).toEqual([]);
+    // the same member name in any other interface is reported
+    expect(secretishMembers({ Other: other })).toEqual(["Other.payload"]);
+    expect(secretishMembers({ WriterRecordView: view, Other: other })).toEqual(["Other.payload"]);
+    // also in the interfaces of this very file, and `secretRejections` outside WriterState
+    expect(secretishMembers({ RecordWriter: ["append", "payload"] })).toEqual(["RecordWriter.payload"]);
+    expect(secretishMembers({ WriterState: ["down", "secretRejections"] })).toEqual([]);
+    expect(secretishMembers({ WriterRecordView: ["secretRejections"] })).toEqual(["WriterRecordView.secretRejections"]);
+    // no real interface of the two files carries a `payload` member except WriterRecordView
+    for (const [iface, file] of [
+      ["RecordWriter", "recordWriter.ts"],
+      ["TerminationChannel", "recordWriter.ts"],
+      ["RecordWriterParts", "recordWriter.ts"],
+      ["WriterState", "recordWriter.ts"],
+      ["Terminator", "terminate.ts"],
+      ["TerminatorInput", "terminate.ts"],
+    ] as const) {
+      expect(membersOf(raw(file), iface), iface).not.toContain("payload");
+    }
   });
 });
 
@@ -240,10 +276,16 @@ describe("shape of recordWriter.ts", () => {
     expect(code(c)).toMatch(/return Object\.freeze\(\{ writer, channel \}\);/);
     // `channel` is created after `writer` and `writer` never mentions it (checked above); the factory result is the only link, held by the composition code
     expect(code(c).indexOf("const writer =")).toBeLessThan(code(c).indexOf("const channel ="));
-    // only terminate.ts (and the writer file itself) names the channel type, in the whole orchestrator source folder
+    // only terminate.ts (and the writer file itself) uses the channel, in the whole orchestrator source folder. startRun.ts (unit U4) creates the
+    // writer and HANDS the channel on as a separate result field, so it may name the type `TerminationChannel`, and nothing else of the channel.
     const others = readdirSync(dir("")).filter((f) => f.endsWith(".ts") && f !== "recordWriter.ts" && f !== "terminate.ts");
     expect(others.length).toBeGreaterThan(0);
-    for (const f of others) expect(stripComments(readFileSync(dir(f), "utf8")), f).not.toMatch(/\bTerminationChannel\b|\bRecordWriterParts\b|\bcloseAdmission\b|\bappendTermination\b/);
+    for (const f of others) {
+      const forbidden = f === "startRun.ts" ? /\bRecordWriterParts\b|\bcloseAdmission\b|\bappendTermination\b/ : /\bTerminationChannel\b|\bRecordWriterParts\b|\bcloseAdmission\b|\bappendTermination\b/;
+      expect(stripComments(readFileSync(dir(f), "utf8")), f).not.toMatch(forbidden);
+    }
+    // startRun.ts never calls a channel method: the channel only flows through to its result
+    expect(stripComments(readFileSync(dir("startRun.ts"), "utf8"))).not.toMatch(/\bchannel\.\w+/);
     expect(stripComments(raw("terminate.ts"))).toMatch(/\bTerminationChannel\b/);
     expect(stripComments(raw("terminate.ts"))).not.toMatch(/\bRecordWriter\b|\bcreateRecordWriter\b/);
   });
