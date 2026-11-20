@@ -1,13 +1,17 @@
 // Task 4.4, stage 2: static checks of `src/orchestrator/` (source text only, each with a positive control; nothing is executed except pure
 // reads of constants). Covers: the import boundary, no clock / process / dynamic code, no reverse import of the orchestrator, the narrow use of
 // `config/startup.js`, the shape of the start gate (one call per step, in order, consume before the first await, only `loopDeps.isolation`),
-// no exported name that contains "approv" (R6.11), and the seventeen keys of `LoopDeps` (task 4.4 unit U0).
+// no exported name that contains "approv" (R6.11), and the seventeen keys of `LoopDeps` (task 4.4 unit U0). Unit U6a adds ids.ts, leaseBoundary.ts
+// and hypothesisPhase.ts (15 files), the one import of the EvidenceStore, and a describe for the three files.
 // **Validates: Requirements 2.14, 2.15, 2.16, 15.14, 15.15, 15.16**
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { STARTUP_NAME_VOCABULARY } from "../src/index.js";
+import * as hypothesisPhaseModule from "../src/orchestrator/hypothesisPhase.js";
+import * as idsModule from "../src/orchestrator/ids.js";
+import * as leaseBoundaryModule from "../src/orchestrator/leaseBoundary.js";
 import * as providerCallModule from "../src/orchestrator/providerCall.js";
 import * as typesModule from "../src/orchestrator/types.js";
 import { LEASE_REASONS, START_GATE_REFUSAL_CODES, TERMINATION_REASONS, type LoopDeps } from "../src/orchestrator/types.js";
@@ -36,17 +40,19 @@ const files = readdirSync(ORCH).filter((f) => f.endsWith(".ts")).sort();
 const text = (f: string): string => readFileSync(join(ORCH, f), "utf8");
 
 describe("the folder", () => {
-  it("holds exactly the twelve planned files", () => {
+  it("holds exactly the fifteen planned files", () => {
     expect(files).toEqual([
-      "consume.ts", "deadline.ts", "envAllowlist.ts", "observeReads.ts", "providerCall.ts", "recordWriter.ts", "session.ts", "startGate.ts", "startRun.ts", "terminate.ts", "terminationLatch.ts", "types.ts",
+      "consume.ts", "deadline.ts", "envAllowlist.ts", "hypothesisPhase.ts", "ids.ts", "leaseBoundary.ts", "observeReads.ts", "providerCall.ts", "recordWriter.ts", "session.ts",
+      "startGate.ts", "startRun.ts", "terminate.ts", "terminationLatch.ts", "types.ts",
     ]);
   });
 });
 
 describe("(a) the import boundary", () => {
   const ALLOWED: readonly RegExp[] = [
-    /^\.\/(?:consume|deadline|envAllowlist|providerCall|recordWriter|session|startGate|startRun|terminate|terminationLatch|types)\.js$/,
+    /^\.\/(?:consume|deadline|envAllowlist|hypothesisPhase|ids|leaseBoundary|providerCall|recordWriter|session|startGate|startRun|terminate|terminationLatch|types)\.js$/,
     /^\.\.\/gate\/mayStartRun\.js$/,
+    /^\.\.\/model\/evidenceStore\.js$/, // the EvidenceStore class (type) and CITATION_VERIFIER; only hypothesisPhase.ts (checked in its own test below)
     /^\.\.\/isolation\/(?:index|types)\.js$/,
     /^\.\.\/config\/(?:startup|runConfig)\.js$/,
     /^\.\.\/schema\/types\.js$/,
@@ -67,10 +73,45 @@ describe("(a) the import boundary", () => {
       'import { s } from "../store/secretScanner.js";',
       'import { i } from "../index.js";',
       'export * from "../isolation/verify.js";',
+      'import { f } from "../model/facts.js";',
+      'import { s } from "../model/sanitize.js";',
+      'import type { E } from "../model/types.js";',
+      'import { e } from "../model/index.js";',
     ]) {
       expect(outside(bad).length, bad).toBeGreaterThan(0);
     }
     expect(outside('import type { Result } from "../schema/types.js";\nimport { a } from "./consume.js";')).toEqual([]);
+    expect(outside('import { CITATION_VERIFIER, type EvidenceStore } from "../model/evidenceStore.js";')).toEqual([]);
+    expect(outside('import { a } from "./ids.js";\nimport { b } from "./leaseBoundary.js";\nimport { c } from "./hypothesisPhase.js";')).toEqual([]);
+  });
+  it("the EvidenceStore is imported by hypothesisPhase.ts only, as CITATION_VERIFIER (value) and EvidenceStore (type) (U6a)", () => {
+    const evidenceStoreViolations = (source: string): string[] => {
+      const bad: string[] = [];
+      for (const m of stripComments(source).matchAll(/^\s*import\s+(type\s+)?([^;]*?)\s*\bfrom\s*["']\.\.\/model\/evidenceStore\.js["']/gm)) {
+        const braces = /^\{([^}]*)\}$/.exec((m[2] as string).trim());
+        if (braces === null) {
+          bad.push("not a named import");
+          continue;
+        }
+        for (const n of (braces[1] as string).split(",").map((x) => x.trim()).filter((x) => x !== "")) {
+          const name = n.replace(/^type\s+/, "");
+          if (name !== "CITATION_VERIFIER" && name !== "EvidenceStore") bad.push(name);
+          else if (name === "EvidenceStore" && m[1] === undefined && !n.startsWith("type ")) bad.push("value import of EvidenceStore");
+        }
+      }
+      return bad;
+    };
+    const importers = files.filter((f) => specifiersOf(text(f)).includes("../model/evidenceStore.js"));
+    expect(importers).toEqual(["hypothesisPhase.ts"]);
+    for (const f of files) expect(evidenceStoreViolations(text(f)), f).toEqual([]);
+    expect(text("hypothesisPhase.ts")).toMatch(/import \{ CITATION_VERIFIER, type EvidenceStore \} from "\.\.\/model\/evidenceStore\.js";/);
+    // positive control
+    expect(evidenceStoreViolations('import { EvidenceStore } from "../model/evidenceStore.js";')).toEqual(["value import of EvidenceStore"]);
+    expect(evidenceStoreViolations('import { experimentRuleComponent } from "../model/evidenceStore.js";')).toEqual(["experimentRuleComponent"]);
+    expect(evidenceStoreViolations('import * as m from "../model/evidenceStore.js";')).toEqual(["not a named import"]);
+    expect(evidenceStoreViolations('import type { EvidenceStore } from "../model/evidenceStore.js";')).toEqual([]);
+    expect(evidenceStoreViolations('import { CITATION_VERIFIER, type EvidenceStore } from "../model/evidenceStore.js";')).toEqual([]);
+    expect(specifiersOf('import { a } from "../model/evidenceStore.js";')).toEqual(["../model/evidenceStore.js"]);
   });
   it("the run record store is imported as a type, and only RunRecordStore and OpenError (U0)", () => {
     const storeViolations = (source: string): string[] => {
@@ -262,6 +303,14 @@ describe("exported names (R6.11) and the vocabularies", () => {
     expect(exportsOf(text("envAllowlist.ts"))).toEqual(["buildAllowedEnvNames"]);
     expect(exportsOf(text("providerCall.ts"))).toEqual(["RECORDS_UNAVAILABLE_MESSAGE", "ProviderCallInput", "ProviderCallResult", "callProvider"]);
     expect(Object.keys(providerCallModule).sort()).toEqual(["RECORDS_UNAVAILABLE_MESSAGE", "callProvider"]);
+    expect(exportsOf(text("ids.ts"))).toEqual(["INVALID_ITERATION_MESSAGE", "IdCounters", "createIdCounters"]);
+    expect(Object.keys(idsModule).sort()).toEqual(["INVALID_ITERATION_MESSAGE", "createIdCounters"]);
+    expect(exportsOf(text("leaseBoundary.ts"))).toEqual(["checkLeaseBoundary"]);
+    expect(Object.keys(leaseBoundaryModule)).toEqual(["checkLeaseBoundary"]);
+    expect(exportsOf(text("hypothesisPhase.ts"))).toEqual([
+      "PredecessorClaimRef", "PredecessorRef", "SemanticHashInput", "SemanticSha256Of", "HypothesisPhaseInput", "AcceptedClaimRef", "HypothesisPhaseResult", "runHypothesisPhase",
+    ]);
+    expect(Object.keys(hypothesisPhaseModule)).toEqual(["runHypothesisPhase"]);
     expect(Object.keys(typesModule).sort()).toEqual(["LEASE_REASONS", "START_GATE_REFUSAL_CODES", "TERMINATION_REASONS", "UNSEALED_FAILURE_CODES"]);
   });
   it("the lease reasons equal those of stage B; the refusal codes and termination reasons are closed and distinct", () => {
@@ -375,5 +424,58 @@ describe("providerCall.ts (task 4.4, unit U5)", () => {
     expect(text("startRun.ts")).toContain('"run records unavailable"');
     expect([...src.matchAll(/\bthrow\b/g)]).toHaveLength(1);
     expect(src).toMatch(/throw new Error\(RECORDS_UNAVAILABLE_MESSAGE\)/);
+  });
+});
+
+describe("ids.ts, leaseBoundary.ts and hypothesisPhase.ts (task 4.4, unit U6a)", () => {
+  const U6A = ["hypothesisPhase.ts", "ids.ts", "leaseBoundary.ts"] as const;
+  const NO_TERMINATION = /\bchannel\b|\bTerminationChannel\b|\bappendTermination\b|\bseal\s*\(|\bcloseAdmission\b|\bterminate\b|\bcreateTerminator\b/i;
+  const FOREIGN_PACKAGE = /ai-client|analyzer|verifier|@phoenix/;
+  const foreignImports = (source: string): string[] => specifiersOf(source).filter((s) => FOREIGN_PACKAGE.test(s) || /^node:/.test(s));
+
+  it("hold no reference to the termination capability, the seal, the admission closing or the terminator", () => {
+    for (const f of U6A) expect(code(text(f)), f).not.toMatch(NO_TERMINATION);
+  });
+  it("positive control: each forbidden token is reported, a comment is not", () => {
+    for (const bad of ["const c = channel;", "x: TerminationChannel;", "c.appendTermination({});", "c.seal(m);", "c.closeAdmission();", "terminate(x);", "createTerminator(y);"]) {
+      expect(code(bad), bad).toMatch(NO_TERMINATION);
+    }
+    expect(code("// channel, seal( and terminate in a comment\nconst a = 1;")).not.toMatch(NO_TERMINATION);
+  });
+  it("use the one deadline test and never `deadlineReached`", () => {
+    for (const f of U6A) expect(code(text(f)), f).not.toMatch(/\bdeadlineReached\b/);
+    expect(code(text("leaseBoundary.ts"))).toMatch(/\bdeadlineCheckpoint\(/);
+    expect(code(text("hypothesisPhase.ts"))).toMatch(/\bdeadlineCheckpoint\(/);
+    expect(code("if (s.deadlineReached()) s.raise(x);")).toMatch(/\bdeadlineReached\b/);
+  });
+  it("import no node: module and no ai-client, analyzer or verifier (the analysis comes in through the port)", () => {
+    for (const f of U6A) expect(foreignImports(text(f)), f).toEqual([]);
+    expect(foreignImports('import { a } from "../../../analyzer/src/index.js";')).toHaveLength(1);
+    expect(foreignImports('import { b } from "../../ai-client/src/index.js";')).toHaveLength(1);
+    expect(foreignImports('import { c } from "../../../verifier/src/index.js";')).toHaveLength(1);
+    expect(foreignImports('import { d } from "node:crypto";')).toHaveLength(1);
+    expect(foreignImports('import { e } from "./deadline.js";')).toEqual([]);
+  });
+  it("take no `deps`, `loopDeps` or `LoopDeps`, and never call the provider directly (only through callProvider)", () => {
+    for (const f of U6A) expect(code(text(f)), f).not.toMatch(/\bdeps\b|\bloopDeps\b|\bLoopDeps\b/);
+    expect(code(text("hypothesisPhase.ts"))).not.toMatch(/\.complete\(/);
+    expect(code(text("hypothesisPhase.ts"))).toMatch(/\bcallProvider\b/);
+  });
+  it("hypothesisPhase.ts calls noteProviderRetry exactly once, after the cause check, and only for a re-call", () => {
+    const src = code(text("hypothesisPhase.ts"));
+    expect(src.split("noteProviderRetry(").length - 1).toBe(1);
+    expect(src.indexOf("mayCall(session)")).toBeLessThan(src.indexOf("noteProviderRetry("));
+  });
+  it("leaseBoundary.ts calls `check` once, on the same instance", () => {
+    const src = code(text("leaseBoundary.ts"));
+    expect(src.split(".call(port").length - 1).toBe(1);
+    expect(src).not.toMatch(/\.check\(/);
+  });
+  it("the only throws are the fixed RangeError of ids.ts and none in the other two files", () => {
+    expect([...code(text("ids.ts")).matchAll(/\bthrow\b/g)]).toHaveLength(1);
+    expect(code(text("ids.ts"))).toMatch(/throw new RangeError\(INVALID_ITERATION_MESSAGE\)/);
+    // hypothesisPhase.ts re-throws the sanctioned error of callProvider, and its own `new Error` text is only used for the non-JSON guard
+    expect(code(text("leaseBoundary.ts"))).not.toMatch(/\bthrow\b/);
+    expect([...code(text("hypothesisPhase.ts")).matchAll(/\bthrow\b/g)].length).toBe(3);
   });
 });
