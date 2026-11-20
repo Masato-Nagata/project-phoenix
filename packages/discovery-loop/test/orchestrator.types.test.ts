@@ -51,7 +51,7 @@ addGroup(
   "header",
   [
     'import type { AccessDenialResult } from "../src/isolation/types.js";',
-    'import type { AnalysisFsPort, AnalysisPort, AuditContextHandle, ExecutionOutcomeView, LoopDeps, ManifestCore, RunResult, RunSummary } from "../src/orchestrator/types.js";',
+    'import type { AnalysisFsPort, AnalysisPort, AuditContextHandle, CallOutcomeView, ExecutionOutcomeView, LoopDeps, ManifestCore, RunResult, RunSummary } from "../src/orchestrator/types.js";',
     'import type { ExecutionObservation, ExecutionOutcome, InterruptedOutcome } from "../../verifier/src/runner/types.js";',
     'import type { buildSourceBundle as realBuildSourceBundle } from "../../analyzer/src/bundle/bundler.js";',
     'import type { FileSystemPort as RealAnalyzerFs } from "../../analyzer/src/bundle/types.js";',
@@ -177,19 +177,40 @@ addGroup(
 addGroup(
   "auditHandle",
   [
-    "export const h1 = deps.audit.createContext({ bundle: {}, lookupRecord: () => undefined });",
-    "export const h2: AuditContextHandle = h1;",
-    "export const h3 = deps.audit.auditPayload(new Uint8Array(0), 'hypothesis_generation', undefined, h1);",
+    "export const h1 = deps.audit.prepareAudit({ bundle: {}, kind: 'hypothesis_generation', templateId: 't', stored: [], records: [] });",
+    "export const h2: AuditContextHandle | undefined = h1.ok ? h1.value.ctx : undefined;",
+    "export const h3 = h1.ok ? deps.audit.auditPayload(new Uint8Array(0), 'hypothesis_generation', undefined, h1.value.ctx) : undefined;",
+    "export const h4: Uint8Array | undefined = h1.ok ? h1.value.bytes : undefined;",
+    "export const h5: 'prepare_failed' | undefined = h1.ok ? undefined : h1.error.code;",
   ],
   [
     { text: "export const hb1: AuditContextHandle = {};", why: "a plain object is not a handle", codes: [2322, 2741] },
     { text: 'export const hb2 = deps.audit.auditPayload(new Uint8Array(0), "k", undefined, {});', why: "auditPayload takes the handle only", codes: [2345] },
     { text: 'export const hb3: AuditContextHandle = "ctx";', why: "a string is not a handle", codes: [2322] },
     {
-      text: 'export const hb4 = deps.audit.createContext({ bundle: {}, lookupRecord: () => undefined, secretValues: [] });',
-      why: "createContext takes no secret values",
+      text: "export const hb4 = deps.audit.prepareAudit({ bundle: {}, kind: 'k', templateId: 't', stored: [], records: [], secretValues: [], lookupRecord: () => undefined });",
+      why: "prepareAudit takes no secret values and no lookupRecord",
       codes: [2322, 2345, 2353],
     },
+  ],
+);
+
+// (5b) the gate outcome narrows on `kind`; the real ai-client CallOutcome is assignable to the view
+addGroup(
+  "callOutcome",
+  [
+    'import type { CallOutcome } from "../../ai-client/src/responseGate.js";',
+    "declare const rco: CallOutcome;",
+    "export const c1: CallOutcomeView = rco;",
+    "export const c2 = deps.responseGate.gateProviderResult('hypothesis_generation', { ok: false, error: { reason: 'error', detail: 'x' } }, undefined, undefined);",
+    "export const c3: string | undefined = c2.kind === 'failed_call' ? c2.source : c2.kind === 'audit_violation' ? c2.violation.code : undefined;",
+    "export const c4: boolean | undefined = c2.kind === 'failed_call' ? c2.toolCall : undefined;",
+    "export const c5: unknown = c2.kind === 'accepted' ? c2.result : undefined;",
+  ],
+  [
+    { text: "export const cb1 = c2.kind === 'accepted' ? c2.source : undefined;", why: "source is not on the accepted member", codes: [2339] },
+    { text: "export const cb2: CallOutcomeView = { kind: 'failed_call', reason: 'error', retryable: false, source: 'provider', toolCall: false };", why: "a failed call is always retryable", codes: [2322] },
+    { text: "export const cb3: CallOutcomeView = { kind: 'audit_violation', retryable: false, stopRun: true };", why: "an audit violation carries its violation", codes: [2322, 2741] },
   ],
 );
 
@@ -303,8 +324,12 @@ describe("type safety (compiler API over the real sources)", () => {
   it("(4) the real analyzer buildSourceBundle and FileSystemPort fit the analysis ports", () => {
     checkGroup("analysis");
   }, 120_000);
-  it("(5) the audit context handle is opaque", () => {
+  it("(5) the audit context handle is opaque and prepareAudit has the planned shape", () => {
     checkGroup("auditHandle");
+  }, 120_000);
+  it("(5b) the gate outcome narrows on kind, and the real ai-client CallOutcome is assignable to it", () => {
+    checkGroup("callOutcome");
+    expect(groups.get("callOutcome")?.bad.length).toBe(3);
   }, 120_000);
   it("(6) ManifestCore refuses every key outside the core, also inside provider, and needs effectiveConfig", () => {
     checkGroup("manifestCore");

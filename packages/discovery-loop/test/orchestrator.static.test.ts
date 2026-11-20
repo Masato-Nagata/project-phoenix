@@ -8,6 +8,7 @@ import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { STARTUP_NAME_VOCABULARY } from "../src/index.js";
+import * as providerCallModule from "../src/orchestrator/providerCall.js";
 import * as typesModule from "../src/orchestrator/types.js";
 import { LEASE_REASONS, START_GATE_REFUSAL_CODES, TERMINATION_REASONS, type LoopDeps } from "../src/orchestrator/types.js";
 import { startGate } from "../src/orchestrator/startGate.js";
@@ -35,16 +36,16 @@ const files = readdirSync(ORCH).filter((f) => f.endsWith(".ts")).sort();
 const text = (f: string): string => readFileSync(join(ORCH, f), "utf8");
 
 describe("the folder", () => {
-  it("holds exactly the eleven planned files", () => {
+  it("holds exactly the twelve planned files", () => {
     expect(files).toEqual([
-      "consume.ts", "deadline.ts", "envAllowlist.ts", "observeReads.ts", "recordWriter.ts", "session.ts", "startGate.ts", "startRun.ts", "terminate.ts", "terminationLatch.ts", "types.ts",
+      "consume.ts", "deadline.ts", "envAllowlist.ts", "observeReads.ts", "providerCall.ts", "recordWriter.ts", "session.ts", "startGate.ts", "startRun.ts", "terminate.ts", "terminationLatch.ts", "types.ts",
     ]);
   });
 });
 
 describe("(a) the import boundary", () => {
   const ALLOWED: readonly RegExp[] = [
-    /^\.\/(?:consume|deadline|envAllowlist|recordWriter|session|startGate|startRun|terminate|terminationLatch|types)\.js$/,
+    /^\.\/(?:consume|deadline|envAllowlist|providerCall|recordWriter|session|startGate|startRun|terminate|terminationLatch|types)\.js$/,
     /^\.\.\/gate\/mayStartRun\.js$/,
     /^\.\.\/isolation\/(?:index|types)\.js$/,
     /^\.\.\/config\/(?:startup|runConfig)\.js$/,
@@ -259,6 +260,8 @@ describe("exported names (R6.11) and the vocabularies", () => {
     expect(exportsOf(text("startGate.ts"))).toEqual(["startGate"]);
     expect(exportsOf(text("consume.ts"))).toEqual(["ConsumeResult", "consumeStartup"]);
     expect(exportsOf(text("envAllowlist.ts"))).toEqual(["buildAllowedEnvNames"]);
+    expect(exportsOf(text("providerCall.ts"))).toEqual(["RECORDS_UNAVAILABLE_MESSAGE", "ProviderCallInput", "ProviderCallResult", "callProvider"]);
+    expect(Object.keys(providerCallModule).sort()).toEqual(["RECORDS_UNAVAILABLE_MESSAGE", "callProvider"]);
     expect(Object.keys(typesModule).sort()).toEqual(["LEASE_REASONS", "START_GATE_REFUSAL_CODES", "TERMINATION_REASONS", "UNSEALED_FAILURE_CODES"]);
   });
   it("the lease reasons equal those of stage B; the refusal codes and termination reasons are closed and distinct", () => {
@@ -298,5 +301,79 @@ describe("types", () => {
   it("startGate takes (loopDeps, startup)", () => {
     expect(startGate.length).toBe(2);
     expect(/export async function startGate<[^>]*>\(\s*loopDeps: LoopDeps<[^)]*>,\s*startup: StartupApproval</.test(stripComments(text("startGate.ts")))).toBe(true);
+  });
+});
+
+describe("providerCall.ts (task 4.4, unit U5)", () => {
+  const src = code(text("providerCall.ts"));
+  const NO_TERMINATION = /\bchannel\b|\bTerminationChannel\b|\bappendTermination\b|\bseal\s*\(|\bcloseAdmission\b|\bterminate\b|\bcreateTerminator\b/i;
+  const usesDeps = (s: string): boolean => /\bdeps\b|\bloopDeps\b|\bLoopDeps\b/.test(s);
+  /** The text from the last `deadlineCheckpoint(` before `.complete(` up to `.complete(`. `undefined` when there is no such pair. */
+  const preCallSlice = (s: string): string | undefined => {
+    const at = s.indexOf(".complete(");
+    if (at < 0) return undefined;
+    const from = s.lastIndexOf("deadlineCheckpoint(", at);
+    return from < 0 ? undefined : s.slice(from, at);
+  };
+  const awaitsBetween = (s: string): boolean => /\bawait\b|\basync\b/.test(preCallSlice(s) ?? "await");
+  /** The text from `.records()` up to the next `.raise(`. */
+  const recordsToRaise = (s: string): string | undefined => {
+    const at = s.indexOf(".records()");
+    if (at < 0) return undefined;
+    const to = s.indexOf(".raise(", at);
+    return to < 0 ? undefined : s.slice(at, to);
+  };
+
+  it("holds no reference to the termination capability, the seal, the admission closing or the terminator", () => {
+    expect(src).not.toMatch(NO_TERMINATION);
+    expect(code(text("providerCall.ts"))).not.toMatch(/\bTerminationChannel\b/);
+  });
+  it("positive control: each forbidden token is reported, a comment is not", () => {
+    for (const bad of ["const c = channel;", "x: TerminationChannel;", "c.appendTermination({});", "c.seal(m);", "c.closeAdmission();", "terminate(x);", "createTerminator(y);"]) {
+      expect(code(bad), bad).toMatch(NO_TERMINATION);
+    }
+    expect(code("// channel, seal( and terminate in a comment\nconst a = 1;")).not.toMatch(NO_TERMINATION);
+  });
+  it("takes its ports explicitly: no `deps`, `loopDeps` or `LoopDeps` anywhere in the code", () => {
+    expect(usesDeps(src)).toBe(false);
+    expect(src).toMatch(/\bProviderCallInput<TAudit, TRequest>/);
+    expect(usesDeps("const x = deps.provider;")).toBe(true);
+    expect(usesDeps("function f(loopDeps: LoopDeps) {}")).toBe(true);
+    expect(usesDeps("function f(input: ProviderCallInput<A, B>) {}")).toBe(false);
+  });
+  it("uses the one deadline test (`deadlineCheckpoint`) and never `deadlineReached`", () => {
+    expect(src).toMatch(/\bdeadlineCheckpoint\(/);
+    expect(src).not.toMatch(/\bdeadlineReached\b/);
+    expect(code("if (s.deadlineReached()) s.raise(x);")).toMatch(/\bdeadlineReached\b/);
+  });
+  it("the synchronous pre-call check is directly before `.complete(`: no await and no async between them, one call, in a function that is not async", () => {
+    expect(src.split(".complete(").length - 1).toBe(1);
+    expect(preCallSlice(src)).toBeDefined();
+    expect(awaitsBetween(src)).toBe(false);
+    expect(src).toMatch(/\bfunction invokeProvider\b/);
+    expect(src).not.toMatch(/\basync function invokeProvider\b/);
+    // the slice contains the three parts of the check
+    expect(preCallSlice(src)).toMatch(/deadlineCheckpoint\(session\)/);
+  });
+  it("positive control: an await, an async function, or a missing check between the check and the call is reported", () => {
+    expect(awaitsBetween("if (deadlineCheckpoint(s) !== 1) return; await x(); p.complete(r);")).toBe(true);
+    expect(awaitsBetween("if (deadlineCheckpoint(s) !== 1) return; const f = async () => 1; p.complete(r);")).toBe(true);
+    expect(awaitsBetween("p.complete(r);")).toBe(true); // no check before the call: reported as a violation
+    expect(awaitsBetween("if (deadlineCheckpoint(s) !== 1) return; p.complete(r);")).toBe(false);
+    expect(awaitsBetween("await a(); if (deadlineCheckpoint(s) !== 1) return; p.complete(r);")).toBe(false);
+  });
+  it("no await between the read of the snapshot and the raise of `error` when it is unavailable", () => {
+    const slice = recordsToRaise(src);
+    expect(slice).toBeDefined();
+    expect(slice).not.toMatch(/\bawait\b/);
+    expect(recordsToRaise("const s = w.records(); await x(); session.raise('error');")).toMatch(/\bawait\b/);
+    expect(recordsToRaise("const s = w.records(); session.raise('error');")).not.toMatch(/\bawait\b/);
+    expect(recordsToRaise("const s = 1;")).toBeUndefined();
+  });
+  it("the fixed text of the one sanctioned throw equals the text of startRun.ts, and no other `throw` exists", () => {
+    expect(providerCallModule.RECORDS_UNAVAILABLE_MESSAGE).toBe("run records unavailable");
+    expect(text("startRun.ts")).toContain('"run records unavailable"');
+    expect([...src.matchAll(/\bthrow\b/g)]).toHaveLength(1);
+    expect(src).toMatch(/throw new Error\(RECORDS_UNAVAILABLE_MESSAGE\)/);
   });
 });

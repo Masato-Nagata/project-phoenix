@@ -10,10 +10,10 @@
 //   fs, runVolumeDir EXISTING `FileSystemPort` of `src/store/fileSystemPort.ts`; the directory is a plain string.
 //   clock          EXISTING  shape of verifier `MonotonicClock` (`nowMs(): number`). `deadlineAtMs` and `notAfterMs` are monotonic milliseconds.
 //   wallClock      NEW       no existing API. Used for the Run_Manifest `wallClock` field only (an excluded field), never for a limit or a lease.
-//   timers         NEW       no existing API. Only for the Run deadline (an `AbortController`); the orchestrator itself uses no timer function.
+//   timers         NEW       no existing API. Only for the Run deadline and for the per-call limit of a provider call (U5); the orchestrator itself uses no timer function.
 //   provider       EXISTING  structural copy of ai-client `AiProvider` (`identity`, `complete(req, { timeoutMs, signal })`); `req` is a type parameter.
 //   audit          EXISTING  `auditPayload` of ai-client (`auditPayload(bytes, kind, cfg, ctx)`), with the context replaced by an opaque handle;
-//                  NEW       `createContext` (see `AuditPort`).
+//                  NEW       `prepareAudit` (replaces `createContext`; see `AuditPort`).
 //   responseGate   EXISTING  ai-client `gateProviderResult`, `gateResponse`, `resolveResponseLimits`.
 //   policy         EXISTING  verifier `evaluateForRecord` and `createAcceptanceCheck`.
 //   runnerFactory  NEW as a function; it builds the EXISTING verifier `ExperimentRunner` (`createRunner(RunnerDeps)`), see `RunnerFactoryInput`.
@@ -44,6 +44,16 @@ export interface ProviderIdentityView {
 export interface ProviderFailureView {
   readonly reason: string;
   readonly detail: string;
+  /** Present for the reason `audit_violation` only. */
+  readonly violation?: AuditViolationView;
+}
+/** Structural copy of ai-client `AuditViolation`: a code and hashes, never payload content. */
+export interface AuditViolationView {
+  readonly code: "not_audited" | "already_used" | "hash_mismatch" | "state_inconsistent";
+  readonly requestKind?: string;
+  readonly claimedSha256?: string;
+  readonly auditedSha256?: string;
+  readonly recomputedSha256?: string;
 }
 /** Structural copy of ai-client `AiProvider`. `TRequest` stands for `AuditedRequest`, which only `auditPayload` may create. */
 export interface ProviderPort<TRequest> {
@@ -66,19 +76,64 @@ export interface StoredRecordView {
   readonly sha256: Sha256;
   readonly canonicalJson: string;
 }
+/** A committed record as the audit preparation may read it. Structural, the same shape as `WriterRecordView` of `recordWriter.ts`. */
+export interface AuditRecordSnapshotEntry {
+  readonly id: string;
+  readonly kind: string;
+  readonly payload: unknown;
+}
+/** A reference to a stored record that goes into the payload as a part. */
+export interface StoredPartRef {
+  readonly partId: string;
+  readonly type: string;
+  readonly recordId: string;
+}
+export interface PrepareAuditInput {
+  readonly bundle: unknown;
+  readonly kind: string;
+  readonly templateId: string;
+  readonly stored: readonly StoredPartRef[];
+  /** The frozen snapshot from `writer.records()`. */
+  readonly records: readonly AuditRecordSnapshotEntry[];
+}
 /**
  * Over ai-client `auditPayload(bytes, kind, cfg, ctx)`. `cfg` is `startup.auditConfig.load` (typed by `TAudit`).
  * `ctx` is an `AuditContextHandle`; the composition root adapts the real function, which takes an `AuditContext`.
- * `createContext` is NEW. `lookupRecord` serves, for a stored record, the canonical JSON of the record PAYLOAD and the SHA-256 of that
- * payload, not the hash of the envelope (check A03 of `payloadAuditor.ts`). `bundle` is the Source_Bundle value that the analysis port built.
+ * `prepareAudit` is NEW (it replaces `createContext`). The composition root (U7/4.9) builds ONE map id -> { kind, canonical JSON of the payload,
+ * sha256 } from `records`, and then derives BOTH the canonical envelope bytes (parts content, `recordSha256`, the full Source_Bundle, the template
+ * hash) AND the `lookupRecord` of the hidden AuditContext from that same map (`StoredRecordView`: the canonical JSON of the record PAYLOAD and
+ * the SHA-256 of that payload, not the hash of the envelope; check A03 of `payloadAuditor.ts`). `lookupRecord` must not throw. The orchestrator
+ * does not assume that `prepareAudit` never throws: it catches.
  */
 export interface AuditPort<TAudit, TRequest> {
-  createContext(input: { readonly bundle: unknown; lookupRecord(recordId: string): StoredRecordView | undefined }): AuditContextHandle;
+  prepareAudit(input: PrepareAuditInput): Result<{ readonly bytes: Uint8Array; readonly ctx: AuditContextHandle }, { readonly code: "prepare_failed" }>;
   auditPayload(bytes: Uint8Array, kind: string, cfg: TAudit, ctx: AuditContextHandle): { readonly audit: unknown; readonly request?: TRequest };
 }
-/** Over ai-client `gateProviderResult`, `gateResponse` and `resolveResponseLimits`. Results are opaque in this unit (they belong to U5). */
+/** Structural supertype of the ai-client `GateRejection`. No text of a response is carried. */
+export interface GateRejectionView {
+  readonly reason: string;
+  readonly limit?: { readonly name: string; readonly limit: number; readonly observed: number };
+  readonly issues: readonly { readonly code: string; readonly path: string }[];
+  readonly toolCallLike: boolean;
+  readonly sha256: string;
+  readonly byteLength: number;
+}
+/** Structural supertype of the ai-client `CallOutcome`. */
+export type CallOutcomeView =
+  | { readonly kind: "accepted"; readonly result: unknown }
+  | {
+      readonly kind: "failed_call";
+      readonly reason: "error" | "unparseable" | "timeout";
+      readonly retryable: true;
+      readonly source: "provider" | "gate";
+      readonly providerReason?: string;
+      readonly gate?: GateRejectionView;
+      readonly toolCall: boolean;
+    }
+  | { readonly kind: "audit_violation"; readonly retryable: false; readonly stopRun: true; readonly violation: AuditViolationView };
+/** Over ai-client `gateProviderResult`, `gateResponse` and `resolveResponseLimits`. */
 export interface ResponseGatePort {
-  gateProviderResult(kind: string, result: Result<Uint8Array, ProviderFailureView>, limits: unknown, validator: unknown): unknown;
+  gateProviderResult(kind: string, result: Result<Uint8Array, ProviderFailureView>, limits: unknown, validator: unknown): CallOutcomeView;
   gateResponse(kind: string, bytes: Uint8Array, limits: unknown, validator: unknown): unknown;
   resolveResponseLimits(overrides?: Readonly<Record<string, unknown>>): Result<unknown, unknown>;
 }
@@ -184,7 +239,7 @@ export interface MonotonicClockPort {
 export interface WallClockPort {
   nowIso(): string;
 }
-/** NEW. Only for the Run deadline. `delayMs` is a duration on the monotonic clock. */
+/** NEW. Only for the Run deadline and for the per-call limit of a provider call (U5). `delayMs` is a duration on the monotonic clock. */
 export interface TimerPort {
   schedule(delayMs: number, onFire: () => void): { cancel(): void };
 }
