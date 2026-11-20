@@ -157,7 +157,7 @@ describe("failure latch (R12.14)", () => {
       arm(op);
       const r = await writer.append("error", { n: 1 });
       expect(r, op).toEqual({ ok: false, error: { code: "io_failure" } });
-      expect(writer.state(), op).toEqual({ down: true, sealed: false, terminationWritten: false, secretRejections: 0, failure: "io_failure" });
+      expect(writer.state(), op).toEqual({ down: true, sealed: false, terminationWritten: false, secretRejections: 0, invalidRecords: 0, failure: "io_failure" });
       expect(has(r, "EIO") || has(r, "write failed"), op).toBe(false);
       expect(mem.allFiles().filter((f) => f.endsWith(".tmp")), op).toEqual([]);
     }
@@ -247,7 +247,7 @@ describe("secret and invalid answers keep the writer up", () => {
     ];
     expect(results.map(code)).toEqual(["secret_rejected", "secret_rejected", "secret_rejected"]);
     for (const r of results) expect(r).toEqual({ ok: false, error: { code: "secret_rejected" } });
-    expect(writer.state()).toEqual({ down: false, sealed: false, terminationWritten: false, secretRejections: 3 });
+    expect(writer.state()).toEqual({ down: false, sealed: false, terminationWritten: false, secretRejections: 3, invalidRecords: 0 });
     const later = await writer.append("error", { n: 1 });
     expect(later.ok && later.value.seq).toBe(4); // three rejection records were written by the store
     // the test is meaningful: the store itself did name the pattern id in its own rejection record
@@ -261,7 +261,7 @@ describe("secret and invalid answers keep the writer up", () => {
     expect(nan).toEqual({ ok: false, error: { code: "invalid_record" } });
     expect(undef).toEqual({ ok: false, error: { code: "invalid_record" } });
     expect(store.count).toBe(0);
-    expect(writer.state()).toEqual({ down: false, sealed: false, terminationWritten: false, secretRejections: 0 });
+    expect(writer.state()).toEqual({ down: false, sealed: false, terminationWritten: false, secretRejections: 0, invalidRecords: 2 });
     expect((await writer.append("error", { n: 1 })).ok).toBe(true);
   });
 });
@@ -318,11 +318,11 @@ describe("termination and seal rules", () => {
     await channel.appendTermination({ terminationReason: "error" });
     const bad = await channel.seal(manifestInput({ chain: { records: 1, lastHash: "0" } }));
     expect(bad).toEqual({ ok: false, error: { code: "invalid_record" } });
-    expect(writer.state()).toEqual({ down: false, sealed: false, terminationWritten: true, secretRejections: 0 });
+    expect(writer.state()).toEqual({ down: false, sealed: false, terminationWritten: true, secretRejections: 0, invalidRecords: 0 });
     const secret = await channel.seal(manifestInput({ config: { note: CANARY } }));
     expect(secret).toEqual({ ok: false, error: { code: "secret_rejected" } });
     expect(mem.peek(manifestPath)).toBeUndefined();
-    expect(writer.state()).toEqual({ down: false, sealed: false, terminationWritten: true, secretRejections: 1 });
+    expect(writer.state()).toEqual({ down: false, sealed: false, terminationWritten: true, secretRejections: 1, invalidRecords: 0 });
     // the rejection of the manifest is a rejected write: a normal seal is blocked from now on, and the store seal is not called for it
     const sealCalls = spies.seal.mock.calls.length;
     expect(await channel.seal(manifestInput({ terminationReason: "error" }))).toEqual({ ok: false, error: { code: "evidence_rejected" } });
@@ -355,12 +355,12 @@ describe("state and vocabulary", () => {
     const { writer, arm } = await setup();
     const s = writer.state();
     expect(Object.isFrozen(s)).toBe(true);
-    expect(Object.keys(s).sort()).toEqual(["down", "secretRejections", "sealed", "terminationWritten"].sort());
+    expect(Object.keys(s).sort()).toEqual(["down", "invalidRecords", "secretRejections", "sealed", "terminationWritten"].sort());
     arm("writeFileSynced");
     await writer.append("error", { n: 1 });
     const down = writer.state();
     expect(Object.isFrozen(down)).toBe(true);
-    expect(Object.keys(down).sort()).toEqual(["down", "failure", "secretRejections", "sealed", "terminationWritten"].sort());
+    expect(Object.keys(down).sort()).toEqual(["down", "failure", "invalidRecords", "secretRejections", "sealed", "terminationWritten"].sort());
     expect(Object.isFrozen(writer)).toBe(true);
     expect(Object.keys(writer).sort()).toEqual(["append", "drain", "putAiOutput", "putBlob", "records", "state"]);
   });
@@ -391,7 +391,7 @@ describe("admission gate", () => {
     const rs = await Promise.all([p1, p2, p3]);
     expect(rs.every((r) => r.ok)).toBe(true);
     expect(store.list().map((r) => r.kind)).toEqual(["run_started", "ai_call"]);
-    expect(writer.state()).toEqual({ down: false, sealed: false, terminationWritten: false, secretRejections: 0 });
+    expect(writer.state()).toEqual({ down: false, sealed: false, terminationWritten: false, secretRejections: 0, invalidRecords: 0 });
   });
   it("a normal write after closeAdmission() is refused with admission_closed at accept time: no store call, nothing queued, nothing counted", async () => {
     const { writer, channel, hold, spies, calls } = await setup();
@@ -411,7 +411,7 @@ describe("admission gate", () => {
     expect(writer.state().secretRejections).toBe(0);
     release();
     expect((await pending).ok).toBe(true);
-    expect(writer.state()).toEqual({ down: false, sealed: false, terminationWritten: false, secretRejections: 0 });
+    expect(writer.state()).toEqual({ down: false, sealed: false, terminationWritten: false, secretRejections: 0, invalidRecords: 0 });
   });
   it("closing admission is synchronous: the very next call in the same tick is refused", async () => {
     const { writer, channel } = await setup();
@@ -500,7 +500,7 @@ describe("drain", () => {
     const q = writer.putBlob(data("x"));
     const callsAtDrain = calls();
     await expect(channel.drain()).resolves.toBeUndefined();
-    expect(writer.state()).toEqual({ down: true, sealed: false, terminationWritten: false, secretRejections: 0, failure: "io_failure" });
+    expect(writer.state()).toEqual({ down: true, sealed: false, terminationWritten: false, secretRejections: 0, invalidRecords: 0, failure: "io_failure" });
     expect(channel.state()).toEqual(writer.state());
     expect(code(await p)).toBe("io_failure");
     expect(code(await q)).toBe("writer_down");
@@ -533,7 +533,7 @@ describe("queue-time gates (secret rejection that happens during the drain windo
     expect(spies.append.mock.calls.length).toBe(1); // only the secret write
     expect(spies.seal.mock.calls.length).toBe(0);
     expect(store.list().map((r) => r.kind)).toEqual(["store_rejection"]);
-    expect(writer.state()).toEqual({ down: false, sealed: false, terminationWritten: false, secretRejections: 1 });
+    expect(writer.state()).toEqual({ down: false, sealed: false, terminationWritten: false, secretRejections: 1, invalidRecords: 0 });
     for (const forbidden of [CANARY, SECRET_NAME, "env:"]) expect(has([rw, rt, rs, writer.state()], forbidden), forbidden).toBe(false);
   });
   it("a seal queued behind a rejected seal is evidence_rejected at its turn (the store seal is called once)", async () => {
@@ -731,5 +731,62 @@ describe("records(): a read-only snapshot of the committed records (unit U4)", (
     const { writer, channel } = await setup();
     expect(typeof writer.records).toBe("function");
     expect("records" in channel).toBe(false);
+  });
+});
+
+describe("invalidRecords: a missing mandatory record is counted (task 4.4 unit U2 repair)", () => {
+  const invalid = { ok: false as const, error: { kind: "invalid_record" as const, message: "x" } };
+  it("writer.append invalid_record counts exactly 1 per failed write; the writer stays up and nothing is written", async () => {
+    const { writer, store } = await setup();
+    expect(writer.state().invalidRecords).toBe(0);
+    expect(code(await writer.append("error", { n: Number.NaN }))).toBe("invalid_record");
+    expect(writer.state().invalidRecords).toBe(1);
+    expect(code(await writer.append("error", { n: Number.NaN }))).toBe("invalid_record");
+    expect(writer.state()).toEqual({ down: false, sealed: false, terminationWritten: false, secretRejections: 0, invalidRecords: 2 });
+    expect(store.count).toBe(0);
+    expect((await writer.append("error", { n: 1 })).ok).toBe(true);
+    expect(writer.state().invalidRecords).toBe(2); // a later success does not reset it
+    expect(Object.isFrozen(writer.state())).toBe(true);
+  });
+  it("putBlob and putAiOutput invalid_record count too (the store answer is injected: no real input triggers it)", async () => {
+    const { writer, spies } = await setup();
+    spies.putBlob.mockResolvedValueOnce(invalid as never);
+    spies.putAiOutput.mockResolvedValueOnce(invalid as never);
+    expect(code(await writer.putBlob(data("a")))).toBe("invalid_record");
+    expect(writer.state().invalidRecords).toBe(1);
+    expect(code(await writer.putAiOutput(data("b")))).toBe("invalid_record");
+    expect(writer.state()).toMatchObject({ down: false, invalidRecords: 2, secretRejections: 0 });
+  });
+  it("RESIDUAL: a secret whose rejection record fails validation reaches the writer as invalid_record: counted in invalidRecords, NOT in secretRejections", async () => {
+    const { writer, spies } = await setup();
+    spies.append.mockResolvedValueOnce({ ok: false, error: { kind: "invalid_record", message: "rejection record invalid" } } as never);
+    expect(await writer.append("ai_call", { note: CANARY })).toEqual({ ok: false, error: { code: "invalid_record" } });
+    expect(writer.state()).toMatchObject({ down: false, invalidRecords: 1, secretRejections: 0 });
+  });
+  it("channel.appendTermination and channel.seal invalid_record do NOT count; a later valid termination record and seal still work", async () => {
+    const { writer, channel } = await setup();
+    expect(code(await channel.appendTermination({ n: Number.NaN }))).toBe("invalid_record");
+    expect(writer.state().invalidRecords).toBe(0);
+    expect((await channel.appendTermination({ terminationReason: "error" })).ok).toBe(true);
+    expect(code(await channel.seal(manifestInput({ chain: { records: 1, lastHash: "0" } })))).toBe("invalid_record");
+    expect(writer.state().invalidRecords).toBe(0);
+    expect((await channel.seal(manifestInput({ terminationReason: "error" }))).ok).toBe(true);
+    expect(writer.state()).toMatchObject({ sealed: true, invalidRecords: 0 });
+  });
+  it("refusals that never reach the store do not count: admission_closed, closed_after_termination, termination_reserved, writer_down", async () => {
+    const { writer, channel, spies } = await setup();
+    expect(code(await writer.append("termination", { n: Number.NaN }))).toBe("termination_reserved");
+    channel.closeAdmission();
+    expect(code(await writer.append("error", { n: Number.NaN }))).toBe("admission_closed");
+    expect(code(await writer.putBlob(data("a")))).toBe("admission_closed");
+    expect((await channel.appendTermination({ terminationReason: "error" })).ok).toBe(true);
+    expect(code(await writer.append("error", { n: Number.NaN }))).toBe("closed_after_termination");
+    expect(spies.append.mock.calls.length).toBe(1);
+    expect(writer.state().invalidRecords).toBe(0);
+    const down = await setup();
+    down.arm("writeFileSynced");
+    await down.writer.append("error", { n: 1 });
+    expect(code(await down.writer.append("error", { n: Number.NaN }))).toBe("writer_down");
+    expect(down.writer.state().invalidRecords).toBe(0);
   });
 });

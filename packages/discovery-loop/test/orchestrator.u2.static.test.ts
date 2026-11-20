@@ -141,7 +141,7 @@ describe("exported names", () => {
     expect(members.WriterRecordView.sort()).toEqual(["id", "kind", "payload"]);
     expect(members.TerminationChannel.sort()).toEqual(["appendTermination", "closeAdmission", "drain", "seal", "state"]);
     expect(members.RecordWriterParts.sort()).toEqual(["channel", "writer"]);
-    expect(members.WriterState.sort()).toEqual(["down", "failure", "sealed", "secretRejections", "terminationWritten"]);
+    expect(members.WriterState.sort()).toEqual(["down", "failure", "invalidRecords", "sealed", "secretRejections", "terminationWritten"]);
     expect(members.Terminator).toEqual(["terminate"]);
     expect(members.TerminatorInput.sort()).toEqual(["base", "channel", "manifest", "runId", "session", "startedAt", "wallClock"]);
     for (const f of FILES) expect(exportsOf(raw(f)).filter((n) => SECRETISH.test(n)), f).toEqual([]);

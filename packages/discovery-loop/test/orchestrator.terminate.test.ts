@@ -413,12 +413,12 @@ describe("a Run that ends without a seal", () => {
 });
 
 describe("mapping of writer answers (a stub writer, the real session)", () => {
-  const stub = (append: WriterResult<unknown>, seal: WriterResult<unknown>, down = false): TerminationChannel => ({
+  const stub = (append: WriterResult<unknown>, seal: WriterResult<unknown>, down = false, secretRejections = 0, invalidRecords = 0): TerminationChannel => ({
     closeAdmission: () => undefined,
     drain: async () => undefined,
     appendTermination: async () => append as never,
     seal: async () => seal as never,
-    state: () => ({ down, sealed: false, terminationWritten: false, secretRejections: 0 }),
+    state: () => ({ down, sealed: false, terminationWritten: false, secretRejections, invalidRecords }),
   });
   const fail = (c: string): WriterResult<unknown> => ({ ok: false, error: { code: c as never } });
   const ok: WriterResult<unknown> = { ok: true, value: { manifest: {}, sha256: "a".repeat(64) } };
@@ -499,7 +499,7 @@ describe("a write rejected for a secret while terminate() is draining", () => {
     expect(h.build).not.toHaveBeenCalled();
     expect(h.wall.nowIso).not.toHaveBeenCalled();
     expect(h.mem.peek(MANIFEST)).toBeUndefined();
-    expect(h.writer.state()).toEqual({ down: false, sealed: false, terminationWritten: false, secretRejections: 1 });
+    expect(h.writer.state()).toEqual({ down: false, sealed: false, terminationWritten: false, secretRejections: 1, invalidRecords: 0 });
     expect(exitCodeOf(result)).not.toBe(0);
     for (const leak of [CANARY, "CANARY_KEY", "env:"]) expect(has([result, write, h.writer.state()], leak), leak).toBe(false);
   });
@@ -616,3 +616,124 @@ describe("admission and authority around terminate()", () => {
 function code(r: { ok: boolean; error?: { code: string } }): string | undefined {
   return r.ok ? undefined : r.error?.code;
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// U2 repair: a missing mandatory record (`invalid_record` of an ordinary write) never gives `sealed: true`
+// ---------------------------------------------------------------------------------------------------------------------------------
+describe("an invalid_record of an ordinary write blocks the normal seal", () => {
+  const bad = (h: Harness) => h.writer.append("error", { n: Number.NaN });
+  it("positive control: a Run without any invalid_record still seals", async () => {
+    const h = await harness();
+    h.session.raise("error");
+    expect((await h.writer.append("error", { n: 1 })).ok).toBe(true);
+    const result = await h.terminator.terminate();
+    expect(result.sealed).toBe(true);
+    expect(h.writer.state().invalidRecords).toBe(0);
+  });
+  it("one invalid_record: unsealed internal_error with reason error; nothing written, built, read from the clock or sealed", async () => {
+    const h = await harness();
+    h.session.markStarted();
+    expect(code(await bad(h))).toBe("invalid_record");
+    const result = await h.terminator.terminate();
+    expect(result).toEqual({ sealed: false, started: true, terminationReason: "error", failure: "internal_error" });
+    expect(Object.keys(result).sort()).toEqual(["failure", "sealed", "started", "terminationReason"]);
+    expect(terminationRecords(h)).toHaveLength(0);
+    expect(h.store.list()).toEqual([]);
+    expect(h.mem.peek(MANIFEST)).toBeUndefined();
+    expect(h.spies.append).toHaveBeenCalledTimes(1); // only the invalid write: no termination record was attempted
+    expect(h.spies.seal).not.toHaveBeenCalled();
+    expect(h.build).not.toHaveBeenCalled();
+    expect(h.wall.nowIso).not.toHaveBeenCalled();
+    expect(h.session.terminationStatus()).toEqual({ state: "finalized", reason: "error" });
+    expect(exitCodeOf(result)).not.toBe(0);
+  });
+  it("a higher cause latched before stays the reason (not lowered to error), still unsealed internal_error", async () => {
+    const h = await harness();
+    h.session.raise("isolation_violation");
+    await bad(h);
+    const result = await h.terminator.terminate();
+    expect(result).toEqual({ sealed: false, started: false, terminationReason: "isolation_violation", failure: "internal_error" });
+    expect(h.session.terminationStatus()).toEqual({ state: "finalized", reason: "isolation_violation" });
+    expect(h.spies.seal).not.toHaveBeenCalled();
+    expect(h.build).not.toHaveBeenCalled();
+  });
+  it("an invalid write that is still queued when terminate() starts is drained and counted", async () => {
+    const h = await harness();
+    h.session.raise("provider_failure");
+    const release = h.hold("writeFileSynced");
+    const first = h.writer.append("error", { n: 1 });
+    const second = bad(h); // accepted before terminate(): runs during the drain
+    await flush();
+    const t = h.terminator.terminate();
+    release();
+    const result = await t;
+    expect((await first).ok).toBe(true);
+    expect(code(await second)).toBe("invalid_record");
+    expect(result).toEqual({ sealed: false, started: false, terminationReason: "error", failure: "internal_error" });
+    expect(terminationRecords(h)).toHaveLength(0);
+  });
+  it("a write refused at accept time (admission_closed) does not count: the Run still seals", async () => {
+    const h = await harness();
+    h.session.raise("error");
+    const t = h.terminator.terminate();
+    expect(code(await bad(h))).toBe("admission_closed");
+    const result = await t;
+    expect(result.sealed).toBe(true);
+    expect(h.writer.state().invalidRecords).toBe(0);
+  });
+  it("an invalid_record of the termination record or of the seal does not count as an invalid ordinary write (their own mapping applies)", async () => {
+    const t = await harness({ build: (core) => ({ ...defaultManifest(core), terminationReason: "bogus" }) });
+    t.session.raise("error");
+    expect(await t.terminator.terminate()).toMatchObject({ sealed: false, failure: "manifest_build_failed" });
+    expect(t.writer.state().invalidRecords).toBe(0);
+  });
+  it("priority with the real writer: secret + invalid -> secret_rejected; down + invalid -> store_failed", async () => {
+    const s = await harness();
+    s.session.markStarted();
+    expect(code(await s.writer.append("ai_call", { note: CANARY }))).toBe("secret_rejected");
+    expect(code(await bad(s))).toBe("invalid_record");
+    expect(await s.terminator.terminate()).toEqual({ sealed: false, started: true, terminationReason: "error", failure: "secret_rejected" });
+    expect(s.spies.seal).not.toHaveBeenCalled();
+    expect(terminationRecords(s)).toHaveLength(0);
+    const d = await harness();
+    expect(code(await bad(d))).toBe("invalid_record");
+    d.arm("writeFileSynced");
+    expect(code(await d.writer.append("error", { n: 1 }))).toBe("io_failure");
+    expect(d.writer.state()).toMatchObject({ down: true, invalidRecords: 1 });
+    expect(await d.terminator.terminate()).toEqual({ sealed: false, started: false, terminationReason: "error", failure: "store_failed" });
+    expect(d.wall.nowIso).not.toHaveBeenCalled();
+    expect(d.build).not.toHaveBeenCalled();
+  });
+  it("RESIDUAL: a secret whose rejection record is invalid (store answer injected) ends unsealed internal_error, not secret_rejected", async () => {
+    const h = await harness();
+    h.spies.append.mockResolvedValueOnce({ ok: false, error: { kind: "invalid_record", message: "rejection record invalid" } } as never);
+    expect(code(await h.writer.append("ai_call", { note: CANARY }))).toBe("invalid_record");
+    expect(h.writer.state()).toMatchObject({ secretRejections: 0, invalidRecords: 1 });
+    expect(await h.terminator.terminate()).toMatchObject({ sealed: false, terminationReason: "error", failure: "internal_error" });
+  });
+  it("stub channel: the decision order is down > secret > invalid, and channel.appendTermination / channel.seal / the manifest port / the wall clock are not called for invalid", async () => {
+    const calls = { appendTermination: vi.fn(), seal: vi.fn(), build: vi.fn(), nowIso: vi.fn(() => FINISHED) };
+    const make = (down: boolean, secret: number, invalid: number): TerminationChannel => ({
+      closeAdmission: () => undefined,
+      drain: async () => undefined,
+      appendTermination: async () => (calls.appendTermination(), { ok: true, value: {} } as never),
+      seal: async () => (calls.seal(), { ok: true, value: { sha256: "a".repeat(64) } } as never),
+      state: () => ({ down, sealed: false, terminationWritten: false, secretRejections: secret, invalidRecords: invalid }),
+    });
+    const run = async (channel: TerminationChannel): Promise<RunResult> => {
+      const made = createRunSession({ clock: { nowMs: () => 1 }, runSeconds: 10 });
+      if (!made.ok) throw new Error("session");
+      return createTerminator({ session: made.value, channel, wallClock: { nowIso: calls.nowIso }, manifest: { build: (core) => (calls.build(), defaultManifest(core)) }, runId: "run-0001", base: BASE, startedAt: STARTED }).terminate();
+    };
+    expect(await run(make(false, 0, 1))).toMatchObject({ sealed: false, failure: "internal_error", terminationReason: "error" });
+    expect(calls.appendTermination).not.toHaveBeenCalled();
+    expect(calls.seal).not.toHaveBeenCalled();
+    expect(calls.build).not.toHaveBeenCalled();
+    expect(calls.nowIso).not.toHaveBeenCalled();
+    expect(await run(make(false, 1, 1))).toMatchObject({ sealed: false, failure: "secret_rejected" });
+    expect(await run(make(true, 1, 1))).toMatchObject({ sealed: false, failure: "store_failed" });
+    expect(await run(make(true, 0, 1))).toMatchObject({ sealed: false, failure: "store_failed" });
+    expect(await run(make(false, 0, 0))).toMatchObject({ sealed: true });
+    expect(calls.seal).toHaveBeenCalledTimes(1);
+  });
+});

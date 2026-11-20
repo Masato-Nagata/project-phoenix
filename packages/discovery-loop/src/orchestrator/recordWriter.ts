@@ -29,7 +29,13 @@
 // Results carry a CLOSED code only. A message of the store, the pattern id of a secret hit (which may be `env:NAME`), a path, a payload byte, a
 // component name or a provider text is never copied into a result or into the state (R12.13, R19.7).
 // A `secret_rejected` answer means the store wrote its own rejection record and stays healthy: the writer counts it and goes on.
-// An `invalid_record` answer is a defect of the caller: nothing was written, the writer stays up.
+// An `invalid_record` answer is a defect of the caller: nothing was written, the writer stays up. When it answers an ORDINARY write, the writer
+// counts it in `invalidRecords` (one per failed write job): a mandatory record is missing, and `terminate()` refuses a normal seal for it. The
+// termination record and the seal do not count (terminate() already reports their failure). There is NO new gate in `appendTermination` or
+// `seal`: the refusal of the normal seal is the decision of `terminate()`.
+// RESIDUAL (documented): when a secret hit's own rejection record fails validation, the store answers `invalid_record` (message "rejection record
+// invalid"). The writer reads only `kind` and never a message, so that case is counted in `invalidRecords`, NOT in `secretRejections`. It still
+// blocks the normal seal, but the Run ends unsealed with `internal_error` instead of `secret_rejected`.
 //
 // Store types are derived by indexing the real class (`ReturnType`, `Parameters`), so the store stays the single source.
 import type { Result } from "../schema/types.js";
@@ -84,6 +90,12 @@ export interface WriterState {
   readonly terminationWritten: boolean;
   /** How many writes the store rejected because of a secret hit. */
   readonly secretRejections: number;
+  /**
+   * How many ORDINARY writes (`append`, `putBlob`, `putAiOutput`) the store refused as `invalid_record`; nothing was written for them. A count,
+   * never a value. Not counted: `invalid_record` of the termination record or of the seal, and refusals that never reach the store
+   * (`admission_closed`, `closed_after_termination`, `termination_reserved`, `writer_down`, the queue-time gates).
+   */
+  readonly invalidRecords: number;
   /** The FIRST failure that took the writer down. Absent while the writer is up. */
   readonly failure?: "io_failure" | "store_failed";
 }
@@ -146,6 +158,7 @@ export function createRecordWriter(store: RunRecordStore): RecordWriterParts {
   let terminationWritten = false;
   let admissionClosed = false;
   let secretRejections = 0;
+  let invalidRecords = 0;
   let tail: Promise<unknown> = Promise.resolve();
 
   const refuse = <T>(code: WriterErrorCode): WriterResult<T> => Object.freeze({ ok: false as const, error: Object.freeze({ code }) });
@@ -155,12 +168,15 @@ export function createRecordWriter(store: RunRecordStore): RecordWriterParts {
     failure ??= code;
     return refuse<T>(code);
   };
-  const fromStoreError = <T>(kind: string): WriterResult<T> => {
+  const fromStoreError = <T>(kind: string, ordinary: boolean): WriterResult<T> => {
     if (kind === "secret_rejected") {
       secretRejections += 1;
       return refuse<T>("secret_rejected");
     }
-    if (kind === "invalid_record") return refuse<T>("invalid_record");
+    if (kind === "invalid_record") {
+      if (ordinary) invalidRecords += 1; // only the store's answer to an ORDINARY write counts; the termination record and the seal do not
+      return refuse<T>("invalid_record");
+    }
     if (kind === "io_failure") return goDown<T>("io_failure");
     return goDown<T>("store_failed"); // `store_failed`, and any kind that is not known
   };
@@ -174,6 +190,7 @@ export function createRecordWriter(store: RunRecordStore): RecordWriterParts {
     gate: () => WriterErrorCode | undefined,
     call: () => Promise<Result<T, { kind: string }>>,
     onOk: () => void,
+    ordinary = false,
   ): Promise<WriterResult<T>> =>
     enqueue(async (): Promise<WriterResult<T>> => {
       if (down) return refuse<T>("writer_down");
@@ -185,7 +202,7 @@ export function createRecordWriter(store: RunRecordStore): RecordWriterParts {
           onOk();
           return { ok: true, value: r.value };
         }
-        return fromStoreError<T>(r.error.kind);
+        return fromStoreError<T>(r.error.kind, ordinary);
       } catch {
         return goDown<T>("io_failure"); // a thrown exception or a rejected promise is an I/O failure; the message is dropped
       }
@@ -196,7 +213,7 @@ export function createRecordWriter(store: RunRecordStore): RecordWriterParts {
   const afterTermination = (): WriterErrorCode | undefined => (terminationWritten ? "closed_after_termination" : undefined);
   // The tail never rejects, so neither does the drain. It takes the tail AT CALL TIME: later jobs are not awaited.
   const drain = (): Promise<void> => tail.then(noop, noop);
-  const state = (): WriterState => Object.freeze({ down, sealed, terminationWritten, secretRejections, ...(failure === undefined ? {} : { failure }) });
+  const state = (): WriterState => Object.freeze({ down, sealed, terminationWritten, secretRejections, invalidRecords, ...(failure === undefined ? {} : { failure }) });
   // `store.list()` returns a fresh structured clone of the committed records (a record is added to it only after a successful persist), so the
   // projection is built from that clone without a second copy and then frozen at every level. The store and its envelope fields stay hidden.
   // A failure (a throwing `list()`, or a value too deep to freeze) is a typed refusal, never an empty array (task 4.4 unit U4; R12.14, R24.15).
@@ -220,10 +237,11 @@ export function createRecordWriter(store: RunRecordStore): RecordWriterParts {
               afterTermination,
               () => store.append(kind, payload, withComponent(component)),
               noop,
+              true,
             ),
           ),
-    putBlob: (data, component) => admit(() => exec<BlobOk>(afterTermination, () => store.putBlob(data, withComponent(component)), noop)),
-    putAiOutput: (data, component) => admit(() => exec<AiOutputOk>(afterTermination, () => store.putAiOutput(data, withComponent(component)), noop)),
+    putBlob: (data, component) => admit(() => exec<BlobOk>(afterTermination, () => store.putBlob(data, withComponent(component)), noop, true)),
+    putAiOutput: (data, component) => admit(() => exec<AiOutputOk>(afterTermination, () => store.putAiOutput(data, withComponent(component)), noop, true)),
     drain,
     state,
     records,

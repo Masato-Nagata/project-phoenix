@@ -4,17 +4,26 @@
 //   1. close ADMISSION of the writer (synchronous, the very first action, no `await` before it): an ordinary write accepted from now on is
 //      refused with `admission_closed`,
 //   2. DRAIN: wait until every job accepted before the closing has completed (a queued write may still be rejected for a secret meanwhile),
-//   3. read the writer state; if a write was rejected for a secret (`secretRejections > 0`), raise `error` (U1 priority rules: a pending reason
-//      of higher priority is NOT overwritten, a lower pending one is upgraded to `error`),
+//   3. read the writer state once; if a write was rejected for a secret (`secretRejections > 0`) or refused as `invalid_record`
+//      (`invalidRecords > 0`), raise `error` (U1 priority rules: a pending reason of higher priority is NOT overwritten, a lower pending one is
+//      upgraded to `error`),
 //   4. finalize the termination latch (the reason is frozen from here on; a later `raise` is ignored by the latch, U1),
-//   5. re-read the state: the writer is `down` -> unsealed `store_failed`; a secret rejection -> unsealed `secret_rejected`. In both cases NOTHING
-//      is written: no termination record, no manifest build, no seal, no wall clock read,
+//   5. re-read the state, in this order: the writer is `down` -> unsealed `store_failed`; a secret rejection -> unsealed `secret_rejected`; an
+//      invalid ordinary write -> unsealed `internal_error` (a mandatory record is missing; a caller defect). In all three cases NOTHING is
+//      written: no termination record, no manifest build, no seal, no wall clock read,
 //   6. write the single `termination` record through the termination channel (`evidence_rejected` is mapped to `secret_rejected`),
 //   7. read the wall clock ONCE (the end time of the Run), and let the manifest port build the Run_Manifest from the core,
 //   8. seal through the channel (`evidence_rejected` is mapped to `secret_rejected`). `sealed: true` is produced in exactly one place: after
 //      the store's seal succeeded.
-// A secret rejection of ANY write of the Run blocks a normal seal: a Run with a rejected (missing) record is never sealed as a normal Run. The
-// writer double-checks this at the turn of the termination record and of the seal (`evidence_rejected`).
+// A secret rejection or an `invalid_record` of ANY ordinary write of the Run blocks a normal seal: a Run with a rejected or missing record is
+// never sealed as a normal Run. The writer double-checks the secret case at the turn of the termination record and of the seal
+// (`evidence_rejected`); it has NO gate for `invalid_record`: that refusal is made here, in `terminate()` (approved decision).
+// What `sealed: true` guarantees: no ordinary write the writer accepted failed (not down, no secret rejection, no invalid_record); the
+// termination record is in the chain; the Manifest is valid; the store's seal succeeded. It does NOT guarantee that callers issued every record
+// they needed, nor that writes refused at accept time after admission closed (`admission_closed`) were not lost: the composition (U7) must call
+// `terminate()` only after the in-flight callProvider and Runner calls have settled.
+// Residual: a secret hit whose own rejection record fails validation reaches the writer as `invalid_record` (the writer reads no message), so the
+// Run ends unsealed with `internal_error`, not `secret_rejected`.
 // The record comes BEFORE the seal: the store computes `chain.records` and `chain.lastHash` at seal time, so the termination record is part of
 // the sealed chain, and the Manifest never names a reason without its record. If the record cannot be written, nothing is sealed.
 //
@@ -93,7 +102,8 @@ async function finish(input: TerminatorInput): Promise<RunResult> {
   try {
     channel.closeAdmission(); // the first statement runs synchronously inside `terminate()`
     await channel.drain();
-    if (channel.state().secretRejections > 0) session.raise("error"); // a rejected write: the Run ends with `error`, unless a higher cause is pending
+    const before = channel.state();
+    if (before.secretRejections > 0 || before.invalidRecords > 0) session.raise("error"); // a rejected or invalid write: `error`, unless a higher cause is pending
     let fin = session.finalize();
     if (!fin.ok) {
       session.raise("error"); // defect fallback: a Run that ends without any cause ends with `error`
@@ -105,6 +115,7 @@ async function finish(input: TerminatorInput): Promise<RunResult> {
     const after = channel.state();
     if (after.down) return unsealed(session, "store_failed", reason); // nothing is written, nothing is built
     if (after.secretRejections > 0) return unsealed(session, "secret_rejected", reason); // a record is missing: never a normal seal
+    if (after.invalidRecords > 0) return unsealed(session, "internal_error", reason); // a mandatory record is missing (a caller defect): never a normal seal
 
     const written = await channel.appendTermination({ terminationReason: reason }, WRITER_COMPONENT);
     if (!written.ok) return unsealed(session, mapRecordFailure(written.error.code), reason);
