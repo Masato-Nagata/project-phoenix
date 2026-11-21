@@ -42,9 +42,9 @@ const files = readdirSync(ORCH).filter((f) => f.endsWith(".ts")).sort();
 const text = (f: string): string => readFileSync(join(ORCH, f), "utf8");
 
 describe("the folder", () => {
-  it("holds exactly the sixteen planned files", () => {
+  it("holds exactly the seventeen planned files", () => {
     expect(files).toEqual([
-      "consume.ts", "deadline.ts", "envAllowlist.ts", "experimentPhase.ts", "hypothesisPhase.ts", "ids.ts", "leaseBoundary.ts", "observeReads.ts", "providerCall.ts",
+      "consume.ts", "deadline.ts", "envAllowlist.ts", "experimentPhase.ts", "hypothesisPhase.ts", "ids.ts", "iteration.ts", "leaseBoundary.ts", "observeReads.ts", "providerCall.ts",
       "recordWriter.ts", "session.ts", "startGate.ts", "startRun.ts", "terminate.ts", "terminationLatch.ts", "types.ts",
     ]);
   });
@@ -52,7 +52,7 @@ describe("the folder", () => {
 
 describe("(a) the import boundary", () => {
   const ALLOWED: readonly RegExp[] = [
-    /^\.\/(?:consume|deadline|envAllowlist|experimentPhase|hypothesisPhase|ids|leaseBoundary|providerCall|recordWriter|session|startGate|startRun|terminate|terminationLatch|types)\.js$/,
+    /^\.\/(?:consume|deadline|envAllowlist|experimentPhase|hypothesisPhase|ids|iteration|leaseBoundary|providerCall|recordWriter|session|startGate|startRun|terminate|terminationLatch|types)\.js$/,
     /^\.\.\/gate\/mayStartRun\.js$/,
     /^\.\.\/model\/evidenceStore\.js$/, // the EvidenceStore class (type), CITATION_VERIFIER (hypothesisPhase.ts only) and experimentRuleComponent (experimentPhase.ts only); checked in its own test below
     /^\.\.\/isolation\/(?:index|types)\.js$/,
