@@ -2,13 +2,15 @@
 // reads of constants). Covers: the import boundary, no clock / process / dynamic code, no reverse import of the orchestrator, the narrow use of
 // `config/startup.js`, the shape of the start gate (one call per step, in order, consume before the first await, only `loopDeps.isolation`),
 // no exported name that contains "approv" (R6.11), and the seventeen keys of `LoopDeps` (task 4.4 unit U0). Unit U6a adds ids.ts, leaseBoundary.ts
-// and hypothesisPhase.ts (15 files), the one import of the EvidenceStore, and a describe for the three files.
+// and hypothesisPhase.ts (15 files), the one import of the EvidenceStore, and a describe for the three files. Unit U6b adds experimentPhase.ts
+// (16 files), its one value import of the EvidenceStore (experimentRuleComponent), and a describe with the source-order check (policy_decision, drain, execute).
 // **Validates: Requirements 2.14, 2.15, 2.16, 15.14, 15.15, 15.16**
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { STARTUP_NAME_VOCABULARY } from "../src/index.js";
+import * as experimentPhaseModule from "../src/orchestrator/experimentPhase.js";
 import * as hypothesisPhaseModule from "../src/orchestrator/hypothesisPhase.js";
 import * as idsModule from "../src/orchestrator/ids.js";
 import * as leaseBoundaryModule from "../src/orchestrator/leaseBoundary.js";
@@ -40,19 +42,19 @@ const files = readdirSync(ORCH).filter((f) => f.endsWith(".ts")).sort();
 const text = (f: string): string => readFileSync(join(ORCH, f), "utf8");
 
 describe("the folder", () => {
-  it("holds exactly the fifteen planned files", () => {
+  it("holds exactly the sixteen planned files", () => {
     expect(files).toEqual([
-      "consume.ts", "deadline.ts", "envAllowlist.ts", "hypothesisPhase.ts", "ids.ts", "leaseBoundary.ts", "observeReads.ts", "providerCall.ts", "recordWriter.ts", "session.ts",
-      "startGate.ts", "startRun.ts", "terminate.ts", "terminationLatch.ts", "types.ts",
+      "consume.ts", "deadline.ts", "envAllowlist.ts", "experimentPhase.ts", "hypothesisPhase.ts", "ids.ts", "leaseBoundary.ts", "observeReads.ts", "providerCall.ts",
+      "recordWriter.ts", "session.ts", "startGate.ts", "startRun.ts", "terminate.ts", "terminationLatch.ts", "types.ts",
     ]);
   });
 });
 
 describe("(a) the import boundary", () => {
   const ALLOWED: readonly RegExp[] = [
-    /^\.\/(?:consume|deadline|envAllowlist|hypothesisPhase|ids|leaseBoundary|providerCall|recordWriter|session|startGate|startRun|terminate|terminationLatch|types)\.js$/,
+    /^\.\/(?:consume|deadline|envAllowlist|experimentPhase|hypothesisPhase|ids|leaseBoundary|providerCall|recordWriter|session|startGate|startRun|terminate|terminationLatch|types)\.js$/,
     /^\.\.\/gate\/mayStartRun\.js$/,
-    /^\.\.\/model\/evidenceStore\.js$/, // the EvidenceStore class (type) and CITATION_VERIFIER; only hypothesisPhase.ts (checked in its own test below)
+    /^\.\.\/model\/evidenceStore\.js$/, // the EvidenceStore class (type), CITATION_VERIFIER (hypothesisPhase.ts only) and experimentRuleComponent (experimentPhase.ts only); checked in its own test below
     /^\.\.\/isolation\/(?:index|types)\.js$/,
     /^\.\.\/config\/(?:startup|runConfig)\.js$/,
     /^\.\.\/schema\/types\.js$/,
@@ -84,8 +86,8 @@ describe("(a) the import boundary", () => {
     expect(outside('import { CITATION_VERIFIER, type EvidenceStore } from "../model/evidenceStore.js";')).toEqual([]);
     expect(outside('import { a } from "./ids.js";\nimport { b } from "./leaseBoundary.js";\nimport { c } from "./hypothesisPhase.js";')).toEqual([]);
   });
-  it("the EvidenceStore is imported by hypothesisPhase.ts only, as CITATION_VERIFIER (value) and EvidenceStore (type) (U6a)", () => {
-    const evidenceStoreViolations = (source: string): string[] => {
+  it("the EvidenceStore is imported by hypothesisPhase.ts (CITATION_VERIFIER, EvidenceStore type) and experimentPhase.ts (experimentRuleComponent, EvidenceStore type) only (U6a, U6b)", () => {
+    const evidenceStoreViolations = (source: string, allowedValue = "CITATION_VERIFIER"): string[] => {
       const bad: string[] = [];
       for (const m of stripComments(source).matchAll(/^\s*import\s+(type\s+)?([^;]*?)\s*\bfrom\s*["']\.\.\/model\/evidenceStore\.js["']/gm)) {
         const braces = /^\{([^}]*)\}$/.exec((m[2] as string).trim());
@@ -95,16 +97,22 @@ describe("(a) the import boundary", () => {
         }
         for (const n of (braces[1] as string).split(",").map((x) => x.trim()).filter((x) => x !== "")) {
           const name = n.replace(/^type\s+/, "");
-          if (name !== "CITATION_VERIFIER" && name !== "EvidenceStore") bad.push(name);
+          if (name !== allowedValue && name !== "EvidenceStore") bad.push(name);
           else if (name === "EvidenceStore" && m[1] === undefined && !n.startsWith("type ")) bad.push("value import of EvidenceStore");
         }
       }
       return bad;
     };
     const importers = files.filter((f) => specifiersOf(text(f)).includes("../model/evidenceStore.js"));
-    expect(importers).toEqual(["hypothesisPhase.ts"]);
-    for (const f of files) expect(evidenceStoreViolations(text(f)), f).toEqual([]);
+    expect(importers).toEqual(["experimentPhase.ts", "hypothesisPhase.ts"]);
+    for (const f of files) expect(evidenceStoreViolations(text(f), f === "experimentPhase.ts" ? "experimentRuleComponent" : "CITATION_VERIFIER"), f).toEqual([]);
     expect(text("hypothesisPhase.ts")).toMatch(/import \{ CITATION_VERIFIER, type EvidenceStore \} from "\.\.\/model\/evidenceStore\.js";/);
+    expect(text("experimentPhase.ts")).toMatch(/import \{ experimentRuleComponent, type EvidenceStore \} from "\.\.\/model\/evidenceStore\.js";/);
+    // the value of one file is a violation in the other
+    expect(evidenceStoreViolations(text("experimentPhase.ts"))).toEqual(["experimentRuleComponent"]);
+    expect(evidenceStoreViolations(text("hypothesisPhase.ts"), "experimentRuleComponent")).toEqual(["CITATION_VERIFIER"]);
+    expect(evidenceStoreViolations('import { experimentRuleComponent } from "../model/evidenceStore.js";', "experimentRuleComponent")).toEqual([]);
+    expect(evidenceStoreViolations('import { CITATION_VERIFIER, experimentRuleComponent } from "../model/evidenceStore.js";', "experimentRuleComponent")).toEqual(["CITATION_VERIFIER"]);
     // positive control
     expect(evidenceStoreViolations('import { EvidenceStore } from "../model/evidenceStore.js";')).toEqual(["value import of EvidenceStore"]);
     expect(evidenceStoreViolations('import { experimentRuleComponent } from "../model/evidenceStore.js";')).toEqual(["experimentRuleComponent"]);
@@ -311,6 +319,11 @@ describe("exported names (R6.11) and the vocabularies", () => {
       "PredecessorClaimRef", "PredecessorRef", "SemanticHashInput", "SemanticSha256Of", "HypothesisPhaseInput", "AcceptedClaimRef", "HypothesisPhaseResult", "runHypothesisPhase",
     ]);
     expect(Object.keys(hypothesisPhaseModule)).toEqual(["runHypothesisPhase"]);
+    expect(exportsOf(text("experimentPhase.ts"))).toEqual([
+      "CurrentHypothesisRef", "ExperimentPhaseInput", "ComparisonResultName", "ExecutedExperiment", "ExperimentPhaseSummary", "ExperimentLimitReason", "ExperimentPhaseResult",
+      "EXPERIMENT_INVALID_CODES", "EXPERIMENT_ERROR_CODES", "EXPERIMENT_ERROR_PHASES", "EXPERIMENT_ERROR_CAUSES", "runExperimentPhase",
+    ]);
+    expect(Object.keys(experimentPhaseModule)).toEqual(["EXPERIMENT_INVALID_CODES", "EXPERIMENT_ERROR_CODES", "EXPERIMENT_ERROR_PHASES", "EXPERIMENT_ERROR_CAUSES", "runExperimentPhase"]);
     expect(Object.keys(typesModule).sort()).toEqual(["LEASE_REASONS", "START_GATE_REFUSAL_CODES", "TERMINATION_REASONS", "UNSEALED_FAILURE_CODES"]);
   });
   it("the lease reasons equal those of stage B; the refusal codes and termination reasons are closed and distinct", () => {
@@ -477,5 +490,64 @@ describe("ids.ts, leaseBoundary.ts and hypothesisPhase.ts (task 4.4, unit U6a)",
     // hypothesisPhase.ts re-throws the sanctioned error of callProvider, and its own `new Error` text is only used for the non-JSON guard
     expect(code(text("leaseBoundary.ts"))).not.toMatch(/\bthrow\b/);
     expect([...code(text("hypothesisPhase.ts")).matchAll(/\bthrow\b/g)].length).toBe(3);
+  });
+});
+
+describe("experimentPhase.ts (task 4.4, unit U6b)", () => {
+  const raw = text("experimentPhase.ts");
+  const src = code(raw);
+  const NO_TERMINATION = /\bchannel\b|\bTerminationChannel\b|\bappendTermination\b|\bseal\s*\(|\bcloseAdmission\b|\bterminate\b|\bcreateTerminator\b/i;
+  const FOREIGN_PACKAGE = /ai-client|analyzer|verifier|@phoenix/;
+  const foreignImports = (source: string): string[] => specifiersOf(source).filter((s) => FOREIGN_PACKAGE.test(s) || /^node:/.test(s));
+  /** Positions of the `policy_decision` append, the `drain()` and the `.execute(` in the source text with the strings kept (comments removed). */
+  const order = (source: string): { policy: number[]; drain: number[]; execute: number[] } => {
+    const c = stripComments(source);
+    const all = (re: RegExp): number[] => [...c.matchAll(re)].map((m) => m.index as number);
+    return { policy: all(/"policy_decision"/g), drain: all(/\.drain\(\)/g), execute: all(/\.execute\(/g) };
+  };
+  const orderOk = (source: string): boolean => {
+    const o = order(source);
+    return o.policy.length === 1 && o.drain.length === 1 && o.execute.length === 1 && (o.policy[0] as number) < (o.drain[0] as number) && (o.drain[0] as number) < (o.execute[0] as number);
+  };
+
+  it("holds no reference to the termination capability, the seal, the admission closing or the terminator", () => {
+    expect(src).not.toMatch(NO_TERMINATION);
+    for (const bad of ["const c = channel;", "x: TerminationChannel;", "c.appendTermination({});", "c.seal(m);", "c.closeAdmission();", "terminate(x);", "createTerminator(y);"]) {
+      expect(code(bad), bad).toMatch(NO_TERMINATION);
+    }
+  });
+  it("imports no node: module and no ai-client, analyzer or verifier; takes no `deps`, `loopDeps` or `LoopDeps`; never calls the provider directly", () => {
+    expect(foreignImports(raw)).toEqual([]);
+    expect(src).not.toMatch(/\bdeps\b|\bloopDeps\b|\bLoopDeps\b/);
+    expect(src).not.toMatch(/\.complete\(/);
+    expect(src).toMatch(/\bcallProvider\b/);
+    expect(foreignImports('import { c } from "../../../verifier/src/index.js";')).toHaveLength(1);
+    expect(foreignImports('import { e } from "./deadline.js";')).toEqual([]);
+  });
+  it("uses the one deadline test, never `deadlineReached`, and no provider retry counter of its own", () => {
+    expect(src).toMatch(/\bdeadlineCheckpoint\(/);
+    expect(src).not.toMatch(/\bdeadlineReached\b/);
+    expect(src).not.toMatch(/\bnoteProviderRetry\b/);
+  });
+  it("the `policy_decision` append and the `drain()` come before the one `.execute(` (positive control)", () => {
+    expect(orderOk(raw)).toBe(true);
+    expect(orderOk('w.append("policy_decision", p); await w.drain(); r.execute(e);')).toBe(true);
+    expect(orderOk('w.append("policy_decision", p); r.execute(e); await w.drain();')).toBe(false);
+    expect(orderOk('await w.drain(); r.execute(e); w.append("policy_decision", p);')).toBe(false);
+    expect(orderOk('r.execute(e); w.append("policy_decision", p); await w.drain();')).toBe(false);
+    expect(orderOk('w.append("policy_decision", p); r.execute(e);')).toBe(false);
+    expect(orderOk('w.append("policy_decision", p); await w.drain(); r.execute(e); r.execute(e);')).toBe(false);
+    expect(orderOk('// "policy_decision"\nawait w.drain(); r.execute(e);')).toBe(false);
+  });
+  it("the runner and the comparator are called through the injected ports, once each", () => {
+    expect(src.split(".execute(").length - 1).toBe(1);
+    expect(src.split(".compare(").length - 1).toBe(1);
+    expect(src.split(".evaluateForRecord(").length - 1).toBe(1);
+    expect(src.split("experimentRuleComponent(").length - 1).toBe(1);
+  });
+  it("the only throws are the re-throws of the sanctioned error of callProvider and the fixed non-JSON guard", () => {
+    expect([...src.matchAll(/\bthrow\b/g)]).toHaveLength(3);
+    expect(src).toMatch(/throw state\.thrown/);
+    expect(src).toMatch(/throw new Error\(""\)/);
   });
 });
