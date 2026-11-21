@@ -155,15 +155,15 @@ export const EXPERIMENT_INVALID_CODES: readonly string[] = Object.freeze([
   "size_exceeded", "invalid_utf8", "invalid_json", "depth_exceeded", "duplicate_key", "unsafe_number", "undefined_field", "missing_field", "bad_type",
   "bad_value", "schema_violation", "unknown_target", "duplicate_local_key", "invalid",
 ]);
-/** `code` of an `error` record. `transport_error`: design "Runner decisions" item 5. `experiment_interrupted`: tasks.md 4.4. `address_not_allowed`: R9.16. `fatal`: item 3. */
-export const EXPERIMENT_ERROR_CODES: readonly string[] = Object.freeze(["transport_error", "experiment_interrupted", "address_not_allowed", "fatal"]);
+/** `code` of an `error` record. `transport_error`: design "Runner decisions" item 5. `experiment_interrupted`: tasks.md 4.4. `address_not_allowed`: R9.16. `fatal`: item 3. `runner_refused`: the Runner refused an Experiment that the Policy accepted (`policy_not_accepted`, `runner_not_healthy`). */
+export const EXPERIMENT_ERROR_CODES: readonly string[] = Object.freeze(["transport_error", "experiment_interrupted", "address_not_allowed", "fatal", "runner_refused"]);
 /** `phase` of an `error` record: the `phase` list of the verifier `InterruptedOutcome`, `execute` for an outcome with an Observation, `unknown` otherwise. */
 export const EXPERIMENT_ERROR_PHASES: readonly string[] = Object.freeze(["not_started", "reset", "prep", "boundary", "seq", "state", "execute", "unknown"]);
 /**
  * `cause` of an `error` record. `forced_stop`, `fatal_error`: verifier `RunStopCause`. `transport_error`: the detail of a `timed_out` outcome.
  * `address_not_allowed`: the abort reason (R9.16). `runner_internal_error`: the `not_executed` reason that carries `fatal`. `unknown`: anything else.
  */
-export const EXPERIMENT_ERROR_CAUSES: readonly string[] = Object.freeze(["forced_stop", "fatal_error", "transport_error", "address_not_allowed", "runner_internal_error", "unknown"]);
+export const EXPERIMENT_ERROR_CAUSES: readonly string[] = Object.freeze(["forced_stop", "fatal_error", "transport_error", "address_not_allowed", "runner_internal_error", "policy_not_accepted", "runner_not_healthy", "unknown"]);
 
 const INTERRUPT_CAUSES: readonly string[] = ["forced_stop", "fatal_error"];
 const COMPARISON_RESULTS: readonly string[] = ["match", "mismatch", "not_comparable"];
@@ -565,6 +565,10 @@ function attribute(status: string, o: Record<string, unknown>): Attribution {
   if (status === "not_executed" && reason === "lease_unavailable") return { raise: "lease_unavailable", stop: true };
   if (reason === "address_not_allowed" && (status === "aborted" || status === "not_executed")) {
     return { raise: "error", stop: true, errorRecord: { code: "address_not_allowed", phase: "execute", cause: "address_not_allowed" } };
+  }
+  // A Policy decision was accepted, so a Runner that refuses it breaks the contract: error, no further Experiment.
+  if (status === "not_executed" && (reason === "policy_not_accepted" || reason === "runner_not_healthy")) {
+    return { raise: "error", stop: true, errorRecord: { code: "runner_refused", phase: "execute", cause: reason } };
   }
   if (status === "aborted") return { raise: "error", stop: true }; // an abort reason that is not known
   if (status === "timed_out" && detail === "transport_error") return { stop: false, errorRecord: { code: "transport_error", phase: "execute", cause: "transport_error" } };

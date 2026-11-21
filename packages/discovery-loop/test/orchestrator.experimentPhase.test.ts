@@ -669,7 +669,7 @@ describe("outcomes: timed_out, aborted, not_executed", () => {
   });
 
   it("timed_out with another detail, and a non-fatal not_executed, go on without an error record", async () => {
-    const h = harness({ experiments: [exp("a"), exp("b"), exp("c")], runner: [timedOut("request_time_limit"), notExecuted("preparation_failed", { detail: MSG_SECRET }), notExecuted("policy_not_accepted")] });
+    const h = harness({ experiments: [exp("a"), exp("b"), exp("c")], runner: [timedOut("request_time_limit"), notExecuted("preparation_failed", { detail: MSG_SECRET }), notExecuted("timeout_before_requests")] });
     const r = await h.run();
     expect(h.runnerCalls).toHaveLength(3);
     expect(h.of("error")).toHaveLength(0);
@@ -721,6 +721,39 @@ describe("outcomes: timed_out, aborted, not_executed", () => {
     expect([r.kind, reasonOf(h), h.runnerCalls.length]).toEqual(["stopped", "error", 1]);
     expect((h.of("error")[0] as Loose).payload).toEqual({ code: "fatal", experimentId: "exp-1-1", phase: "execute", cause: "runner_internal_error" });
     expect(JSON.stringify(h.recs)).not.toContain(MSG_SECRET);
+  });
+
+  it("not_executed policy_not_accepted / runner_not_healthy after an accepted decision: error stop, records kept, no later Experiment, closed cause only", async () => {
+    for (const reason of ["policy_not_accepted", "runner_not_healthy"]) {
+      const h = harness({ experiments: [exp("a"), exp("b")], runner: [notExecuted(reason, { detail: MSG_SECRET })] });
+      const r = await h.run();
+      expect([r.kind, reasonOf(h), h.runnerCalls.length]).toEqual(["stopped", "error", 1]);
+      expect(h.of("observation")).toHaveLength(1);
+      expect((h.of("comparison")[0] as Loose).payload).toMatchObject({ result: "not_comparable", reason: "not_executed" });
+      expect((h.of("evidence")[0] as Loose).payload.outcome).toBe("inconclusive");
+      expect(h.of("error")).toHaveLength(1);
+      expect((h.of("error")[0] as Loose).payload).toEqual({ code: "runner_refused", experimentId: "exp-1-1", phase: "execute", cause: reason });
+      expect(JSON.stringify(h.of("error"))).not.toContain(MSG_SECRET);
+    }
+  });
+
+  it("runner_refused with a failed error write still stops with error and runs no later Experiment", async () => {
+    const h = harness({ experiments: [exp("a"), exp("b")], runner: [notExecuted("runner_not_healthy")], failAt: (k) => (k === "error" ? "io_failure" : undefined) });
+    const r = await h.run();
+    expect([r.kind, reasonOf(h), h.runnerCalls.length]).toEqual(["stopped", "error", 1]);
+  });
+
+  it("runner_refused does not lower a latched cause", async () => {
+    const h = harness({
+      experiments: [exp("a")],
+      runner: [(id, ctx) => {
+        ctx.session.raise("isolation_violation");
+        return notExecuted("policy_not_accepted")(id);
+      }],
+    });
+    const r = await h.run();
+    expect([r.kind, reasonOf(h)]).toEqual(["stopped", "isolation_violation"]);
+    expect(h.of("observation")).toHaveLength(1);
   });
 
   it("a comparator that does not answer not_comparable with the matching reason for a non-executed outcome is a fault", async () => {
@@ -902,9 +935,9 @@ describe("no leak and the vocabularies", () => {
   });
 
   it("pins the closed vocabularies and the exported names", () => {
-    expect([...EXPERIMENT_ERROR_CODES]).toEqual(["transport_error", "experiment_interrupted", "address_not_allowed", "fatal"]);
+    expect([...EXPERIMENT_ERROR_CODES]).toEqual(["transport_error", "experiment_interrupted", "address_not_allowed", "fatal", "runner_refused"]);
     expect([...EXPERIMENT_ERROR_PHASES]).toEqual(["not_started", "reset", "prep", "boundary", "seq", "state", "execute", "unknown"]);
-    expect([...EXPERIMENT_ERROR_CAUSES]).toEqual(["forced_stop", "fatal_error", "transport_error", "address_not_allowed", "runner_internal_error", "unknown"]);
+    expect([...EXPERIMENT_ERROR_CAUSES]).toEqual(["forced_stop", "fatal_error", "transport_error", "address_not_allowed", "runner_internal_error", "policy_not_accepted", "runner_not_healthy", "unknown"]);
     expect([...EXPERIMENT_INVALID_CODES]).toEqual([
       "size_exceeded", "invalid_utf8", "invalid_json", "depth_exceeded", "duplicate_key", "unsafe_number", "undefined_field", "missing_field", "bad_type",
       "bad_value", "schema_violation", "unknown_target", "duplicate_local_key", "invalid",
