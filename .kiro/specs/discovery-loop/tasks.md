@@ -621,7 +621,7 @@ Goal: one complete end-to-end Mock Run (Mock_Provider, no external AI service) t
     - **Property 18: Every Run terminates within bounds with exactly one reason**
     - Use a scripted provider and a fake clock.
     - **Validates: Requirements 2.10, 3.8, 3.9, 4.9, 8.10, 8.11, 11.7, 11.8, 11.9, 11.10, 11.11, 11.12, 11.13, 11.14, 11.15, 11.16, 11.17, 11.18**
-  - [ ] 4.6 Assemble the Run_Manifest content
+  - [-] 4.6 Assemble the Run_Manifest content
     - Decided 2026-11-12 (OD-17): the Run_Manifest `config` holds `policyConfigSha256` and `preparationTableSha256`, computed with `policyConfigSha256` and `preparationTableSha256` of `packages/verifier` from the objects the Runner works with. `config` is a free object, so the M1 schema is unchanged.
     - Configuration and limits, provider identity and version, Node.js, package manager, and dependency versions, Source_Bundle paths and hashes, Legacy_App starting-state identity, excluded fields, environment variable names with set or unset only, `payload_audit` and `ground_truth_access_denial` as separate fields, the `finalHypothesisRevision`, AI_Sandbox safety status `UNVERIFIED` until a verification record exists, residual-risk statuses, and the Launcher lock and lease facts, including the single-host, single-logon-session scope of the mutual exclusion (residual risk `unresolved`). The operator attestation of R24.2 is used only for a Run started without the Launcher and is labeled as an attestation.
     - The Run_Manifest records the credential variable names with set or unset flags from `checkProviderCredentials` (hand-over item 10) and states the effective limits and whether any configured value was above a fixed schema bound (hand-over item 8, decided on 2026-11-16).
