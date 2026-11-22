@@ -134,14 +134,22 @@ export function prepareAuditFrom(input: PrepareAuditInput, opts: PrepareOptions)
 const defaultFixture = (kind: RequestKind): string => dec((DEFAULT_MOCK_FIXTURES.find((f) => f.requestKind === kind) as MockFixture).response);
 
 /** The default fixtures plus a TEST-ONLY `hypothesis_revision`: the default claim `clm-0001` revised once more, with its own text. */
-export function testFixtures(o: { secretInGeneration?: boolean } = {}): MockFixture[] {
+export function testFixtures(o: { secretInGeneration?: boolean; padGenerationToBytes?: number } = {}): MockFixture[] {
   const generation = JSON.parse(defaultFixture("hypothesis_generation")) as Any;
   if (o.secretInGeneration === true) generation.claims[0].openQuestions = [`question with ${SECRET_TEXT} inside`];
   const revision = JSON.parse(defaultFixture("hypothesis_revision")) as Any;
   revision.claims[0].effect.description = "The response status is 200 for a request that only reads data (test-only revision).";
   revision.claims[0].openQuestions = ["Is the revision stable?"];
+  let generationBytes = enc(JSON.stringify(generation));
+  if (o.padGenerationToBytes !== undefined) {
+    // valid JSON whitespace after the value: the response stays valid and the schema validator sees the same document
+    if (generationBytes.byteLength > o.padGenerationToBytes) throw new Error("the generation response is larger than the requested size");
+    const padded = new Uint8Array(o.padGenerationToBytes).fill(0x20);
+    padded.set(generationBytes);
+    generationBytes = padded;
+  }
   return [
-    { requestKind: "hypothesis_generation", response: enc(JSON.stringify(generation)) },
+    { requestKind: "hypothesis_generation", response: generationBytes },
     ...DEFAULT_MOCK_FIXTURES.filter((f) => f.requestKind === "experiment_generation"),
     { requestKind: "hypothesis_revision", response: enc(JSON.stringify(revision)) },
   ];
@@ -165,6 +173,12 @@ export interface WorldOptions {
   /** Called inside `complete` of the provider, before the answer (receives the 1-based call number). */
   readonly onProviderCall?: (n: number, w: World) => void;
   readonly healthFails?: boolean;
+  /** Run limits of the ticket (for example `responseBytes`); merged over `iterations`. */
+  readonly limits?: Record<string, number>;
+  /** Test-only: the first Mock_Provider response (hypothesis_generation) is padded with JSON whitespace to exactly this many bytes. */
+  readonly padGenerationToBytes?: number;
+  /** Test-only: the text of the one allowlisted source file (synthetic data only). */
+  readonly sourceText?: string;
 }
 
 export interface TimerEntry {
@@ -235,10 +249,10 @@ export async function buildWorld(o: WorldOptions = {}): Promise<World> {
   time.t = 1_000;
   const lease = new FakeLease();
   const http = new FakeHttp(time, lease);
-  const approval = await issueTicket({ iterations: o.iterations ?? 2 }, lease);
+  const approval = await issueTicket({ iterations: o.iterations ?? 2, ...(o.limits ?? {}) }, lease);
 
   // analysis file system: one allowlisted file, the two allowlist documents
-  const repo = makeRepo([SOURCE_PATH], { texts: { [SOURCE_PATH]: SOURCE_TEXT } });
+  const repo = makeRepo([SOURCE_PATH], { texts: { [SOURCE_PATH]: o.sourceText ?? SOURCE_TEXT } });
   if (o.denyRead === true) repo.entries.set(`${REPO_ROOT}/${SOURCE_PATH}`, { kind: "file", bytes: enc(SOURCE_TEXT), unreadable: true });
   if (o.missingAllowlist === true) repo.entries.delete(`${REPO_ROOT}/docs/ai-input-allowlist.json`);
 
@@ -270,7 +284,12 @@ export async function buildWorld(o: WorldOptions = {}): Promise<World> {
 
   // provider: the real Mock_Provider behind the real wrapper, with a spy on what reaches it
   const providerCalls: ProviderCall[] = [];
-  const inner = new MockProvider(testFixtures(o.secretInGeneration === true ? { secretInGeneration: true } : {}));
+  const inner = new MockProvider(
+    testFixtures({
+      ...(o.secretInGeneration === true ? { secretInGeneration: true } : {}),
+      ...(o.padGenerationToBytes === undefined ? {} : { padGenerationToBytes: o.padGenerationToBytes }),
+    }),
+  );
   // eslint-disable-next-line prefer-const
   let world: World;
   let callNumber = 0;
@@ -395,7 +414,7 @@ export async function buildWorld(o: WorldOptions = {}): Promise<World> {
     providerCalls,
     appended,
     analysisFs: repo,
-    bundleFiles: [{ path: SOURCE_PATH, text: SOURCE_TEXT }],
+    bundleFiles: [{ path: SOURCE_PATH, text: o.sourceText ?? SOURCE_TEXT }],
     deps,
     extras,
     armStoreFailure: () => {

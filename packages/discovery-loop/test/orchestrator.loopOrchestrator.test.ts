@@ -4,9 +4,11 @@
 // unless a test replaces it for one call.
 // **Validates: Requirements 2.12, 11.15, 12.13, 12.14, 15.6, 19.7**
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryFileSystem, RunRecordStore, type FileSystemPort } from "../src/index.js";
+import { MANIFEST_FILE, MemoryFileSystem, RunRecordStore, type FileSystemPort } from "../src/index.js";
 import { EvidenceStore } from "../src/model/evidenceStore.js";
 import { runIterations } from "../src/orchestrator/iteration.js";
+import { WRITER_ERROR_CODES, type WriterErrorCode } from "../src/orchestrator/recordWriter.js";
+import { createTerminator } from "../src/orchestrator/terminate.js";
 import { createLoopOrchestrator, type LoopExtras } from "../src/orchestrator/loopOrchestrator.js";
 import type { LoopDeps, RunResult } from "../src/orchestrator/types.js";
 import { manifestInput } from "./helpers/runFixtures.js";
@@ -18,9 +20,19 @@ vi.mock("../src/orchestrator/iteration.js", async (importOriginal) => {
 });
 const spy = vi.mocked(runIterations);
 
+// A spy on the Terminator: the real function runs; the parity test counts the calls (managed refusals go through terminate(), unmanaged ones do not).
+vi.mock("../src/orchestrator/terminate.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/orchestrator/terminate.js")>();
+  return { ...actual, createTerminator: vi.fn(actual.createTerminator) };
+});
+const terminatorSpy = vi.mocked(createTerminator);
+
 // A refusal the writer does not count (admission closed, a thrown or rejected append) cannot be produced by the real store: this wrapper makes the
 // public writer answer it for the `error` record only. Everything else is the real RecordWriter.
-const writerFault: { mode?: "admission_closed" | "closed_after_termination" | "termination_reserved" | "rejects" | "throws" } = {};
+// `mode` is any writer answer code (also an unknown one), "rejects", "throws", or:
+//   "real"        the REAL writer answers (the store of the harness fails the write); the answer code is recorded in `seen`;
+//   "writer_down" the REAL writer is taken down by a first (failing) write, and answers `writer_down` to the second one.
+const writerFault: { mode?: string; seen: string[] } = { seen: [] };
 vi.mock("../src/orchestrator/recordWriter.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/orchestrator/recordWriter.js")>();
   return {
@@ -32,7 +44,13 @@ vi.mock("../src/orchestrator/recordWriter.js", async (importOriginal) => {
         if (kind !== "error" || m === undefined) return parts.writer.append(kind, payload, component);
         if (m === "rejects") return Promise.reject(new Error("PATH_TEXT_/secret/dir"));
         if (m === "throws") throw new Error("PATH_TEXT_/secret/dir");
-        return Promise.resolve({ ok: false as const, error: { code: m } });
+        const note = <R extends { ok: boolean; error?: { code: string } }>(res: R): R => {
+          writerFault.seen.push(res.ok ? "ok" : String(res.error?.code));
+          return res;
+        };
+        if (m === "real") return parts.writer.append(kind, payload, component).then(note);
+        if (m === "writer_down") return parts.writer.append(kind, payload, component).then(() => parts.writer.append(kind, payload, component)).then(note);
+        return Promise.resolve({ ok: false as const, error: { code: m as never } });
       };
       return { ...parts, writer: { ...parts.writer, append } };
     },
@@ -67,6 +85,8 @@ interface Opts {
   readonly holdErrorAppend?: Promise<void>;
   /** The store answers `io_failure` for the `error` record. */
   readonly failErrorAppend?: boolean;
+  /** The store answers this kind for the `error` record (the writer goes down; nothing is written). */
+  readonly failErrorAppendKind?: "io_failure" | "store_failed";
   /** The store refuses the `error` record with this kind (nothing is written; the store stays healthy). */
   readonly refuseErrorAppend?: "invalid_record" | "secret_rejected";
 }
@@ -137,6 +157,7 @@ async function harness(o: Opts = {}) {
           log.push(`append:${kind}`);
           if (kind === "error" && o.holdErrorAppend !== undefined) await o.holdErrorAppend;
           if (kind === "error" && o.failErrorAppend === true) return { ok: false, error: { kind: "io_failure", message: "injected" } };
+          if (kind === "error" && o.failErrorAppendKind !== undefined) return { ok: false, error: { kind: o.failErrorAppendKind, message: "injected" } };
           if (kind === "error" && o.refuseErrorAppend !== undefined) return { ok: false, error: { kind: o.refuseErrorAppend, message: "injected" } };
           const res = await real(kind as never, payload, options);
           log.push(`append:${kind}:end`);
@@ -185,6 +206,8 @@ const at = (log: string[], label: string): number => {
 
 beforeEach(() => {
   spy.mockClear();
+  terminatorSpy.mockClear();
+  writerFault.seen = [];
 });
 
 describe("the order of a Run", () => {
@@ -415,5 +438,91 @@ describe("what the Manifest core is made of", () => {
     expect(spy).not.toHaveBeenCalled();
     expect(h.store()?.list().some((x) => x.kind === "source_bundle_manifest")).toBe(false);
     expect(r).toMatchObject({ sealed: false, failure: "manifest_build_failed", terminationReason: "error" }); // the scripted manifest port needs the bundle
+  });
+});
+
+// Parity of the module-private MANAGED_WRITE_REFUSALS with the writer's closed codes, tested through behavior. Managed = the refusal takes the writer down or is
+// counted by the writer, so terminate() refuses a normal seal; unmanaged = the Run ends unsealed WITHOUT terminate(). The table must cover exactly
+// WRITER_ERROR_CODES: a new code fails the first test until it is classified here (and the code in loopOrchestrator.ts is checked against it).
+describe("parity of the managed write refusals with WRITER_ERROR_CODES (violation record refused)", () => {
+  type Kind = "managed" | "unmanaged";
+  const CLASSIFICATION: Readonly<Record<WriterErrorCode, Kind>> = {
+    invalid_record: "managed",
+    secret_rejected: "managed",
+    io_failure: "managed",
+    store_failed: "managed",
+    writer_down: "managed",
+    duplicate_termination: "unmanaged",
+    closed_after_termination: "unmanaged",
+    termination_missing: "unmanaged",
+    already_sealed: "unmanaged",
+    evidence_rejected: "unmanaged",
+    admission_closed: "unmanaged",
+    termination_reserved: "unmanaged",
+  };
+  /** How a managed code is produced by the REAL writer, and the unsealed result that terminate() then gives (the U2 results of the existing tests). */
+  const MANAGED: Readonly<Record<string, { opts: Partial<Opts>; mode: string; failure: string }>> = {
+    io_failure: { opts: { failErrorAppend: true }, mode: "real", failure: "store_failed" },
+    store_failed: { opts: { failErrorAppendKind: "store_failed" }, mode: "real", failure: "store_failed" },
+    writer_down: { opts: { failErrorAppend: true }, mode: "writer_down", failure: "store_failed" },
+    invalid_record: { opts: { refuseErrorAppend: "invalid_record" }, mode: "real", failure: "internal_error" },
+    secret_rejected: { opts: { refuseErrorAppend: "secret_rejected" }, mode: "real", failure: "secret_rejected" },
+  };
+  const denied = (): Any => ({
+    readFile: async () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); },
+    lstat: async () => ({ kind: "file", nlink: 1 }),
+  });
+  const readingBuild = async (fs: Any): Promise<unknown> => {
+    try {
+      await fs.readFile("legacy/src/a.php");
+    } catch {
+      // the denial is reported by the wrapper; the bundler goes on
+    }
+    return { ok: true, value: BUNDLE };
+  };
+
+  it("the table covers exactly the closed codes of the writer (and the managed table exactly its managed entries)", () => {
+    expect(Object.keys(CLASSIFICATION).sort()).toEqual([...WRITER_ERROR_CODES].sort());
+    expect(Object.keys(MANAGED).sort()).toEqual(WRITER_ERROR_CODES.filter((c) => CLASSIFICATION[c] === "managed").sort());
+  });
+
+  it.each([...WRITER_ERROR_CODES])("%s", async (code) => {
+    const kind = CLASSIFICATION[code];
+    const plan = MANAGED[code];
+    writerFault.mode = kind === "managed" ? plan?.mode : code;
+    try {
+      const h = await harness({ rawFs: denied(), build: readingBuild, ...(plan?.opts ?? {}) });
+      const r = await h.run();
+      expect(r.sealed, code).toBe(false); // never sealed, whatever the code
+      expect(h.log).not.toContain("append:termination");
+      expect(h.cores).toHaveLength(0); // no Manifest was built
+      expect(h.mem.allFiles().some((f) => f.endsWith(MANIFEST_FILE))).toBe(false);
+      expect(spy).not.toHaveBeenCalled();
+      if (kind === "managed") {
+        expect(writerFault.seen.at(-1), "the real writer answered the code under test").toBe(code);
+        expect(terminatorSpy, code).toHaveBeenCalledTimes(1); // handled by terminate()
+        expect(r).toMatchObject({ sealed: false, started: true, terminationReason: "isolation_violation", failure: plan?.failure });
+      } else {
+        expect(terminatorSpy, code).not.toHaveBeenCalled(); // no terminate()
+        expect(r).toEqual({ sealed: false, started: true, terminationReason: "isolation_violation", failure: "internal_error" });
+      }
+    } finally {
+      writerFault.mode = undefined;
+    }
+  });
+
+  it("an UNKNOWN code falls to unmanaged (fail-safe): unsealed internal_error without terminate()", async () => {
+    writerFault.mode = "not_a_known_code";
+    try {
+      expect((WRITER_ERROR_CODES as readonly string[]).includes("not_a_known_code")).toBe(false);
+      const h = await harness({ rawFs: denied(), build: readingBuild });
+      const r = await h.run();
+      expect(r).toEqual({ sealed: false, started: true, terminationReason: "isolation_violation", failure: "internal_error" });
+      expect(terminatorSpy).not.toHaveBeenCalled();
+      expect(h.log).not.toContain("append:termination");
+      expect(h.cores).toHaveLength(0);
+    } finally {
+      writerFault.mode = undefined;
+    }
   });
 });

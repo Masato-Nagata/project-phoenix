@@ -250,3 +250,68 @@ describe("unsealed Runs (each with a passing control)", () => {
     expect(manifestOf(x.w).terminationReason).toBe("error");
   });
 });
+
+describe("G1: the effective response limit (limits.responseBytes) reaches the real response gate", () => {
+  const SIZE = 300_000;
+  const DEFAULT_LIMIT = 262_144;
+  const MAX_LIMIT = 1_048_576;
+
+  it("with responseBytes = 1048576 a valid response of 300000 bytes is ACCEPTED (real gate, real schema validator)", async () => {
+    const { w, r } = await execute({ limits: { responseBytes: MAX_LIMIT }, padGenerationToBytes: SIZE });
+    expect(w.extras.responseLimits.hypothesisGeneration.maxResponseBytes).toBe(MAX_LIMIT); // built by the real resolveResponseLimits
+    const calls = payloadsOf(w, "ai_call");
+    expect(calls[0]).toMatchObject({ requestKind: "hypothesis_generation", outcome: "response", responseBytes: SIZE });
+    expect(payloadsOf(w, "ai_rejected")).toHaveLength(0);
+    expect(w.providerCalls).toHaveLength(4); // the Run went on to its normal end
+    expect(r.sealed).toBe(true);
+    if (r.sealed) expect(r.summary.terminationReason).toBe("iteration_limit_reached");
+  });
+
+  it("the SAME bytes with the default limit (262144) are rejected by the same gate path: size_exceeded, a failed call, then provider_failure", async () => {
+    const { w, r } = await execute({ padGenerationToBytes: SIZE });
+    expect(w.extras.responseLimits.hypothesisGeneration.maxResponseBytes).toBe(DEFAULT_LIMIT);
+    const rejected = payloadsOf(w, "ai_rejected");
+    expect(rejected.length).toBeGreaterThanOrEqual(1);
+    for (const x of rejected) {
+      expect(x).toMatchObject({ requestKind: "hypothesis_generation", reason: "unparseable", source: "gate" });
+      expect(x.gate.reason).toBe("size_exceeded");
+      expect(x.gate.limit).toEqual({ name: "maxResponseBytes", limit: DEFAULT_LIMIT, observed: SIZE });
+      expect(x.gate.byteLength).toBe(SIZE);
+    }
+    // the response itself was received and recorded (ai_call), and was not accepted: no hypothesis was produced
+    expect(payloadsOf(w, "ai_call")[0]).toMatchObject({ outcome: "response", responseBytes: SIZE });
+    expect(kindsOf(w)).not.toContain("hypothesis_revision");
+    expect(w.providerCalls.every((c) => c.kind === "hypothesis_generation")).toBe(true);
+    expect(r.sealed).toBe(true);
+    if (r.sealed) expect(r.summary.terminationReason).toBe("provider_failure");
+  });
+});
+
+describe("G2: a payload over 4 MiB is blocked by the real Payload_Auditor (A02 size_exceeded)", () => {
+  const FOUR_MIB = 4 * 1024 * 1024;
+  it("blocks the Run before any provider call; the control with a normal payload is audited `pass` and calls the provider once", async () => {
+    // control: the same world with the normal source text
+    const { w: ok } = await happy();
+    const first = payloadsOf(ok, "payload_audit")[0];
+    expect(first.result).toBe("pass");
+    expect(ok.providerCalls.filter((c) => c.kind === "hypothesis_generation")).toHaveLength(1);
+
+    const sourceText = `<?php\n// synthetic large content\n${"x".repeat(FOUR_MIB + 1)}\n`;
+    const { w, r } = await execute({ sourceText });
+    expect(w.prepared).toHaveLength(1);
+    expect((w.prepared[0] as Any).bytes.byteLength).toBeGreaterThan(FOUR_MIB);
+    const audits = payloadsOf(w, "payload_audit");
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ requestKind: "hypothesis_generation", attempt: 1, result: "blocked" });
+    const a02 = audits[0].checks.find((c: Any) => c.id === "A02");
+    expect(a02).toMatchObject({ outcome: "fail", detail: "size_exceeded" });
+    expect(w.providerCalls).toHaveLength(0);
+    expect(kindsOf(w)).not.toContain("ai_call");
+    expect(kindsOf(w)).not.toContain("ai_rejected"); // no retry: a blocked audit is not a failed call
+    // U2 contract: payload_audit_blocked and no write failure -> a sealed Run with that termination reason
+    expect(r.sealed).toBe(true);
+    if (!r.sealed) return;
+    expect(r.summary.terminationReason).toBe("payload_audit_blocked");
+    expect(manifestOf(w).payload_audit).toMatchObject({ audits: 1, passed: 0, blocked: 1 });
+  });
+});
