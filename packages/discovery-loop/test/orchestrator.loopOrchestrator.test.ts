@@ -364,7 +364,7 @@ describe("the observer of the Source_Bundler reads", () => {
         expect(r).toEqual({ sealed: false, started: true, terminationReason: "isolation_violation", failure: "internal_error" });
         expect(h.log).not.toContain("append:termination");
         expect(h.store()?.list().some((x) => x.kind === "error")).toBe(false);
-        expect(h.timerEntries.every((t) => t.cancelled >= 1)).toBe(true);
+        expect(h.timerEntries.map((t) => t.cancelled)).toEqual([1]); // the unmanaged end cancels the one deadline timer exactly once
         expect(spy).not.toHaveBeenCalled();
         const text = JSON.stringify(r);
         for (const leak of [AUDIT_CANARY, "PATH_TEXT", "secret/dir"]) expect(text).not.toContain(leak);
@@ -438,6 +438,7 @@ describe("what the Manifest core is made of", () => {
     expect(spy).not.toHaveBeenCalled();
     expect(h.store()?.list().some((x) => x.kind === "source_bundle_manifest")).toBe(false);
     expect(r).toMatchObject({ sealed: false, failure: "manifest_build_failed", terminationReason: "error" }); // the scripted manifest port needs the bundle
+    expect(h.timerEntries.map((t) => t.cancelled)).toEqual([1]); // the manifest_build_failed end cancels the deadline timer exactly once
   });
 });
 

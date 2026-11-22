@@ -55,6 +55,7 @@ describe("(a) the import boundary", () => {
   const ALLOWED: readonly RegExp[] = [
     /^\.\/(?:consume|deadline|envAllowlist|experimentPhase|hypothesisPhase|ids|iteration|leaseBoundary|loopOrchestrator|observeReads|providerCall|recordWriter|session|startGate|startRun|terminate|terminationLatch|types)\.js$/,
     /^\.\.\/gate\/mayStartRun\.js$/,
+    /^\.\.\/manifest\/envSection\.js$/, // the pure `envVarsRead` section builder (task 4.6 W2); imported by loopOrchestrator.ts only (checked in manifest.envSection.test.ts)
     /^\.\.\/model\/evidenceStore\.js$/, // the EvidenceStore class (type), CITATION_VERIFIER (hypothesisPhase.ts only) and experimentRuleComponent (experimentPhase.ts only); checked in its own test below
     /^\.\.\/isolation\/(?:index|types)\.js$/,
     /^\.\.\/config\/(?:startup|runConfig)\.js$/,
@@ -569,8 +570,10 @@ describe("loopOrchestrator.ts (task 4.4, unit U7)", () => {
   /** Positions of the fixed steps in the source text with strings blanked and comments removed. */
   /**
    * `cancelDeadlineTimer()` is called twice by design: once on the unmanaged-write-failure path (which returns the unsealed result
-   * without terminating) and once directly before `createTerminator`. Both must come after `runIterations({`; the last one must come
-   * before `createTerminator({`. Every other step occurs exactly once.
+   * without terminating) and once after the Manifest base is built, before the check of the base and before `createTerminator`, so that
+   * the unsealed return for a base that could not be built is covered too. Both must come after `runIterations({`; the last one must
+   * come before `createTerminator({`. Every other step occurs exactly once. This is the ORDER contract only: that every exit of a started
+   * Run really cancels its timer is a runtime contract (orchestrator.envSection.test.ts, orchestrator.loopOrchestrator.test.ts).
    */
   const STEPS: readonly { token: string; count: number; at: "first" | "last" }[] = [
     { token: "startGate(loopDeps", count: 1, at: "first" },

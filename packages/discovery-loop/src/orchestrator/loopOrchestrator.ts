@@ -19,6 +19,7 @@
 // validated configuration values, the lease instance for the Runner and the lease checks).
 import type { StartupApproval } from "../config/startup.js";
 import type { IsolationViolation } from "../isolation/index.js";
+import { buildEnvSection } from "../manifest/envSection.js";
 import { EvidenceStore } from "../model/evidenceStore.js";
 import type { Json } from "../schema/types.js";
 import type { SemanticSha256Of } from "./hypothesisPhase.js";
@@ -30,7 +31,7 @@ import type { RunSession } from "./session.js";
 import { startGate } from "./startGate.js";
 import { startRun, type PhaseRun } from "./startRun.js";
 import { createTerminator, type TerminationBase } from "./terminate.js";
-import type { LoopDeps, ManifestEnvVarRead, ManifestPayloadAudit, RunResult, StartGateRefusal, UnsealedFailure } from "./types.js";
+import type { LoopDeps, ManifestPayloadAudit, RunResult, StartGateRefusal, UnsealedFailure } from "./types.js";
 
 /** What the composition root adds to `LoopDeps` (which keeps its seventeen keys). */
 export interface LoopExtras {
@@ -167,17 +168,31 @@ export function createLoopOrchestrator<TLease, TAudit, TPolicy, TTable, TRequest
       return worst;
     };
 
-    // 4. and 5.
+    // 3b. The one merge of the variable names and set flags (R19.3), made BEFORE anything is read, built or sent. The two lists come from one ticket;
+    //     a name in a different state in the two, or an unset credential, is a contradiction that is known now: the cause `error` is latched, no
+    //     Source_Bundle is built, no phase runs and no provider is called. The result is kept for the Manifest input at the end (never merged twice).
+    let envVarsRead: { name: string; set: boolean }[] | undefined;
+    try {
+      const merged = buildEnvSection(startup.envVarsRead, startup.credentials);
+      if (merged.ok) envVarsRead = merged.value;
+    } catch {
+      envVarsRead = undefined;
+    }
+    if (envVarsRead === undefined) raiseError(session);
+
+    // 4. and 5. (only when the section is consistent)
     let bundle: unknown;
     let bundleFiles: { path: string; sha256Lf: string }[] | undefined;
-    try {
-      const built = await loopDeps.analysis.buildSourceBundle(wrappedFs, loopDeps.repoRoot);
-      if (isObj(built) && built.ok === true) {
-        bundle = built.value;
-        bundleFiles = manifestFilesOf(bundle);
+    if (envVarsRead !== undefined) {
+      try {
+        const built = await loopDeps.analysis.buildSourceBundle(wrappedFs, loopDeps.repoRoot);
+        if (isObj(built) && built.ok === true) {
+          bundle = built.value;
+          bundleFiles = manifestFilesOf(bundle);
+        }
+      } catch {
+        bundleFiles = undefined;
       }
-    } catch {
-      bundleFiles = undefined;
     }
     let bundleReady = false;
     if (bundleFiles === undefined) {
@@ -277,8 +292,6 @@ export function createLoopOrchestrator<TLease, TAudit, TPolicy, TTable, TRequest
       if (counts === undefined) raiseError(session);
       const identity: unknown = loopDeps.provider.identity;
       const named = (k: "id" | "version" | "model"): string => (isObj(identity) && isStr(identity[k]) ? (identity[k] as string) : "unknown");
-      const envVars: ManifestEnvVarRead[] = startup.envVarsRead.map((e) => ({ name: e.name, set: e.set }));
-      for (const c of startup.credentials) if (!envVars.some((e) => e.name === c.name)) envVars.push({ name: c.name, set: c.set });
       const payloadAudit: ManifestPayloadAudit = {
         configCheck: startup.payloadAuditConfig,
         audits: counts?.audits ?? 0,
@@ -286,10 +299,10 @@ export function createLoopOrchestrator<TLease, TAudit, TPolicy, TTable, TRequest
         blocked: counts?.blocked ?? 0,
         auditConfigSha256: startup.auditConfig.sha256,
       };
-      base = {
+      base = envVarsRead === undefined ? undefined : {
         finalHypothesisRevision: loop?.finalHypothesisRevision ?? NO_REVISION,
         provider: { id: named("id"), version: named("version"), model: named("model"), isMock: startup.config.provider === "mock" },
-        envVarsRead: envVars,
+        envVarsRead,
         payloadAudit,
         accessDenial: gate.value.accessDenial,
         configHashes: { policyConfigSha256: startup.policy.policySha256, preparationTableSha256: startup.policy.preparationTableSha256 },
@@ -304,14 +317,21 @@ export function createLoopOrchestrator<TLease, TAudit, TPolicy, TTable, TRequest
     } catch {
       raiseError(session);
     }
-    if (base === undefined) return unsealed("internal_error", true);
 
-    // 8. and 9.
+    // 8. The deadline timer is cancelled on every exit of a started Run that comes here: the unsealed return below and the termination.
     try {
       run.cancelDeadlineTimer();
     } catch {
       // cancel never throws
     }
+    // No Manifest input could be built (the names and flags contradict each other, or a defect): nothing is terminated or sealed, and the
+    // latched cause is reported.
+    if (base === undefined) {
+      const st = session.terminationStatus();
+      return Object.freeze({ sealed: false as const, started: true, ...(st.state === "none" ? {} : { terminationReason: st.reason }), failure: "internal_error" as const });
+    }
+
+    // 9.
     return createTerminator({
       session,
       channel: begun.terminationChannel,
