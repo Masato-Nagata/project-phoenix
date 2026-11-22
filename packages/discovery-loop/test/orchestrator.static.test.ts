@@ -14,6 +14,7 @@ import * as experimentPhaseModule from "../src/orchestrator/experimentPhase.js";
 import * as hypothesisPhaseModule from "../src/orchestrator/hypothesisPhase.js";
 import * as idsModule from "../src/orchestrator/ids.js";
 import * as leaseBoundaryModule from "../src/orchestrator/leaseBoundary.js";
+import * as loopOrchestratorModule from "../src/orchestrator/loopOrchestrator.js";
 import * as providerCallModule from "../src/orchestrator/providerCall.js";
 import * as typesModule from "../src/orchestrator/types.js";
 import { LEASE_REASONS, START_GATE_REFUSAL_CODES, TERMINATION_REASONS, type LoopDeps } from "../src/orchestrator/types.js";
@@ -42,17 +43,17 @@ const files = readdirSync(ORCH).filter((f) => f.endsWith(".ts")).sort();
 const text = (f: string): string => readFileSync(join(ORCH, f), "utf8");
 
 describe("the folder", () => {
-  it("holds exactly the seventeen planned files", () => {
+  it("holds exactly the eighteen planned files (the seventeen of U0 to U6c and loopOrchestrator.ts of U7)", () => {
     expect(files).toEqual([
-      "consume.ts", "deadline.ts", "envAllowlist.ts", "experimentPhase.ts", "hypothesisPhase.ts", "ids.ts", "iteration.ts", "leaseBoundary.ts", "observeReads.ts", "providerCall.ts",
-      "recordWriter.ts", "session.ts", "startGate.ts", "startRun.ts", "terminate.ts", "terminationLatch.ts", "types.ts",
+      "consume.ts", "deadline.ts", "envAllowlist.ts", "experimentPhase.ts", "hypothesisPhase.ts", "ids.ts", "iteration.ts", "leaseBoundary.ts", "loopOrchestrator.ts", "observeReads.ts",
+      "providerCall.ts", "recordWriter.ts", "session.ts", "startGate.ts", "startRun.ts", "terminate.ts", "terminationLatch.ts", "types.ts",
     ]);
   });
 });
 
 describe("(a) the import boundary", () => {
   const ALLOWED: readonly RegExp[] = [
-    /^\.\/(?:consume|deadline|envAllowlist|experimentPhase|hypothesisPhase|ids|iteration|leaseBoundary|providerCall|recordWriter|session|startGate|startRun|terminate|terminationLatch|types)\.js$/,
+    /^\.\/(?:consume|deadline|envAllowlist|experimentPhase|hypothesisPhase|ids|iteration|leaseBoundary|loopOrchestrator|observeReads|providerCall|recordWriter|session|startGate|startRun|terminate|terminationLatch|types)\.js$/,
     /^\.\.\/gate\/mayStartRun\.js$/,
     /^\.\.\/model\/evidenceStore\.js$/, // the EvidenceStore class (type), CITATION_VERIFIER (hypothesisPhase.ts only) and experimentRuleComponent (experimentPhase.ts only); checked in its own test below
     /^\.\.\/isolation\/(?:index|types)\.js$/,
@@ -86,8 +87,8 @@ describe("(a) the import boundary", () => {
     expect(outside('import { CITATION_VERIFIER, type EvidenceStore } from "../model/evidenceStore.js";')).toEqual([]);
     expect(outside('import { a } from "./ids.js";\nimport { b } from "./leaseBoundary.js";\nimport { c } from "./hypothesisPhase.js";')).toEqual([]);
   });
-  it("the EvidenceStore is imported by hypothesisPhase.ts (CITATION_VERIFIER, EvidenceStore type) and experimentPhase.ts (experimentRuleComponent, EvidenceStore type) only (U6a, U6b)", () => {
-    const evidenceStoreViolations = (source: string, allowedValue = "CITATION_VERIFIER"): string[] => {
+  it("the EvidenceStore is imported by hypothesisPhase.ts (CITATION_VERIFIER, EvidenceStore type), experimentPhase.ts (experimentRuleComponent, EvidenceStore type) and, as a value, loopOrchestrator.ts (U7: one `new EvidenceStore()` per Run) only", () => {
+    const evidenceStoreViolations = (source: string, allowedValue = "CITATION_VERIFIER", storeValueAllowed = false): string[] => {
       const bad: string[] = [];
       for (const m of stripComments(source).matchAll(/^\s*import\s+(type\s+)?([^;]*?)\s*\bfrom\s*["']\.\.\/model\/evidenceStore\.js["']/gm)) {
         const braces = /^\{([^}]*)\}$/.exec((m[2] as string).trim());
@@ -98,14 +99,19 @@ describe("(a) the import boundary", () => {
         for (const n of (braces[1] as string).split(",").map((x) => x.trim()).filter((x) => x !== "")) {
           const name = n.replace(/^type\s+/, "");
           if (name !== allowedValue && name !== "EvidenceStore") bad.push(name);
-          else if (name === "EvidenceStore" && m[1] === undefined && !n.startsWith("type ")) bad.push("value import of EvidenceStore");
+          else if (name === "EvidenceStore" && m[1] === undefined && !n.startsWith("type ") && !storeValueAllowed) bad.push("value import of EvidenceStore");
         }
       }
       return bad;
     };
     const importers = files.filter((f) => specifiersOf(text(f)).includes("../model/evidenceStore.js"));
-    expect(importers).toEqual(["experimentPhase.ts", "hypothesisPhase.ts"]);
-    for (const f of files) expect(evidenceStoreViolations(text(f), f === "experimentPhase.ts" ? "experimentRuleComponent" : "CITATION_VERIFIER"), f).toEqual([]);
+    expect(importers).toEqual(["experimentPhase.ts", "hypothesisPhase.ts", "loopOrchestrator.ts"]);
+    for (const f of files) expect(evidenceStoreViolations(text(f), f === "experimentPhase.ts" ? "experimentRuleComponent" : "CITATION_VERIFIER", f === "loopOrchestrator.ts"), f).toEqual([]);
+    expect(text("loopOrchestrator.ts")).toMatch(/import \{ EvidenceStore \} from "\.\.\/model\/evidenceStore\.js";/);
+    // positive control: the value import of the store is a violation in every other file
+    expect(evidenceStoreViolations(text("loopOrchestrator.ts"))).toEqual(["value import of EvidenceStore"]);
+    expect(evidenceStoreViolations('import { EvidenceStore } from "../model/evidenceStore.js";', "CITATION_VERIFIER", true)).toEqual([]);
+    expect(evidenceStoreViolations('import { experimentRuleComponent } from "../model/evidenceStore.js";', "CITATION_VERIFIER", true)).toEqual(["experimentRuleComponent"]);
     expect(text("hypothesisPhase.ts")).toMatch(/import \{ CITATION_VERIFIER, type EvidenceStore \} from "\.\.\/model\/evidenceStore\.js";/);
     expect(text("experimentPhase.ts")).toMatch(/import \{ experimentRuleComponent, type EvidenceStore \} from "\.\.\/model\/evidenceStore\.js";/);
     // the value of one file is a violation in the other
@@ -324,6 +330,8 @@ describe("exported names (R6.11) and the vocabularies", () => {
       "EXPERIMENT_INVALID_CODES", "EXPERIMENT_ERROR_CODES", "EXPERIMENT_ERROR_PHASES", "EXPERIMENT_ERROR_CAUSES", "runExperimentPhase",
     ]);
     expect(Object.keys(experimentPhaseModule)).toEqual(["EXPERIMENT_INVALID_CODES", "EXPERIMENT_ERROR_CODES", "EXPERIMENT_ERROR_PHASES", "EXPERIMENT_ERROR_CAUSES", "runExperimentPhase"]);
+    expect(exportsOf(text("loopOrchestrator.ts"))).toEqual(["LoopExtras", "LoopOrchestrator", "createLoopOrchestrator"]);
+    expect(Object.keys(loopOrchestratorModule)).toEqual(["createLoopOrchestrator"]);
     expect(Object.keys(typesModule).sort()).toEqual(["LEASE_REASONS", "START_GATE_REFUSAL_CODES", "TERMINATION_REASONS", "UNSEALED_FAILURE_CODES"]);
   });
   it("the lease reasons equal those of stage B; the refusal codes and termination reasons are closed and distinct", () => {
@@ -549,5 +557,142 @@ describe("experimentPhase.ts (task 4.4, unit U6b)", () => {
     expect([...src.matchAll(/\bthrow\b/g)]).toHaveLength(3);
     expect(src).toMatch(/throw state\.thrown/);
     expect(src).toMatch(/throw new Error\(""\)/);
+  });
+});
+
+describe("loopOrchestrator.ts (task 4.4, unit U7)", () => {
+  const raw = text("loopOrchestrator.ts");
+  const src = code(raw);
+  const FOREIGN_PACKAGE = /ai-client|analyzer|verifier|@phoenix/;
+  const foreignImports = (source: string): string[] => specifiersOf(source).filter((s) => FOREIGN_PACKAGE.test(s) || /^node:/.test(s));
+  const once = (s: string, token: string): number => s.split(token).length - 1;
+  /** Positions of the fixed steps in the source text with strings blanked and comments removed. */
+  /**
+   * `cancelDeadlineTimer()` is called twice by design: once on the unmanaged-write-failure path (which returns the unsealed result
+   * without terminating) and once directly before `createTerminator`. Both must come after `runIterations({`; the last one must come
+   * before `createTerminator({`. Every other step occurs exactly once.
+   */
+  const STEPS: readonly { token: string; count: number; at: "first" | "last" }[] = [
+    { token: "startGate(loopDeps", count: 1, at: "first" },
+    { token: "startRun(loopDeps", count: 1, at: "first" },
+    { token: "createReadObserver(", count: 1, at: "first" },
+    { token: "observeAnalysisReads(", count: 1, at: "first" },
+    { token: "buildSourceBundle(", count: 1, at: "first" },
+    { token: "source_bundle_manifest", count: 1, at: "first" },
+    { token: "runIterations({", count: 1, at: "first" },
+    { token: "cancelDeadlineTimer()", count: 2, at: "first" },
+    { token: "cancelDeadlineTimer()", count: 2, at: "last" },
+    { token: "createTerminator({", count: 1, at: "first" },
+    { token: ".terminate()", count: 1, at: "first" },
+  ];
+  const orderOf = (source: string): number[] => {
+    const c = stripComments(source);
+    return STEPS.map((s) => (once(c, s.token) === s.count ? (s.at === "first" ? c.indexOf(s.token) : c.lastIndexOf(s.token)) : -1));
+  };
+  const orderOk = (source: string): boolean => {
+    const at = orderOf(source);
+    return at.every((x) => x >= 0) && at.every((x, i) => i === 0 || x > (at[i - 1] as number));
+  };
+  const loopDepsKeys = (source: string): string[] => [...new Set([...source.matchAll(/\bloopDeps\.(\w+)/g)].map((m) => m[1] as string))].sort();
+  /** Every use of the startup ticket that is not a field read: after the two allowed forms are removed, no bare `startup` may remain. */
+  const bareTicketUse = (source: string): string[] =>
+    [...source
+      .replace(/startGate\(loopDeps, startup\)/g, "")
+      .replace(/runChecked\(startup, progress\)/g, "")
+      .replace(/startRun\(loopDeps, startup, gate\.value\)/g, "")
+      .replace(/startup: StartupApproval<[^>]*>/g, "")
+      .matchAll(/\bstartup\b(?!\s*\.)/g)].map((m) => m[0]);
+  const raisedReasons = (source: string): string[] => [...source.matchAll(/\.raise\("(\w+)"\)/g)].map((m) => m[1] as string);
+  /** Number of occurrences of the one permitted form `terminationReason: st.reason` (the value is exactly the member access, nothing is chained to it). */
+  const permittedReasonForms = (source: string): number => [...stripComments(source).matchAll(/\bterminationReason: st\.reason(?=\s*[},)])/g)].length;
+  /**
+   * The reason is only transcribed from the latch. Over the source with comments removed and strings kept, every `terminationReason` must be the
+   * form `terminationReason: st.reason` with `const st = session.terminationStatus();`; no literal reason, no own computation, no latch or rank logic.
+   */
+  const reasonTranscriptionViolations = (source: string): string[] => {
+    const c = stripComments(source);
+    const bad: string[] = [];
+    const all = [...c.matchAll(/\bterminationReason\b/g)].length;
+    if (all !== permittedReasonForms(source)) bad.push(`terminationReason occurrences: ${all}, permitted form: ${permittedReasonForms(source)}`);
+    if (all > 0 && !/\bconst st = session\.terminationStatus\(\);/.test(c)) bad.push("st is not bound by const st = session.terminationStatus()");
+    if (/\bterminationReason\s*:\s*["'`]/.test(c)) bad.push("string literal assigned to terminationReason");
+    for (const value of TERMINATION_REASONS) {
+      const lit = `["'\`]${value}["'\`]`;
+      if (new RegExp(`\\b\\w*[rR]eason\\w*\\s*(?:[:=]|[!=]==?)\\s*${lit}`).test(c) || new RegExp(`${lit}\\s*[!=]==?\\s*\\w*[rR]eason\\b`).test(c)) bad.push(`literal reason ${value} assigned or compared`);
+    }
+    if (/\b\w*[rR]eason\w*\s*\(/.test(c)) bad.push("call computing a reason");
+    if (/\b\w*(?:priority|rank)\w*\b/i.test(c) || /\bcreateTerminationLatch\b/.test(c)) bad.push("priority/rank table or latch re-implementation");
+    return bad;
+  };
+
+  it("imports no node: module and no ai-client, analyzer, verifier or @phoenix package", () => {
+    expect(foreignImports(raw)).toEqual([]);
+    expect(foreignImports('import { c } from "../../../verifier/src/index.js";')).toHaveLength(1);
+    expect(foreignImports('import { d } from "node:crypto";')).toHaveLength(1);
+    expect(foreignImports('import { e } from "./iteration.js";')).toEqual([]);
+  });
+  it("calls the fixed steps once each, in the fixed order (positive control: a shuffled copy is reported)", () => {
+    expect(orderOk(raw)).toBe(true);
+    const swapped = raw.replace("startGate(loopDeps", "startGateX(loopDeps");
+    expect(orderOk(swapped)).toBe(false);
+    const terminateFirst = ".terminate();\n" + raw;
+    expect(orderOk(terminateFirst)).toBe(false);
+  });
+  it("builds the Source_Bundle only from the wrapped file system; the raw file system is read exactly once, as the argument of the observer wrapper", () => {
+    expect(src).toMatch(/buildSourceBundle\(wrappedFs, loopDeps\.repoRoot\)/);
+    expect(once(src, "loopDeps.analysisFs")).toBe(1);
+    expect(src).toMatch(/observeAnalysisReads\(loopDeps\.analysisFs, observer\)/);
+    expect(once(src, "buildSourceBundle(")).toBe(1);
+    // positive control
+    expect(code("loopDeps.analysis.buildSourceBundle(loopDeps.analysisFs, root)")).not.toMatch(/buildSourceBundle\(wrappedFs, loopDeps\.repoRoot\)/);
+    expect(once(code("a(loopDeps.analysisFs); b(loopDeps.analysisFs);"), "loopDeps.analysisFs")).toBe(2);
+  });
+  it("reads only the ports that the composition uses itself; the store, the file system and the isolation ports go through startGate and startRun", () => {
+    expect(loopDepsKeys(src)).toEqual(["analysis", "analysisFs", "audit", "clock", "comparator", "manifest", "policy", "provider", "repoRoot", "responseGate", "timers", "wallClock"]);
+    expect(loopDepsKeys("const a = loopDeps.storeFactory; const b = loopDeps.fs; const c = loopDeps.analysis;")).toEqual(["analysis", "fs", "storeFactory"]);
+    expect(src).not.toMatch(/\bloopDeps\s*\[/);
+  });
+  it("the termination capability goes only into createTerminator; the reason comes only from the latch", () => {
+    expect(once(src, "begun.terminationChannel")).toBe(1);
+    expect(/createTerminator\(\{[^}]*channel: begun\.terminationChannel/.test(src)).toBe(true);
+    expect(src).not.toMatch(/\bTerminationChannel\b|\bRecordWriterParts\b|\bcloseAdmission\b|\bappendTermination\b|\.seal\(|\.finalize\(/);
+    expect(reasonTranscriptionViolations(raw)).toEqual([]);
+    expect(permittedReasonForms(raw)).toBeGreaterThanOrEqual(1);
+    expect(raisedReasons(stripComments(raw)).filter((r) => r !== "error" && r !== "isolation_violation")).toEqual([]);
+    expect(raisedReasons(stripComments(raw))).toContain("isolation_violation");
+    // positive control
+    expect(raisedReasons('session.raise("time_limit_reached");')).toEqual(["time_limit_reached"]);
+    const bound = "const st = session.terminationStatus();\n";
+    expect(reasonTranscriptionViolations(bound + '{ terminationReason: "error" }')).not.toEqual([]);
+    expect(reasonTranscriptionViolations(bound + "{ terminationReason: reasonOf(x) }")).not.toEqual([]);
+    expect(reasonTranscriptionViolations(bound + '{ terminationReason: st.reason ?? "error" }')).not.toEqual([]);
+    expect(reasonTranscriptionViolations(bound + "{ terminationReason: pick(st) }")).not.toEqual([]);
+    expect(reasonTranscriptionViolations('const st = other();\n{ terminationReason: st.reason }')).not.toEqual([]);
+    expect(reasonTranscriptionViolations('if (reason === "error") {}')).not.toEqual([]);
+    expect(reasonTranscriptionViolations("const RANK = {};")).not.toEqual([]);
+    // negative control
+    expect(reasonTranscriptionViolations(bound + '...(st.state === "none" ? {} : { terminationReason: st.reason })')).toEqual([]);
+    expect(reasonTranscriptionViolations('session.raise("error");')).toEqual([]);
+    expect(once(code("f(begun.terminationChannel); g(begun.terminationChannel);"), "begun.terminationChannel")).toBe(2);
+  });
+  it("the startup ticket is never used as a whole: no serializer, no logger, no bare use", () => {
+    expect(bareTicketUse(src)).toEqual([]);
+    expect(src).not.toMatch(/\bJSON\b|\bconsole\b|\bstructuredClone\b|\blogger\b/);
+    // positive control
+    expect(bareTicketUse("JSON.stringify(startup);")).toEqual(["startup"]);
+    expect(bareTicketUse("const x = startup;")).toEqual(["startup"]);
+    expect(bareTicketUse("g(startup.config);")).toEqual([]);
+    expect(bareTicketUse("startGate(loopDeps, startup);")).toEqual([]);
+    expect(code("JSON.stringify(startup)")).toMatch(/\bJSON\b/);
+  });
+  it("run never throws: the entry point catches everything into the closed code internal_error", () => {
+    const withStrings = stripComments(raw); // string literals kept (code() blanks them)
+    expect(withStrings).toMatch(/return unsealed\("internal_error", progress\.started\)/);
+    expect(withStrings).toMatch(/async run\(startup: StartupApproval<TPolicy, TTable, TAudit, TLease>\): Promise<RunResult> \{\s*const progress = \{ started: false \};\s*try \{/);
+    expect(src).not.toMatch(/\bdeadlineReached\b|\bnoteProviderRetry\b/);
+  });
+  it("the one Evidence_Store of the Run and the one id counter set are made inside run, once", () => {
+    expect(once(src, "new EvidenceStore()")).toBe(1);
+    expect(once(src, "createIdCounters()")).toBe(1);
   });
 });
