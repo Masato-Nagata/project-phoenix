@@ -171,7 +171,7 @@ describe("names and flags only: no value in any result", () => {
     const code = text.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
     expect(code).not.toMatch(/\bprocess\b|\bDate\b|\bperformance\b|Math\.random|\brequire\s*\(|\beval\b|\bFunction\b|\bimport\s*\(|node:|\bJSON\b|console/);
     const specifiers = [...code.matchAll(/from\s*["']([^"']+)["']/g)].map((m) => m[1]);
-    expect(specifiers).toEqual(["../schema/types.js"]);
+    expect(specifiers).toEqual(["../schema/types.js", "./plainData.js"]); // the shared helper module of W3-A
   });
 });
 

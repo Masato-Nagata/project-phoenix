@@ -9,6 +9,7 @@
 // Decision D2: a missing, empty or invalid file list is REFUSED. Nothing is filled in or defaulted, and the error
 // carries a closed code and a position only, never an input value.
 import type { Result } from "../schema/types.js";
+import { dataValue, isPlainDataObject } from "./plainData.js";
 
 export const SOURCE_BUNDLE_SCHEMA_VERSION = 1 as const;
 export const SOURCE_BUNDLE_HASH_RULE = "sha256 over UTF-8 bytes after CRLF and lone CR are replaced by LF" as const;
@@ -49,26 +50,6 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
 const fail = (code: SourceBundleSectionErrorCode, index?: number): Result<never, SourceBundleSectionError> =>
   index === undefined ? { ok: false, error: { code } } : { ok: false, error: { code, index } };
-
-/** Own data property value of a plain object, or `undefined` when absent or an accessor. */
-function dataValue(o: object, key: string): { present: boolean; value?: unknown } {
-  const d = Object.getOwnPropertyDescriptor(o, key);
-  if (d === undefined || !("value" in d)) return { present: false };
-  return { present: true, value: d.value };
-}
-
-/** A plain object with only own enumerable string-keyed data properties (no accessor, no symbol key). */
-function isPlainDataObject(v: unknown): v is object {
-  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
-  const proto = Object.getPrototypeOf(v);
-  if (proto !== Object.prototype && proto !== null) return false;
-  for (const key of Reflect.ownKeys(v)) {
-    if (typeof key !== "string") return false;
-    const d = Object.getOwnPropertyDescriptor(v, key);
-    if (d === undefined || !("value" in d) || d.enumerable !== true) return false;
-  }
-  return true;
-}
 
 /**
  * Builds the `sourceBundle` section from the validated Source_Bundle file list (allowlist order is kept).

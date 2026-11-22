@@ -13,6 +13,7 @@
 //   5. an error carries a closed code, the list and the position, never a variable name or a value.
 // The input is never mutated and never aliased: the result holds fresh objects.
 import type { Result } from "../schema/types.js";
+import { dataValue, isPlainDataObject } from "./plainData.js";
 
 /** Same grammar as `ENV_NAME_PATTERN` of `config/limits.ts` and `ENV_NAME` of `config/startup.ts` (a test pins the equality). */
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
@@ -43,23 +44,6 @@ export interface EnvSectionError {
 const fail = (code: EnvSectionErrorCode, list: EnvSectionList, index?: number): Result<never, EnvSectionError> =>
   index === undefined ? { ok: false, error: { code, list } } : { ok: false, error: { code, list, index } };
 
-/** A plain object with only own enumerable string-keyed data properties (no accessor, no symbol key). */
-function isPlainDataObject(v: unknown): v is object {
-  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
-  const proto = Object.getPrototypeOf(v);
-  if (proto !== Object.prototype && proto !== null) return false;
-  for (const key of Reflect.ownKeys(v)) {
-    if (typeof key !== "string") return false;
-    const d = Object.getOwnPropertyDescriptor(v, key);
-    if (d === undefined || !("value" in d) || d.enumerable !== true) return false;
-  }
-  return true;
-}
-
-const valueOf = (o: object, key: string): unknown => {
-  const d = Object.getOwnPropertyDescriptor(o, key);
-  return d !== undefined && "value" in d ? d.value : undefined;
-};
 
 /**
  * `flags`: the names of `envNames` with their set flag. `credentials`: the credential references (names with `set: true`).
@@ -84,9 +68,9 @@ export function buildEnvSection(flags: unknown, credentials: unknown): Result<{ 
       const keys = Object.keys(entry);
       if (keys.length !== 2 || !keys.includes("name") || !keys.includes("set")) return fail("entry_keys", list, i);
 
-      const name = valueOf(entry, "name");
+      const name = dataValue(entry, "name").value;
       if (typeof name !== "string" || !ENV_NAME.test(name)) return fail("name_invalid", list, i);
-      const set = valueOf(entry, "set");
+      const set = dataValue(entry, "set").value;
       if (typeof set !== "boolean") return fail("set_not_boolean", list, i);
       if (list === "credentials" && set !== true) return fail("credential_unset", list, i);
 
