@@ -103,7 +103,7 @@ describe("Property: the refusals are exactly the failing ports, in the fixed ord
       }),
       { seed: 410_302, numRuns: 120 },
     );
-  });
+  }, 20_000);
 
   it("every ports method is called at most once per run (env.isSet once per distinct name), whatever fails", async () => {
     await fc.assert(

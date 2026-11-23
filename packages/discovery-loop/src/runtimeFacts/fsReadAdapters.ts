@@ -193,6 +193,30 @@ export function createLeaseJsonReadAdapter(options: unknown): Result<LeaseJsonRe
 }
 
 // ---------------------------------------------------------------------------------------------
+// Launcher facts adapter (W4-C C2 port, structurally the `LauncherFactsReadPort` of launcherFacts.ts)
+// ---------------------------------------------------------------------------------------------
+/** The file name below the lease directory. Fixed here; no caller supplies a file name. */
+const LAUNCHER_FACTS_FILE = "launcher-facts.json";
+
+/**
+ * The adapter of the launcher facts port: reads `<leaseDir>/launcher-facts.json`, at most 4 KiB (the same bound as `lease.json`;
+ * launcherFacts.ts enforces its own equal bound when it parses). The method takes no argument. Read only.
+ */
+export function createLauncherFactsReadAdapter(options: unknown): Result<{ readLauncherFacts(): LeaseJsonReadAnswer }, FsReadAdapterError> {
+  const platform = checkPlatform();
+  if (!platform.ok) return platform;
+  if (!isPlainDataObject(options)) return fail("options_not_plain_object");
+  if (!hasExactKeys(options, ["leaseDir"])) return fail("options_keys");
+  const dir = rootOption(options, "leaseDir", "lease_dir_invalid");
+  if (!dir.ok) return dir;
+  const leaseDir = dir.value;
+  const port = {
+    readLauncherFacts: (): LeaseJsonReadAnswer => readFixedRootFileInternal(leaseDir, [LAUNCHER_FACTS_FILE], LEASE_JSON_MAX_BYTES),
+  };
+  return { ok: true, value: Object.freeze(port) };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Runtime version adapter (W4-B port)
 // ---------------------------------------------------------------------------------------------
 export interface RuntimeVersionAdapterOptions {
