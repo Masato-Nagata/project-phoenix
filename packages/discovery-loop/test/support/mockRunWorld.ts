@@ -372,7 +372,8 @@ export async function buildWorld(o: WorldOptions = {}): Promise<World> {
           provider: core.provider,
           sourceBundle: { schemaVersion: 1, hashRule: MANIFEST_HASH_RULE, files: core.sourceBundleManifest.files },
           envVarsRead: core.envVarsRead,
-          payload_audit: core.payloadAudit,
+          // the synthetic audit configuration of the Mock Run, declared as a fixture (a version-2 Run_Manifest needs the kind)
+          payload_audit: { ...core.payloadAudit, auditConfigKind: "fixture", auditConfigKindDeclaredBy: "launcher" },
           mutualExclusion: {
             mode: "mechanical",
             lease: { nonceSha256: "5".repeat(64), launcherPid: 100, heartbeatIntervalMs: core.leaseFacts.heartbeatIntervalMs, staleAfterMs: core.leaseFacts.staleAfterMs },

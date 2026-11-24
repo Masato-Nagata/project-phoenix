@@ -183,8 +183,8 @@ describe("who imports it", () => {
       .filter((f) => needle.test(readFileSync(`${SRC}${f}`, "utf8")))
       .map((f) => f.split("\\").join("/"))
       .sort();
-  it("in src, only loopOrchestrator.ts imports envSection (positive control: the detector finds the known importer of the Source_Bundle section's type file)", () => {
-    expect(importers(/from\s*["'][^"']*manifest\/envSection\.js["']/)).toEqual(["orchestrator/loopOrchestrator.ts"]);
+  it("in src, only loopOrchestrator.ts and manifestPort.ts (task 4.6 W5) import envSection (positive control: the detector finds the known importer of the Source_Bundle section's type file)", () => {
+    expect(importers(/from\s*["'][^"']*manifest\/envSection\.js["']/)).toEqual(["orchestrator/loopOrchestrator.ts", "orchestrator/manifestPort.ts"]);
     expect(importers(/from\s*["']\.\.\/schema\/types\.js["']/)).toContain("manifest/envSection.ts");
   });
 });

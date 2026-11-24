@@ -435,10 +435,17 @@ const runManifest = {
   chain: { records: 12, lastHash: h("6") },
   artifacts: [{ path: "records.jsonl", sha256: h("7") }, { path: "blobs/" + h("8"), sha256: h("8") }],
 };
+// Version 2 (every new seal): `payload_audit` names the audit configuration kind and who declared it. Synthetic values only.
+const runManifestV2 = edit(runManifest, (v) => {
+  v.schemaVersion = 2;
+  v.payload_audit.auditConfigKind = "fixture";
+  v.payload_audit.auditConfigKindDeclaredBy = "launcher";
+});
 const manifestRunSet: FixtureSet = {
   schema: "run-manifest",
   valid: [
     { id: "mechanical mutual exclusion", value: runManifest },
+    { id: "version 2 with the audit configuration kind declared by the launcher", value: runManifestV2 },
     { id: "attestation mutual exclusion", value: edit(runManifest, (v) => { v.mutualExclusion = { mode: "attestation", attestation: { approver: "Reviewer One", timestamp: "2025-01-01T00:00:00Z" } }; }) },
   ],
   invalid: [
@@ -452,6 +459,14 @@ const manifestRunSet: FixtureSet = {
     bad("artifact without hash", edit(runManifest, (v) => { delete v.artifacts[0].sha256; }), "missing_field", "/artifacts/0/sha256"),
     bad("canary field in payload audit", edit(runManifest, (v) => { v.payload_audit.canary = "x"; }), "undefined_field", "/payload_audit/canary"),
     bad("source bundle with a byte count", edit(runManifest, (v) => { v.sourceBundle.files[0].bytes = 1; }), "undefined_field", "/sourceBundle/files/0/bytes"),
+    bad("version 1 given an audit configuration kind", edit(runManifest, (v) => { v.payload_audit.auditConfigKind = "fixture"; }), "schema_violation", "/payload_audit/auditConfigKind"),
+    bad("version 1 given a kind declarer", edit(runManifest, (v) => { v.payload_audit.auditConfigKindDeclaredBy = "launcher"; }), "schema_violation", "/payload_audit/auditConfigKindDeclaredBy"),
+    bad("version 2 without the kind", edit(runManifestV2, (v) => { delete v.payload_audit.auditConfigKind; }), "missing_field", "/payload_audit/auditConfigKind"),
+    bad("version 2 without the kind declarer", edit(runManifestV2, (v) => { delete v.payload_audit.auditConfigKindDeclaredBy; }), "missing_field", "/payload_audit/auditConfigKindDeclaredBy"),
+    bad("version 2 with an undefined kind", edit(runManifestV2, (v) => { v.payload_audit.auditConfigKind = "real"; }), "bad_value", "/payload_audit/auditConfigKind"),
+    bad("version 2 with a kind declared by the runtime", edit(runManifestV2, (v) => { v.payload_audit.auditConfigKindDeclaredBy = "runtime"; }), "bad_value", "/payload_audit/auditConfigKindDeclaredBy"),
+    bad("version 2 with a canary field in payload audit", edit(runManifestV2, (v) => { v.payload_audit.canary = "x"; }), "undefined_field", "/payload_audit/canary"),
+    bad("an unknown manifest version", edit(runManifestV2, (v) => { v.schemaVersion = 3; }), "bad_value", "/schemaVersion"),
   ],
 };
 

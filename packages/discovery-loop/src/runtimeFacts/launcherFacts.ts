@@ -4,18 +4,21 @@
 // of two snapshots, and the start-up read and the re-read before sealing. The only I/O is the injected read port, which reads one file and
 // has no write method. The file is written by the Launcher (task 4.9, not changed here); this module only receives and checks it.
 //
-// The contract (version 1, closed set of five keys, no other key, at most 4 KiB):
-//   { "schema_version": 1, "issued_by": "launcher", "run_id": "<run id>", "runtime_image_id": "sha256:<64 hex>", "audit_config_sha256": "<64 hex>" }
-// The audit configuration KIND is NOT part of this contract. Its channel is open (design: TO VERIFY at task 4.9). A later contract that
-// carries it is a new `schema_version`; this parser refuses every version but 1, so the two can never be mixed up.
+// The contract (version 2, closed set of six keys, no other key, at most 4 KiB):
+//   { "schema_version": 2, "issued_by": "launcher", "run_id": "<run id>", "runtime_image_id": "sha256:<64 hex>", "audit_config_sha256": "<64 hex>",
+//     "audit_config_kind": "fixture" }
+// Version 1 (the five keys without the kind) and every unknown version are refused: a version-1 file is never sealed. The only kind that is
+// defined is `fixture` (the synthetic audit configuration of the Mock Run); no value for a real audit configuration is defined, so none is
+// accepted. The kind is a Launcher DECLARATION: the runtime cannot tell a fixture from a real configuration by the file.
 //
 // Declared versus observed (the snapshot keeps the two apart; nothing in it is called "verified" unless the runtime compared it):
 //   - `declared`: every value of the file, as DECLARED BY THE LAUNCHER.
 //   - `confirmedByRuntime`: the values that the runtime holds itself and that were found EQUAL to the declared ones: the run id (from
 //     `PHOENIX_RUN_ID`) and the SHA-256 of the audit configuration bytes (measured by the runtime from the mounted file). For these two
 //     the file is a second, independent statement, not the only source.
-//   - `unverifiedByRuntime`: `runtime_image_id`. The container cannot inspect its own image. The value is a Launcher declaration and is
-//     never an independent verification result. A Launcher that declares a wrong image id cannot be detected here.
+//   - `unverifiedByRuntime`: `audit_config_kind` and `runtime_image_id`. The container cannot inspect its own image and cannot tell what the
+//     audit configuration was built from. Both are Launcher declarations and never independent verification results. A Launcher that
+//     declares a wrong image id or a wrong kind cannot be detected here.
 //
 // What this module does NOT claim: that the Launcher wrote the file (no authentication), that the image id names the running image,
 // that the audit configuration is a real or a fixture configuration, or that the file was not written between two reads by the Launcher.
@@ -69,9 +72,13 @@ const hashOk = (v: unknown): v is string => typeof v === "string" && SHA256_HEX.
 /** The size bound of the file, the same 4 KiB as `lease.json` (a test pins that the adapter uses the same number). */
 export const LAUNCHER_FACTS_MAX_BYTES = 4096;
 /** The only schema version this parser accepts. */
-export const LAUNCHER_FACTS_SCHEMA_VERSION = 1;
-/** The five keys of the contract, and no other. */
-export const LAUNCHER_FACTS_KEYS: readonly string[] = Object.freeze(["audit_config_sha256", "issued_by", "run_id", "runtime_image_id", "schema_version"]);
+export const LAUNCHER_FACTS_SCHEMA_VERSION = 2;
+/** The six keys of the contract, and no other. */
+export const LAUNCHER_FACTS_KEYS: readonly string[] = Object.freeze(["audit_config_kind", "audit_config_sha256", "issued_by", "run_id", "runtime_image_id", "schema_version"]);
+/** The audit configuration kinds that are defined. Only the fixture of the Mock Run; no value for a real configuration is defined. */
+export const AUDIT_CONFIG_KINDS: readonly string[] = Object.freeze(["fixture"]);
+/** The declared values that the runtime does not verify, in a fixed order. */
+const UNVERIFIED_BY_RUNTIME = Object.freeze(["audit_config_kind", "runtime_image_id"] as const);
 
 // ---------------------------------------------------------------------------------------------
 // Types
@@ -83,6 +90,8 @@ export interface LauncherDeclaredFacts {
   readonly runtimeImageId: string;
   /** Declared by the Launcher; the snapshot also holds the equal value that the runtime measured. */
   readonly auditConfigSha256: string;
+  /** Declared by the Launcher; the runtime cannot check it. One of `AUDIT_CONFIG_KINDS`. */
+  readonly auditConfigKind: string;
 }
 
 /** The values the runtime holds itself. `auditConfigSha256` is the SHA-256 of the bytes of the mounted audit configuration. */
@@ -98,7 +107,7 @@ export interface LauncherFactsSnapshot {
   /** Values that the runtime holds and that equal the declared ones (the run id and the audit configuration hash). */
   readonly confirmedByRuntime: { readonly runId: string; readonly auditConfigSha256: string };
   /** Declared values that the runtime does not verify. */
-  readonly unverifiedByRuntime: readonly ["runtime_image_id"];
+  readonly unverifiedByRuntime: readonly ["audit_config_kind", "runtime_image_id"];
   /** SHA-256 (lowercase hex) of the exact text that was read, as UTF-8. */
   readonly textSha256: string;
 }
@@ -119,6 +128,7 @@ export type LauncherFactsErrorCode =
   | "run_id_invalid"
   | "runtime_image_id_invalid"
   | "audit_config_sha256_invalid"
+  | "audit_config_kind_invalid"
   | "run_id_mismatch"
   | "audit_config_sha256_mismatch"
   | "facts_read_absent"
@@ -165,8 +175,10 @@ export function parseLauncherFactsText(text: unknown): Result<LauncherDeclaredFa
   if (typeof image !== "string" || !IMAGE_ID.test(image) || image === `sha256:${ZERO_SHA256}`) return fail("runtime_image_id_invalid");
   const audit = field("audit_config_sha256");
   if (!hashOk(audit)) return fail("audit_config_sha256_invalid");
+  const kind = field("audit_config_kind");
+  if (typeof kind !== "string" || !AUDIT_CONFIG_KINDS.includes(kind)) return fail("audit_config_kind_invalid");
 
-  return { ok: true, value: Object.freeze({ runId, runtimeImageId: image, auditConfigSha256: audit }) };
+  return { ok: true, value: Object.freeze({ runId, runtimeImageId: image, auditConfigSha256: audit, auditConfigKind: kind }) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -201,7 +213,7 @@ export function createLauncherFactsSnapshot(text: unknown, expectation: unknown)
     declaredBy: "launcher" as const,
     declared: d,
     confirmedByRuntime: Object.freeze({ runId: expected.value.runId, auditConfigSha256: expected.value.auditConfigSha256 }),
-    unverifiedByRuntime: Object.freeze(["runtime_image_id"] as const),
+    unverifiedByRuntime: UNVERIFIED_BY_RUNTIME,
     textSha256: sha256Text(text as string),
   });
   issued.add(snapshot);
@@ -223,6 +235,7 @@ export function compareLauncherFactsSnapshots(first: unknown, second: unknown): 
     a.runId === b.runId &&
     a.runtimeImageId === b.runtimeImageId &&
     a.auditConfigSha256 === b.auditConfigSha256 &&
+    a.auditConfigKind === b.auditConfigKind &&
     first.confirmedByRuntime.runId === second.confirmedByRuntime.runId &&
     first.confirmedByRuntime.auditConfigSha256 === second.confirmedByRuntime.auditConfigSha256;
   return same ? { ok: true, value: true } : fail("facts_changed");

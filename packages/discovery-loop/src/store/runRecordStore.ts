@@ -230,7 +230,7 @@ export class RunRecordStore {
       ...[...this.knownBlobs].map((h) => ({ path: `${BLOBS_DIR}/${h}`, sha256: h })),
     ].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
     const manifest: JsonObject = {
-      schemaVersion: 1,
+      schemaVersion: 2, // every new seal is a version-2 Run_Manifest (the audit configuration kind in `payload_audit`)
       ...input,
       chain: { records: this.records.length, lastHash: this.lastHash },
       artifacts,

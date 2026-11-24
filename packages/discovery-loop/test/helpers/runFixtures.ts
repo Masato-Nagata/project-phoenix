@@ -29,7 +29,7 @@ export function manifestInput(overrides: JsonObject = {}): JsonObject {
     },
     legacyStartState: { identity: h("3") },
     envVarsRead: [{ name: "EXAMPLE_NAME", set: false }],
-    payload_audit: { configCheck: "pass", audits: 1, passed: 1, blocked: 0, auditConfigSha256: h("4") },
+    payload_audit: { configCheck: "pass", audits: 1, passed: 1, blocked: 0, auditConfigSha256: h("4"), auditConfigKind: "fixture", auditConfigKindDeclaredBy: "launcher" },
     ground_truth_access_denial: { status: "verified", executedInThisRun: true, checks: ["read_denial", "mount_inspection"] },
     isolationChecks: [{ id: "net-none", status: "verified", measuredBy: "launcher", measured: { routes: [] } }],
     mutualExclusion: { mode: "mechanical", lease: { nonceSha256: h("5"), launcherPid: 100, heartbeatIntervalMs: 1000, staleAfterMs: 5000 } },

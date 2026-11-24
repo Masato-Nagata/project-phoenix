@@ -175,12 +175,16 @@ describe("source of the new modules", () => {
     expect(strip("const a = 1; // process\nconst b = process.env;")).toMatch(/\bprocess\b/);
   });
 
-  it("only the manifest/ folder imports them: nothing in src, and not src/index.ts, uses a new module (no ManifestPort is built in W3-A)", () => {
+  it("in src outside the manifest/ folder, only orchestrator/manifestPort.ts (task 4.6 W5) imports them, never plainData.js; not src/index.ts", () => {
     const files = (readdirSync(SRC, { recursive: true, encoding: "utf8" }) as string[]).filter((f) => f.endsWith(".ts")).map((f) => f.split("\\").join("/"));
     const needle = /manifest\/(plainData|providerSection|configSection|isolationSection|aiSandboxSection|residualRisksSection|toolVersionsSection|mutualExclusionSection|legacyStartStateSection)\.js/;
-    const importers = files.filter((f) => needle.test(readFileSync(`${SRC}${f}`, "utf8")));
-    expect(importers).toEqual([]);
-    expect(files.filter((f) => /manifest\/envSection\.js/.test(readFileSync(`${SRC}${f}`, "utf8")))).toEqual(["orchestrator/loopOrchestrator.ts"]); // positive control
+    const importers = files.filter((f) => !f.startsWith("manifest/") && needle.test(readFileSync(`${SRC}${f}`, "utf8")));
+    expect(importers).toEqual(["orchestrator/manifestPort.ts"]);
+    expect(readFileSync(`${SRC}orchestrator/manifestPort.ts`, "utf8")).not.toMatch(/manifest\/plainData\.js/);
+    expect(readFileSync(`${SRC}index.ts`, "utf8")).not.toMatch(needle);
+    // positive control: the detector finds a builder import in a source text
+    expect(needle.test('import { buildConfigSection } from "../manifest/configSection.js";')).toBe(true);
+    expect(files.filter((f) => /manifest\/envSection\.js/.test(readFileSync(`${SRC}${f}`, "utf8")))).toEqual(["orchestrator/loopOrchestrator.ts", "orchestrator/manifestPort.ts"]); // positive control
   });
 });
 

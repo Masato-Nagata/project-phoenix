@@ -748,7 +748,9 @@ const runManifest: Schema = {
     "ground_truth_access_denial", "isolationChecks", "mutualExclusion", "aiSandbox", "residualRisks", "chain", "artifacts",
   ],
   properties: {
-    schemaVersion: { const: 1 },
+    // 1: the Run_Manifests sealed before the audit configuration kind existed (kept readable as they are; nothing is filled in).
+    // 2: every new seal; `payload_audit` then names the audit configuration kind and who declared it (see `allOf` below).
+    schemaVersion: { enum: [1, 2] },
     runId: { type: "string", minLength: 1 },
     wallClock: {
       type: "object",
@@ -823,6 +825,10 @@ const runManifest: Schema = {
         passed: { type: "integer", minimum: 0 },
         blocked: { type: "integer", minimum: 0 },
         auditConfigSha256: sha,
+        // Version 2 only. The kind is a DECLARATION of the Launcher (the runtime cannot tell a fixture from a real configuration); only the
+        // synthetic fixture of the Mock Run is defined, so a Run with it is never evidence for a real audit configuration.
+        auditConfigKind: { enum: ["fixture"] },
+        auditConfigKindDeclaredBy: { const: "launcher" },
       },
     },
     ground_truth_access_denial: {
@@ -912,6 +918,18 @@ const runManifest: Schema = {
       },
     },
   },
+  // Version-specific constraints. Version 2 requires the two kind fields; version 1 forbids them, so a version-1 Manifest is never given a
+  // kind afterwards and is never read as if it had one.
+  allOf: [
+    {
+      if: { required: ["schemaVersion"], properties: { schemaVersion: { const: 2 } } },
+      then: { properties: { payload_audit: { type: "object", required: ["auditConfigKind", "auditConfigKindDeclaredBy"] } } },
+    },
+    {
+      if: { required: ["schemaVersion"], properties: { schemaVersion: { const: 1 } } },
+      then: { properties: { payload_audit: { type: "object", properties: { auditConfigKind: false, auditConfigKindDeclaredBy: false } } } },
+    },
+  ],
 };
 
 // ---------------------------------------------------------------------------------------------

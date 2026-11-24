@@ -30,7 +30,7 @@ describe("Run_Manifest sealing (R12.8, R12.16)", () => {
   it("writes one manifest.json that lists records.jsonl and every blob by path and hash, sorted, without itself", async () => {
     const { fs, blobHash } = await buildSealedRun();
     const m = JSON.parse(text(fs.peek(mf()))) as { schemaVersion: number; chain: { records: number; lastHash: string }; artifacts: { path: string; sha256: string }[] };
-    expect(m.schemaVersion).toBe(1);
+    expect(m.schemaVersion).toBe(2);
     expect(m.artifacts.map((a) => a.path)).toEqual([`blobs/${blobHash}`, "records.jsonl"]);
     expect(m.artifacts[1]?.sha256).toBe(sha256(fs.peek(rec()) as Uint8Array));
     expect(m.artifacts[0]?.sha256).toBe(blobHash);

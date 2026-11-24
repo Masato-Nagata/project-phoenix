@@ -43,10 +43,10 @@ const files = readdirSync(ORCH).filter((f) => f.endsWith(".ts")).sort();
 const text = (f: string): string => readFileSync(join(ORCH, f), "utf8");
 
 describe("the folder", () => {
-  it("holds exactly the eighteen planned files (the seventeen of U0 to U6c and loopOrchestrator.ts of U7)", () => {
+  it("holds exactly the nineteen planned files (the seventeen of U0 to U6c, loopOrchestrator.ts of U7, manifestPort.ts of task 4.6 W5)", () => {
     expect(files).toEqual([
-      "consume.ts", "deadline.ts", "envAllowlist.ts", "experimentPhase.ts", "hypothesisPhase.ts", "ids.ts", "iteration.ts", "leaseBoundary.ts", "loopOrchestrator.ts", "observeReads.ts",
-      "providerCall.ts", "recordWriter.ts", "session.ts", "startGate.ts", "startRun.ts", "terminate.ts", "terminationLatch.ts", "types.ts",
+      "consume.ts", "deadline.ts", "envAllowlist.ts", "experimentPhase.ts", "hypothesisPhase.ts", "ids.ts", "iteration.ts", "leaseBoundary.ts", "loopOrchestrator.ts", "manifestPort.ts",
+      "observeReads.ts", "providerCall.ts", "recordWriter.ts", "session.ts", "startGate.ts", "startRun.ts", "terminate.ts", "terminationLatch.ts", "types.ts",
     ]);
   });
 });
@@ -55,7 +55,10 @@ describe("(a) the import boundary", () => {
   const ALLOWED: readonly RegExp[] = [
     /^\.\/(?:consume|deadline|envAllowlist|experimentPhase|hypothesisPhase|ids|iteration|leaseBoundary|loopOrchestrator|observeReads|providerCall|recordWriter|session|startGate|startRun|terminate|terminationLatch|types)\.js$/,
     /^\.\.\/gate\/mayStartRun\.js$/,
-    /^\.\.\/manifest\/envSection\.js$/, // the pure `envVarsRead` section builder (task 4.6 W2); imported by loopOrchestrator.ts only (checked in manifest.envSection.test.ts)
+    /^\.\.\/manifest\/envSection\.js$/, // the pure `envVarsRead` section builder (task 4.6 W2); imported by loopOrchestrator.ts and manifestPort.ts only (checked in manifest.envSection.test.ts)
+    // task 4.6 W5: the section builders and the runtime facts, each named exactly; imported by manifestPort.ts only (checked in its own test below)
+    /^\.\.\/manifest\/(?:aiSandboxSection|configSection|isolationSection|legacyStartStateSection|mutualExclusionSection|providerSection|residualRisksSection|sourceBundleSection|toolVersionsSection)\.js$/,
+    /^\.\.\/runtimeFacts\/(?:launcherFacts|leaseFacts|versionFacts)\.js$/,
     /^\.\.\/model\/evidenceStore\.js$/, // the EvidenceStore class (type), CITATION_VERIFIER (hypothesisPhase.ts only) and experimentRuleComponent (experimentPhase.ts only); checked in its own test below
     /^\.\.\/isolation\/(?:index|types)\.js$/,
     /^\.\.\/config\/(?:startup|runConfig)\.js$/,
@@ -78,6 +81,10 @@ describe("(a) the import boundary", () => {
       'import { i } from "../index.js";',
       'export * from "../isolation/verify.js";',
       'import { f } from "../model/facts.js";',
+      'import { p } from "../manifest/plainData.js";',
+      'import { a } from "../runtimeFacts/fsReadAdapters.js";',
+      'import * as m from "../manifest/index.js";',
+      'import { r } from "../runtimeFacts/other.js";',
       'import { s } from "../model/sanitize.js";',
       'import type { E } from "../model/types.js";',
       'import { e } from "../model/index.js";',
@@ -127,6 +134,17 @@ describe("(a) the import boundary", () => {
     expect(evidenceStoreViolations('import type { EvidenceStore } from "../model/evidenceStore.js";')).toEqual([]);
     expect(evidenceStoreViolations('import { CITATION_VERIFIER, type EvidenceStore } from "../model/evidenceStore.js";')).toEqual([]);
     expect(specifiersOf('import { a } from "../model/evidenceStore.js";')).toEqual(["../model/evidenceStore.js"]);
+  });
+  it("the W5 section builders and runtime facts are imported by manifestPort.ts only; plainData.js and fsReadAdapters.js by no orchestrator file", () => {
+    const W5 = /^\.\.\/(?:manifest\/(?:aiSandboxSection|configSection|isolationSection|legacyStartStateSection|mutualExclusionSection|providerSection|residualRisksSection|sourceBundleSection|toolVersionsSection)|runtimeFacts\/(?:launcherFacts|leaseFacts|versionFacts))\.js$/;
+    const importersOf = (re: RegExp): string[] => files.filter((f) => specifiersOf(text(f)).some((s) => re.test(s)));
+    expect(importersOf(W5)).toEqual(["manifestPort.ts"]);
+    expect(importersOf(/^\.\.\/manifest\/plainData\.js$|^\.\.\/runtimeFacts\/fsReadAdapters\.js$/)).toEqual([]);
+    // positive control: the same detector finds the import in any other file name
+    const fake = (f: string, src: string): string[] => (specifiersOf(src).some((s) => W5.test(s)) ? [f] : []);
+    expect(fake("startRun.ts", 'import { buildConfigSection } from "../manifest/configSection.js";')).toEqual(["startRun.ts"]);
+    expect(fake("terminate.ts", 'import { confirmLeaseFactsUnchanged } from "../runtimeFacts/leaseFacts.js";')).toEqual(["terminate.ts"]);
+    expect(fake("types.ts", 'import type { Result } from "../schema/types.js";')).toEqual([]);
   });
   it("the run record store is imported as a type, and only RunRecordStore and OpenError (U0)", () => {
     const storeViolations = (source: string): string[] => {

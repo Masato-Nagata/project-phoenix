@@ -12,6 +12,7 @@ import { buildToolVersionsSection } from "../src/manifest/toolVersionsSection.js
 import { createLauncherFactsReadAdapter, createLeaseJsonReadAdapter } from "../src/runtimeFacts/fsReadAdapters.js";
 import { LEASE_JSON_MAX_BYTES } from "../src/runtimeFacts/leaseFacts.js";
 import {
+  AUDIT_CONFIG_KINDS,
   LAUNCHER_FACTS_KEYS,
   LAUNCHER_FACTS_MAX_BYTES,
   LAUNCHER_FACTS_SCHEMA_VERSION,
@@ -33,11 +34,12 @@ const IMAGE_ID = `sha256:${sha("synthetic-image")}`;
 const AUDIT_SHA = sha("synthetic-audit-config-bytes");
 
 const goodObject = (): Record<string, unknown> => ({
-  schema_version: 1,
+  schema_version: 2,
   issued_by: "launcher",
   run_id: RUN_ID,
   runtime_image_id: IMAGE_ID,
   audit_config_sha256: AUDIT_SHA,
+  audit_config_kind: "fixture",
 });
 const textOf = (o: Record<string, unknown>): string => JSON.stringify(o);
 const goodText = (): string => textOf(goodObject());
@@ -70,12 +72,32 @@ function fakePort(...answers: Array<LauncherFactsReadAnswer | "throw" | unknown>
 }
 const ok = (text: string): LauncherFactsReadAnswer => ({ kind: "ok", text });
 
-describe("the contract: five keys, version 1, no kind", () => {
-  it("lists exactly the five keys of the contract and no audit configuration kind", () => {
+describe("the contract: six keys, version 2, the kind fixture only", () => {
+  it("lists exactly the six keys of the contract, including the audit configuration kind", () => {
     expect([...LAUNCHER_FACTS_KEYS]).toEqual(Object.keys(goodObject()).sort());
-    expect(LAUNCHER_FACTS_KEYS).toHaveLength(5);
-    expect(LAUNCHER_FACTS_SCHEMA_VERSION).toBe(1);
-    expect(LAUNCHER_FACTS_KEYS.some((k) => /kind/i.test(k))).toBe(false);
+    expect(LAUNCHER_FACTS_KEYS).toHaveLength(6);
+    expect(LAUNCHER_FACTS_SCHEMA_VERSION).toBe(2);
+    expect(LAUNCHER_FACTS_KEYS).toContain("audit_config_kind");
+  });
+
+  it("defines the kind fixture and no other kind", () => {
+    expect([...AUDIT_CONFIG_KINDS]).toEqual(["fixture"]);
+    expect(Object.isFrozen(AUDIT_CONFIG_KINDS)).toBe(true);
+  });
+
+  it("refuses a version-1 file (the five keys without the kind) and every unknown version: version 1 is never sealed", () => {
+    const v1 = { schema_version: 1, issued_by: "launcher", run_id: RUN_ID, runtime_image_id: IMAGE_ID, audit_config_sha256: AUDIT_SHA };
+    expect(codeOf(parseLauncherFactsText(textOf(v1)))).toBe("field_missing");
+    expect(codeOf(parseLauncherFactsText(textOf({ ...v1, audit_config_kind: "fixture" })))).toBe("schema_version_invalid");
+    expect(codeOf(createLauncherFactsSnapshot(textOf(v1), expectation()))).toBe("field_missing");
+    for (const v of [1, 3, 99]) expect(codeOf(parseLauncherFactsText(withField("schema_version", v))), String(v)).toBe("schema_version_invalid");
+  });
+
+  it("refuses a missing kind and every kind other than fixture (no value for a real configuration is defined)", () => {
+    expect(codeOf(parseLauncherFactsText(without("audit_config_kind")))).toBe("field_missing");
+    for (const v of ["real", "production", "Fixture", "FIXTURE", " fixture", "fixture ", "", "fixture\n", null, 1, true, [], {}, ["fixture"]]) {
+      expect(codeOf(parseLauncherFactsText(withField("audit_config_kind", v))), JSON.stringify(v)).toBe("audit_config_kind_invalid");
+    }
   });
 
   it("uses the same size bound as lease.json (4 KiB)", () => {
@@ -85,9 +107,9 @@ describe("the contract: five keys, version 1, no kind", () => {
 });
 
 describe("parseLauncherFactsText", () => {
-  it("accepts the five keys and returns frozen declared values", () => {
+  it("accepts the six keys and returns frozen declared values", () => {
     const r = parseLauncherFactsText(goodText());
-    expect(r).toEqual({ ok: true, value: { runId: RUN_ID, runtimeImageId: IMAGE_ID, auditConfigSha256: AUDIT_SHA } });
+    expect(r).toEqual({ ok: true, value: { runId: RUN_ID, runtimeImageId: IMAGE_ID, auditConfigSha256: AUDIT_SHA, auditConfigKind: "fixture" } });
     if (r.ok) expect(Object.isFrozen(r.value)).toBe(true);
   });
 
@@ -99,14 +121,14 @@ describe("parseLauncherFactsText", () => {
 
   it("refuses a missing key, one by one, and an extra key (including a kind)", () => {
     for (const k of Object.keys(goodObject())) expect(codeOf(parseLauncherFactsText(without(k))), k).toBe("field_missing");
-    for (const extra of ["audit_config_kind", "kind", "container_id", "x"]) {
+    for (const extra of ["kind", "audit_config_kind_declared_by", "container_id", "x"]) {
       expect(codeOf(parseLauncherFactsText(textOf({ ...goodObject(), [extra]: "fixture" }))), extra).toBe("field_unknown");
     }
     expect(codeOf(parseLauncherFactsText(textOf({ ...goodObject(), __proto__x: 1 })))).toBe("field_unknown");
   });
 
   it("refuses a wrong schema version, issuer, run id, image id and audit hash", () => {
-    for (const v of [0, 2, "1", 1.5, null, true, [], {}]) expect(codeOf(parseLauncherFactsText(withField("schema_version", v))), String(v)).toBe("schema_version_invalid");
+    for (const v of [0, 1, 3, "2", 2.5, null, true, [], {}]) expect(codeOf(parseLauncherFactsText(withField("schema_version", v))), String(v)).toBe("schema_version_invalid");
     for (const v of ["Launcher", "kiro", "", null, 1]) expect(codeOf(parseLauncherFactsText(withField("issued_by", v))), String(v)).toBe("issued_by_invalid");
     for (const v of ["", "run-1", `${RUN_ID}x`, ` ${RUN_ID}`, RUN_ID.toUpperCase(), "run-20300101T000000Z-0123456789AB", 1, null]) {
       expect(codeOf(parseLauncherFactsText(withField("run_id", v))), String(v)).toBe("run_id_invalid");
@@ -121,7 +143,7 @@ describe("parseLauncherFactsText", () => {
   });
 
   it("refuses text that is not strict JSON: a duplicate key, a BOM, trailing text, a non-object root, a non-string", () => {
-    const dup = '{"schema_version":1,"schema_version":1,"issued_by":"launcher","run_id":"' + RUN_ID + '","runtime_image_id":"' + IMAGE_ID + '","audit_config_sha256":"' + AUDIT_SHA + '"}';
+    const dup = '{"schema_version":2,"schema_version":2,"issued_by":"launcher","run_id":"' + RUN_ID + '","runtime_image_id":"' + IMAGE_ID + '","audit_config_sha256":"' + AUDIT_SHA + '","audit_config_kind":"fixture"}';
     expect(codeOf(parseLauncherFactsText(dup))).toBe("facts_invalid_json");
     for (const bad of ["", "{", "not json", "\ufeff" + goodText(), goodText() + "x"]) expect(codeOf(parseLauncherFactsText(bad)), bad).toBe("facts_invalid_json");
     for (const bad of ["[]", "null", "1", '"x"']) expect(codeOf(parseLauncherFactsText(bad)), bad).toBe("facts_not_object");
@@ -131,7 +153,7 @@ describe("parseLauncherFactsText", () => {
   it("applies the 4 KiB bound to the text", () => {
     const base = goodObject();
     const pad = (n: number): string => {
-      const body = textOf({ ...base, schema_version: 1 });
+      const body = textOf({ ...base, schema_version: 2 });
       return body.slice(0, -1) + " ".repeat(n - Buffer.byteLength(body, "utf8")) + "}";
     };
     expect(Buffer.byteLength(pad(LAUNCHER_FACTS_MAX_BYTES), "utf8")).toBe(LAUNCHER_FACTS_MAX_BYTES);
@@ -144,10 +166,11 @@ describe("createLauncherFactsSnapshot: declared versus observed", () => {
   it("keeps the declared values, the values confirmed by the runtime, and the one value the runtime cannot verify apart", () => {
     const s = snap();
     expect(s.declaredBy).toBe("launcher");
-    expect(s.declared).toEqual({ runId: RUN_ID, runtimeImageId: IMAGE_ID, auditConfigSha256: AUDIT_SHA });
+    expect(s.declared).toEqual({ runId: RUN_ID, runtimeImageId: IMAGE_ID, auditConfigSha256: AUDIT_SHA, auditConfigKind: "fixture" });
     expect(s.confirmedByRuntime).toEqual({ runId: RUN_ID, auditConfigSha256: AUDIT_SHA });
-    expect(s.unverifiedByRuntime).toEqual(["runtime_image_id"]);
+    expect(s.unverifiedByRuntime).toEqual(["audit_config_kind", "runtime_image_id"]);
     expect(Object.keys(s.confirmedByRuntime)).not.toContain("runtimeImageId");
+    expect(Object.keys(s.confirmedByRuntime)).not.toContain("auditConfigKind");
     expect(s.textSha256).toBe(sha(goodText()));
     expect(isLauncherFactsSnapshot(s)).toBe(true);
     for (const o of [s, s.declared, s.confirmedByRuntime, s.unverifiedByRuntime]) expect(Object.isFrozen(o)).toBe(true);
@@ -192,6 +215,11 @@ describe("createLauncherFactsSnapshot: declared versus observed", () => {
     expect(codeOf(compareLauncherFactsSnapshots(snap(), snap(reordered)))).toBe("facts_changed"); // same values, different text
     const otherImage = snap(withField("runtime_image_id", `sha256:${sha("another-image")}`));
     expect(codeOf(compareLauncherFactsSnapshots(snap(), otherImage))).toBe("facts_changed");
+  });
+
+  it("the comparison covers the kind: the comparison source names auditConfigKind", () => {
+    const src = readFileSync(new URL("../src/runtimeFacts/launcherFacts.ts", import.meta.url), "utf8");
+    expect(src).toMatch(/a\.auditConfigKind === b\.auditConfigKind/);
   });
 });
 
@@ -266,6 +294,7 @@ describe("no value, secret or path in an error", () => {
         ["audit hash", withField("audit_config_sha256", CANARY)],
         ["version", withField("schema_version", CANARY)],
         ["issuer", withField("issued_by", CANARY)],
+        ["kind", withField("audit_config_kind", CANARY)],
         ["extra key", textOf({ ...goodObject(), [CANARY]: 1 })],
         ["bad json", `{"run_id": ${CANARY}`],
         ["too large", CANARY.repeat(500)],
