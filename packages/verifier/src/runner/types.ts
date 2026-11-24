@@ -62,6 +62,41 @@ export const REQUEST_TIMEOUT_RANGE_MS = { min: 1_000, max: 60_000 } as const;
 export const EXPERIMENT_TIMEOUT_RANGE_MS = { min: 1_000, max: 600_000 } as const;
 /** The health check must succeed within 10 seconds (R9.1). */
 export const HEALTH_TIMEOUT_MS = 10_000;
+/**
+ * The Run-level start-state measurement (the reset and the `GET /products` together) must finish within 10 seconds. It is ONE budget for
+ * the whole measurement, not one per request; the per-request limit, the Run time limit and the lease still apply and may be shorter.
+ */
+export const START_STATE_TIMEOUT_MS = 10_000;
+
+/** Why a start-state measurement gave no identity. A closed code; never a body, a value, a path or a message. */
+export type StartStateFailureCode =
+  | "already_measured"
+  | "runner_not_healthy"
+  | "run_stopped"
+  | "options_invalid"
+  | "aborted"
+  | "timeout"
+  | "lease_unavailable"
+  | "operation_not_allowed"
+  | "address_not_allowed"
+  | "transport_error"
+  | "reset_failed"
+  | "response_invalid"
+  | "identity_unavailable"
+  | "internal_error";
+
+/**
+ * The result of `measureStartState`. `identity` is the SHA-256 (64 lowercase hexadecimal characters, no prefix) of the UTF-8 bytes of the
+ * canonical JSON text of the masked `{ status, bodyKind, body }` of the `GET /products` response after a confirmed reset.
+ */
+export type StartStateResult =
+  | { readonly ok: true; readonly identity: string }
+  | { readonly ok: false; readonly code: StartStateFailureCode; readonly leaseReason?: import("../lease/types.js").LeaseReason };
+
+export interface StartStateOptions {
+  /** On the monotonic clock: the Run time limit. The measurement ends at the earlier of this and its own 10-second budget. */
+  readonly notAfterMs?: number;
+}
 
 export type NotExecutedReason =
   | "policy_not_accepted"
@@ -146,6 +181,12 @@ export interface ExperimentRunner {
   /** The start-up proof of the lease, then the health check of the Legacy_App within 10 seconds (R9.1, R24.9). */
   health(): Promise<{ readonly ok: true } | { readonly ok: false; readonly error: string }>;
   execute(e: import("../policy/types.js").Experiment, decisionRecordId: string, signal: AbortSignal, options?: ExecuteOptions): Promise<ExecutionOutcome>;
+  /**
+   * The Run-level measurement of the Legacy_App starting state: a confirmed `POST /reset`, then one `GET /products`, both through the same
+   * checked send path as every other request. Only after a passed health check. At most once per Runner (one Runner per Run): a second call,
+   * also a concurrent one, sends nothing and answers `already_measured`; a failed first measurement is not retried.
+   */
+  measureStartState(signal: AbortSignal, options?: StartStateOptions): Promise<StartStateResult>;
 }
 
 export interface RunnerDeps {

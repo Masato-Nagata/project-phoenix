@@ -10,7 +10,7 @@
 import { MASK_TOKEN, maskConfigHash, maskJson, validateMaskConfig } from "../compare/mask.js";
 import type { Json, MaskConfig, ObservedResponse } from "../compare/types.js";
 import { LeaseCheckInterrupted, terminationReasonOf, type LeaseState } from "../lease/index.js";
-import { experimentSha256, policyConfigSha256, preparationTableSha256, type ExecutionIdentity } from "../identity/hash.js";
+import { canonicalIdentityText, experimentSha256, policyConfigSha256, preparationTableSha256, sha256OfText, type ExecutionIdentity } from "../identity/hash.js";
 import { decide } from "../policy/decide.js";
 import { canonicalJsonText } from "../policy/guards.js";
 import type { Experiment, PolicyRequest, Result } from "../policy/types.js";
@@ -24,6 +24,7 @@ import {
   HttpAbortedError,
   HttpTimeoutError,
   REQUEST_TIMEOUT_RANGE_MS,
+  START_STATE_TIMEOUT_MS,
   type ExecutionObservation,
   type ExecuteOptions,
   type ExecutionOutcome,
@@ -37,6 +38,9 @@ import {
   type RunnerDeps,
   type RunnerLimits,
   type RunStopCause,
+  type StartStateFailureCode,
+  type StartStateOptions,
+  type StartStateResult,
 } from "./types.js";
 
 export interface RunnerStartRefusal {
@@ -159,6 +163,10 @@ function readDotted(value: unknown, path: string): unknown {
   return cur;
 }
 
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+const startStateFail = (code: StartStateFailureCode, leaseReason?: import("../lease/types.js").LeaseReason): StartStateResult =>
+  Object.freeze(leaseReason === undefined ? { ok: false as const, code } : { ok: false as const, code, leaseReason });
+
 function parseJson(text: string): { ok: true; value: unknown } | { ok: false } {
   try {
     return { ok: true, value: JSON.parse(text) as unknown };
@@ -184,6 +192,8 @@ class Runner implements ExperimentRunner {
   /** Set when the Run was stopped in the middle of an Experiment; nothing more is executed after it. */
   private stopped: { readonly cause: RunStopCause; readonly detail: string } | undefined;
   private tail: Promise<void> = Promise.resolve();
+  /** Taken at the first call of `measureStartState`, before anything is awaited; never released. */
+  private startStateTaken = false;
 
   constructor(deps: RunnerDeps, start: ValidatedRunnerStart) {
     this.deps = deps;
@@ -212,6 +222,95 @@ class Runner implements ExperimentRunner {
         return { ok: false, error: `unhealthy:${error.kind}` };
       }
       return { ok: false, error: "unhealthy:internal_error" };
+    }
+  }
+
+  // --------------------------------------------------------------------------------- start state (Run_Manifest legacyStartState)
+
+  /**
+   * The latch is taken synchronously, so a second call (also one made while the first is running) sends nothing. The measurement is queued
+   * on the same chain as `execute`, so it never interleaves with an Experiment. It never throws and never rejects.
+   */
+  measureStartState(signal: AbortSignal, options: StartStateOptions = {}): Promise<StartStateResult> {
+    if (this.startStateTaken) return Promise.resolve(startStateFail("already_measured"));
+    this.startStateTaken = true;
+    const result = this.tail.then(() => this.measureStartStateOnce(signal, options));
+    this.tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private async measureStartStateOnce(signal: AbortSignal, options: StartStateOptions): Promise<StartStateResult> {
+    try {
+      if (this.stopped !== undefined) return startStateFail("run_stopped");
+      if (!this.healthy) return startStateFail("runner_not_healthy");
+      if (typeof signal !== "object" || signal === null || typeof signal.aborted !== "boolean") return startStateFail("options_invalid");
+      if (signal.aborted) return startStateFail("aborted");
+      // ONE budget for the reset and the GET together; `send` bounds every request by what is left of it (and by the request limit).
+      const ctx = this.newCtx("start-state", signal, this.deps.clock.nowMs() + START_STATE_TIMEOUT_MS);
+      const notAfter = (options as { notAfterMs?: unknown } | null | undefined)?.notAfterMs;
+      if (notAfter !== undefined) {
+        if (typeof notAfter !== "number" || !Number.isFinite(notAfter)) return startStateFail("options_invalid");
+        if (notAfter <= ctx.deadlineAt) {
+          ctx.deadlineAt = notAfter;
+          ctx.runLimited = true;
+        }
+      }
+
+      ctx.phase = "reset";
+      const reset = await this.send(ctx, { method: "POST", path: "/reset" }, "/reset");
+      // A response that arrives after the budget is not used, and nothing more is sent.
+      if (this.deps.clock.nowMs() >= ctx.deadlineAt) return startStateFail("timeout");
+      if (signal.aborted) return startStateFail("aborted");
+      if (reset.status !== 200 || !this.isSuccess(reset.body)) return startStateFail("reset_failed");
+
+      ctx.phase = "state";
+      const products = await this.send(ctx, { method: "GET", path: "/products" }, "/products");
+      if (this.deps.clock.nowMs() >= ctx.deadlineAt) return startStateFail("timeout");
+      if (signal.aborted) return startStateFail("aborted");
+
+      // The contract is checked on the UNMASKED response: status 200, a JSON object, `success === true`, `data` an array (may be empty).
+      if (products.status !== 200) return startStateFail("response_invalid");
+      const parsed = parseJson(products.body);
+      if (!parsed.ok || typeof parsed.value !== "object" || parsed.value === null || Array.isArray(parsed.value)) return startStateFail("response_invalid");
+      const top = parsed.value as Record<string, unknown>;
+      if (top["success"] !== true || !Array.isArray(top["data"])) return startStateFail("response_invalid");
+
+      // Only the MASKED form enters the hash.
+      const observed = this.observed(products);
+      if (observed.bodyKind !== "json") return startStateFail("response_invalid");
+      let identity: string;
+      try {
+        identity = sha256OfText(canonicalIdentityText({ status: observed.status, bodyKind: observed.bodyKind, body: observed.body }));
+      } catch {
+        return startStateFail("identity_unavailable");
+      }
+      if (!SHA256_HEX.test(identity)) return startStateFail("identity_unavailable");
+      // The final guard: the masking, the canonical form and the hash take time on a real clock. An identity is issued only while the
+      // whole-measurement budget and the stop signal still allow it (the same order as the checks after each response).
+      if (this.deps.clock.nowMs() >= ctx.deadlineAt) return startStateFail("timeout");
+      if (signal.aborted) return startStateFail("aborted");
+      return Object.freeze({ ok: true as const, identity });
+    } catch (error) {
+      if (error instanceof Halt) {
+        switch (error.kind) {
+          case "lease":
+            return startStateFail("lease_unavailable", error.lease?.reason ?? "unreadable");
+          case "timeout":
+            return startStateFail("timeout");
+          case "abort":
+            return startStateFail("aborted");
+          case "operation":
+            return startStateFail("operation_not_allowed");
+          case "address":
+            return startStateFail("address_not_allowed");
+          default:
+            return startStateFail("transport_error");
+        }
+      }
+      return startStateFail("internal_error");
     }
   }
 

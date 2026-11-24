@@ -20,6 +20,7 @@ export {
   HttpTimeoutError,
   HttpTransportError,
   REQUEST_TIMEOUT_RANGE_MS,
+  START_STATE_TIMEOUT_MS,
 } from "./types.js";
 export type {
   ExecuteOptions,
@@ -36,4 +37,7 @@ export type {
   PrepLogEntry,
   RunnerDeps,
   RunnerLimits,
+  StartStateFailureCode,
+  StartStateOptions,
+  StartStateResult,
 } from "./types.js";
