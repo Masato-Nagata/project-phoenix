@@ -18,7 +18,14 @@
 //   11. `markStarted`;
 //   12. the record `isolation_checks`, whose ONLY source is the access-denial result of the start gate (status and the six checks; R15.12);
 //   13. a deadline checkpoint; 14. `runner.health()` (not interruptible by the session signal: the Runner bounds it with 10 s); then a
-//       checkpoint again (a timer that fired during `health` is seen here).
+//       checkpoint again (a timer that fired during `health` is seen here);
+//   14b. (task 4.6 W6) only after a passed health check and a passed checkpoint: ONE `runner.measureStartState(session.signal,
+//       { notAfterMs: session.deadlineAtMs })` on the same Runner (the Legacy_App starting state of the Run_Manifest), whether or not any
+//       Experiment follows. A failure is never retried: a lease failure raises `launcher_killed` (stale heartbeat) or `lease_unavailable`
+//       (the rule of leaseBoundary.ts and of the experiment phase), any other failure or a throw raises `error`, unless a cause is already
+//       latched or the Run deadline has passed (then the latch and the checkpoint keep the true reason, as in the experiment phase); then
+//       `proceed` is false, so no phase and no Experiment starts. A checkpoint follows. Nothing about the measurement is recorded here (the identity goes to the
+//       Run_Manifest through the composition root, which holds the per-Run start-state cell).
 //
 // REFUSAL OR START. Before `run_started` is confirmed, the answer is a REFUSAL: an unsealed result with `started: false`; nothing is terminated,
 // sealed or written afterwards. What a refusal code says about the Run_Volume:
@@ -101,7 +108,19 @@ async function recheckLease(port: unknown, session: RunSession): Promise<LeaseAn
 }
 
 const isRunner = (r: unknown): r is ExperimentRunnerPort =>
-  typeof r === "object" && r !== null && typeof (r as { health?: unknown }).health === "function" && typeof (r as { execute?: unknown }).execute === "function";
+  typeof r === "object" &&
+  r !== null &&
+  typeof (r as { health?: unknown }).health === "function" &&
+  typeof (r as { execute?: unknown }).execute === "function" &&
+  typeof (r as { measureStartState?: unknown }).measureStartState === "function";
+
+/** The cause of a failed start-state measurement: the lease rule of leaseBoundary.ts, `error` for everything else. */
+function startStateFailureCause(m: unknown): "launcher_killed" | "lease_unavailable" | "error" {
+  if (typeof m !== "object" || m === null) return "error";
+  const o = m as { ok?: unknown; code?: unknown; leaseReason?: unknown };
+  if (o.ok === false && o.code === "lease_unavailable") return o.leaseReason === "heartbeat_stale" ? "launcher_killed" : "lease_unavailable";
+  return "error";
+}
 
 /** A plain JSON copy (the branded, frozen result objects themselves never go into a record). */
 function jsonCopy(v: unknown, depth = 0): Json {
@@ -249,6 +268,26 @@ export async function startRun<TLease, TAudit, TPolicy, TTable, TRequest>(
       if (!healthy) {
         session.raise("error");
         proceed = false;
+      }
+      if (deadlineCheckpoint(session) === "stop") proceed = false;
+    }
+
+    // 14b. The start state, once, after a passed health check and checkpoint; never retried.
+    if (proceed) {
+      let measured: unknown;
+      try {
+        measured = await phaseRunner.measureStartState(session.signal, { notAfterMs: session.deadlineAtMs });
+      } catch {
+        measured = undefined;
+      }
+      const ok = typeof measured === "object" && measured !== null && (measured as { ok?: unknown }).ok === true;
+      if (!ok) {
+        proceed = false;
+        // A cause latched meanwhile (an abort of the signal) or the Run deadline (seen by the checkpoint, which raises time_limit_reached)
+        // explains the failure: nothing is added, as in the experiment phase (run_time_limit). Otherwise the cause of the failure is raised.
+        const latched = session.terminationStatus().state !== "none";
+        const deadline = deadlineCheckpoint(session) === "stop";
+        if (!latched && !deadline) session.raise(startStateFailureCause(measured));
       }
       if (deadlineCheckpoint(session) === "stop") proceed = false;
     }

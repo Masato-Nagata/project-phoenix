@@ -107,6 +107,8 @@ interface WorldOpts {
   readonly scheduleThrows?: boolean;
   readonly wall?: () => unknown;
   readonly health?: (w: World) => unknown;
+  /** The answer of the start-state measurement (task 4.6 W6; default: a successful identity). Receives the signal and the options passed. */
+  readonly measure?: (w: World, signal: AbortSignal, options: unknown) => unknown;
   readonly secretPatterns?: readonly { id: string; source: string }[];
   readonly clockStart?: number;
   readonly firstClockReading?: number;
@@ -128,6 +130,7 @@ interface World {
   store(): RunRecordStore | undefined;
   readonly captured: { input?: Any };
   readonly healthCalls: { n: number };
+  readonly measureCalls: { n: number; signal?: AbortSignal; options?: unknown };
 }
 
 async function world(o: WorldOpts = {}): Promise<World> {
@@ -177,6 +180,7 @@ async function world(o: WorldOpts = {}): Promise<World> {
   let store: RunRecordStore | undefined;
   const captured: { input?: Any } = {};
   const healthCalls = { n: 0 };
+  const measureCalls: { n: number; signal?: AbortSignal; options?: unknown } = { n: 0 };
   // eslint-disable-next-line prefer-const
   let w: World;
   const deps = {
@@ -223,6 +227,13 @@ async function world(o: WorldOpts = {}): Promise<World> {
         execute: async () => {
           throw new Error("U4 never executes");
         },
+        measureStartState: async (signal: AbortSignal, options: unknown) => {
+          measureCalls.n += 1;
+          measureCalls.signal = signal;
+          measureCalls.options = options;
+          log.push("measureStartState");
+          return o.measure === undefined ? { ok: true, identity: "a".repeat(64) } : o.measure(w, signal, options);
+        },
       };
     },
     policy: { createAcceptanceCheck: (records: () => readonly unknown[]) => createAcceptanceCheck(records as Any), evaluateForRecord: () => undefined },
@@ -246,6 +257,7 @@ async function world(o: WorldOpts = {}): Promise<World> {
     store: () => store,
     captured,
     healthCalls,
+    measureCalls,
   };
   return w;
 }
@@ -272,7 +284,7 @@ describe("the order of the start sequence", () => {
     const w = await world();
     const r = started(await run(w));
     expect(r.run.proceed).toBe(true);
-    const labels = ["clock", "storeOpen", "runnerFactory", "leaseCheck", "schedule", "wallClock", "append:run_started", "append:isolation_checks", "health"];
+    const labels = ["clock", "storeOpen", "runnerFactory", "leaseCheck", "schedule", "wallClock", "append:run_started", "append:isolation_checks", "health", "measureStartState"];
     const at = labels.map((l) => w.log.indexOf(l));
     for (const [i, l] of labels.entries()) expect(at[i], l).toBeGreaterThanOrEqual(0);
     expect(at).toEqual([...at].sort((a, b) => a - b));
@@ -280,6 +292,7 @@ describe("the order of the start sequence", () => {
     expect(w.log.slice(w.log.indexOf("runnerFactory"), w.log.indexOf("leaseCheck"))).toContain("clock");
     expect(w.log.filter((l) => l === "leaseCheck")).toHaveLength(1);
     expect(w.log.filter((l) => l === "health")).toHaveLength(1);
+    expect(w.log.filter((l) => l === "measureStartState")).toHaveLength(1);
   });
 });
 
@@ -690,6 +703,8 @@ describe("the acceptance check fails closed when the records cannot be read", ()
     const w = await world({
       build: (input) => {
         held.parts = makeParts({ isAccepted: input.isAccepted });
+        // the Legacy_App answer of the start-state measurement (task 4.6 W6); the verifier fake answers 404 for it otherwise
+        held.parts.http.on((r) => r.method === "GET" && r.path === "/products", { status: 200, body: JSON.stringify({ success: true, data: [] }) });
         return createRunner(held.parts.deps);
       },
     });
@@ -701,11 +716,11 @@ describe("the acceptance check fails closed when the records cannot be read", ()
     const r = started(await run(w));
     const parts = held.parts as Parts;
     expect(r.run.proceed).toBe(true);
-    expect(parts.http.seen).toEqual(["GET /health"]);
+    expect(parts.http.seen).toEqual(["GET /health", "POST /reset", "GET /products"]);
     const out = await r.run.runner.execute(experiment(), "rec-000003", r.run.session.signal);
     expect(out).toMatchObject({ status: "not_executed", reason: "policy_not_accepted", detail: "not_accepted:record_missing" });
     expect("fatal" in out).toBe(false);
-    expect(parts.http.seen).toEqual(["GET /health"]);
+    expect(parts.http.seen).toEqual(["GET /health", "POST /reset", "GET /products"]);
     expect(r.run.session.terminationStatus()).toEqual({ state: "none" });
   });
 
@@ -714,15 +729,15 @@ describe("the acceptance check fails closed when the records cannot be read", ()
     const r = started(await run(w));
     const parts = held.parts as Parts;
     expect(r.run.proceed).toBe(true);
-    expect(parts.http.seen).toEqual(["GET /health"]);
+    expect(parts.http.seen).toEqual(["GET /health", "POST /reset", "GET /products"]);
     breakList(w);
     const first = await r.run.runner.execute(experiment(), "rec-000003", r.run.session.signal);
     expect(first).toMatchObject({ status: "not_executed", reason: "runner_internal_error", fatal: true });
-    expect(parts.http.seen).toEqual(["GET /health"]); // nothing was sent for the Experiment
+    expect(parts.http.seen).toEqual(["GET /health", "POST /reset", "GET /products"]); // nothing was sent for the Experiment
     expect(has(first, LIST_CANARY)).toBe(false);
     const second = await r.run.runner.execute(experiment({ experimentId: "exp-2" }), "rec-000004", r.run.session.signal);
     expect(second).toMatchObject({ status: "interrupted", cause: "fatal_error", phase: "not_started", sentRequests: 0, fatal: true });
-    expect(parts.http.seen).toEqual(["GET /health"]); // still nothing
+    expect(parts.http.seen).toEqual(["GET /health", "POST /reset", "GET /products"]); // still nothing
     expect(r.run.session.terminationStatus()).toEqual({ state: "pending", reason: "error" });
     expect(r.run.session.signal.aborted).toBe(true);
     expect(r.run.writer.state()).toMatchObject({ down: true, failure: "store_failed" });

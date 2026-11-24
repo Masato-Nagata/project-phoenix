@@ -93,7 +93,11 @@ async function harness(credentialFlag: boolean, o: Opts = {}) {
     audit: { prepareAudit: () => ({ ok: false, error: { code: "prepare_failed" } }), auditPayload: () => ({}) },
     responseGate: {},
     policy: { createAcceptanceCheck: () => () => ({ accepted: true }), evaluateForRecord: () => undefined },
-    runnerFactory: () => ({ health: async () => ({ ok: true }), execute: async () => { calls.execute += 1; throw new Error("not called"); } }),
+    runnerFactory: () => ({
+      health: async () => ({ ok: true }),
+      execute: async () => { calls.execute += 1; throw new Error("not called"); },
+      measureStartState: async () => ({ ok: true, identity: "a".repeat(64) }),
+    }),
     comparator: { compare: () => undefined },
     analysisFs: { readFile: async () => new Uint8Array(1), lstat: async () => ({ kind: "file", nlink: 1 }) },
     repoRoot: "/repo",

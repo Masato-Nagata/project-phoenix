@@ -191,10 +191,19 @@ export type ExecutionOutcomeView =
       readonly fatal?: true;
       readonly detail?: string;
     };
+/**
+ * A structural SUPERTYPE of the verifier `StartStateResult` (task 4.6 W6): the identity of the Legacy_App starting state (64 lowercase hex
+ * characters), or a closed failure code with, for a lease failure, the closed lease reason. Never a body, a value or a message.
+ */
+export type StartStateView =
+  | { readonly ok: true; readonly identity: string }
+  | { readonly ok: false; readonly code: string; readonly leaseReason?: string };
 /** Structural copy of the verifier `ExperimentRunner`. */
 export interface ExperimentRunnerPort {
   health(): Promise<{ readonly ok: true } | { readonly ok: false; readonly error: string }>;
   execute(e: unknown, decisionRecordId: string, signal: AbortSignal, options?: { readonly notAfterMs?: number }): Promise<ExecutionOutcomeView>;
+  /** The Run-level start-state measurement (one confirmed reset, one `GET /products`), at most once per Runner; called by `startRun` only. */
+  measureStartState(signal: AbortSignal, options?: { readonly notAfterMs?: number }): Promise<StartStateView>;
 }
 /**
  * What the composition root needs to call verifier `createRunner(RunnerDeps)`. `RunnerDeps` also holds `http`, `addressPolicy`, the lease

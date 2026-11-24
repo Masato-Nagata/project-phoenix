@@ -27,6 +27,7 @@ import { createRunner } from "../../../verifier/src/runner/runner.js";
 import { DEFAULT_ADDRESS_POLICY } from "../../../verifier/src/index.js";
 import { FakeTime } from "../../../verifier/test/helpers/leaseFixtures.js";
 import { FakeHttp, FakeLease } from "../../../verifier/test/helpers/runnerFixtures.js";
+import type { HttpResponse } from "../../../verifier/src/index.js";
 import { manifestInput } from "../helpers/runFixtures.js";
 import { passingIsolation } from "./orchestratorFakes.js";
 import { auditPort, envPort, policyPort, syntheticAuditConfig, toBytes } from "./startupAdapters.js";
@@ -179,6 +180,10 @@ export interface WorldOptions {
   readonly padGenerationToBytes?: number;
   /** Test-only: the text of the one allowlisted source file (synthetic data only). */
   readonly sourceText?: string;
+  /** Test-only (task 4.6 W6): the answer of `GET /products` to the start-state measurement (default: a synthetic product list). */
+  readonly productsReply?: HttpResponse | Error | ((signal: AbortSignal, w: World) => Promise<HttpResponse>);
+  /** Test-only (task 4.6 W6): replaces the Runner the factory returns, built from the real one (to spy on it or to break it). */
+  readonly wrapRunner?: (runner: Any, w: () => World) => unknown;
 }
 
 export interface TimerEntry {
@@ -249,6 +254,17 @@ export async function buildWorld(o: WorldOptions = {}): Promise<World> {
   time.t = 1_000;
   const lease = new FakeLease();
   const http = new FakeHttp(time, lease);
+  // The Legacy_App answer of the Run-level start-state measurement (task 4.6 W6): a confirmed reset (the fake's default), then this
+  // synthetic product list. The verifier fake answers 404 for `GET /products` otherwise. Neutral widget data only.
+  const productsReply = o.productsReply;
+  http.on(
+    (r) => r.method === "GET" && r.path === "/products",
+    productsReply === undefined
+      ? { status: 200, body: JSON.stringify({ success: true, data: [{ id: 1, name: "Widget A", unit_price: 100, stock_quantity: 7 }] }) }
+      : typeof productsReply === "function"
+        ? (signal: AbortSignal) => productsReply(signal, world)
+        : productsReply,
+  );
   const approval = await issueTicket({ iterations: o.iterations ?? 2, ...(o.limits ?? {}) }, lease);
 
   // analysis file system: one allowlisted file, the two allowlist documents
@@ -349,8 +365,13 @@ export async function buildWorld(o: WorldOptions = {}): Promise<World> {
         clock: time,
         isAccepted: input.isAccepted,
       });
+      if (o.wrapRunner !== undefined) return o.wrapRunner(runner, () => world);
       if (o.healthFails !== true) return runner;
-      return { health: async () => ({ ok: false as const, error: "unhealthy" }), execute: runner.execute.bind(runner) };
+      return {
+        health: async () => ({ ok: false as const, error: "unhealthy" }),
+        execute: runner.execute.bind(runner),
+        measureStartState: runner.measureStartState.bind(runner),
+      };
     },
     comparator: { compare },
     analysisFs: repo,

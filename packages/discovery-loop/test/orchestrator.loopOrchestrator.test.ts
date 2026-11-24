@@ -131,6 +131,10 @@ async function harness(o: Opts = {}) {
           return o.health === undefined ? { ok: true } : o.health();
         },
         execute: async () => { throw new Error("not called"); },
+        measureStartState: async () => {
+          log.push("measureStartState");
+          return { ok: true, identity: "a".repeat(64) };
+        },
       };
     },
     comparator: { compare: () => undefined },
@@ -216,7 +220,7 @@ describe("the order of a Run", () => {
     spy.mockImplementationOnce(endingLoop(h.log) as Any);
     const r = await h.run();
     expect(r).toMatchObject({ sealed: true, summary: { terminationReason: "iteration_limit_reached" } });
-    const labels = ["leaseCheck", "storeOpen", "runnerFactory", "append:run_started", "append:isolation_checks", "health", "buildSourceBundle", "append:source_bundle_manifest", "runIterations", "cancel", "append:termination"];
+    const labels = ["leaseCheck", "storeOpen", "runnerFactory", "append:run_started", "append:isolation_checks", "health", "measureStartState", "buildSourceBundle", "append:source_bundle_manifest", "runIterations", "cancel", "append:termination"];
     const idx = labels.map((l) => at(h.log, l));
     expect(idx).toEqual([...idx].sort((a, b) => a - b));
     expect(spy).toHaveBeenCalledTimes(1);
