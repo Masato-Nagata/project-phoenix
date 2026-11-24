@@ -221,7 +221,23 @@ describe("(c) nothing imports the orchestrator except the orchestrator", () => {
     const all = walk(SRC).filter((f) => !rel(f).startsWith("orchestrator/"));
     expect(all.map(rel)).toEqual(expect.arrayContaining(["gate/mayStartRun.ts", "config/startup.ts", "index.ts"]));
     expect(all.some((f) => rel(f).startsWith("isolation/"))).toBe(true);
-    for (const f of all) expect(mentionsOrchestrator(readFileSync(f, "utf8")), rel(f)).toBe(false);
+    for (const f of all) {
+      // the one exception (task 4.9-B): the composition root main.ts, and only for these two exact specifiers (checked below)
+      if (rel(f) === "main.ts") continue;
+      expect(mentionsOrchestrator(readFileSync(f, "utf8")), rel(f)).toBe(false);
+    }
+  });
+  const MAIN_ORCHESTRATOR_IMPORTS = ["./orchestrator/loopOrchestrator.js", "./orchestrator/runComposition.js"];
+  const orchestratorImportsOf = (source: string): string[] => [...new Set(specifiersOf(source).filter((s) => /(^|\/)orchestrator(\/|$)/.test(s)))].sort();
+  it("main.ts imports exactly loopOrchestrator.js and runComposition.js of the orchestrator, and re-exports nothing of it", () => {
+    const source = readFileSync(join(SRC, "main.ts"), "utf8");
+    expect(orchestratorImportsOf(source)).toEqual(MAIN_ORCHESTRATOR_IMPORTS);
+    expect(source).not.toMatch(/^\s*export\s*(?:\*|\{[^}]*\})\s*from\s*["']\.\/orchestrator\//m);
+  });
+  it("positive control of the main.ts exception: a third orchestrator module or a re-export is a difference", () => {
+    expect(orchestratorImportsOf(`import { a } from "./orchestrator/loopOrchestrator.js";\nimport { b } from "./orchestrator/runComposition.js";\nimport type { T } from "./orchestrator/types.js";`)).not.toEqual(MAIN_ORCHESTRATOR_IMPORTS);
+    expect('export { composeRun } from "./orchestrator/runComposition.js";').toMatch(/^\s*export\s*(?:\*|\{[^}]*\})\s*from\s*["']\.\/orchestrator\//m);
+    expect(orchestratorImportsOf(`import { a } from "./orchestrator/loopOrchestrator.js";\nimport { b } from "./orchestrator/runComposition.js";`)).toEqual(MAIN_ORCHESTRATOR_IMPORTS);
   });
   it("positive control: fixtures with the import are reported", () => {
     for (const bad of [

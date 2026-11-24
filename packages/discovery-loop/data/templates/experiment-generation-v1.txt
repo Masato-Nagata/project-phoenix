@@ -1,0 +1,7 @@
+Propose experiments for the supplied hypothesis revision using only the available evidence and the applicable experiment policy.
+
+Each proposed experiment must remain within the permitted operations, destinations, preparation rules, and response schema.
+
+Do not execute experiments or commands. Do not propose actions outside the permitted policy.
+
+Return only the response required by the applicable JSON schema.

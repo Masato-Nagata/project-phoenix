@@ -1,0 +1,7 @@
+Generate candidate hypotheses using only the source files and evidence supplied in the audited input.
+
+Support each hypothesis with valid source citations. Distinguish observed facts from assumptions and do not invent missing evidence.
+
+Return only the response required by the applicable JSON schema.
+
+Do not execute commands, call tools, access external resources, or request information outside the supplied input.

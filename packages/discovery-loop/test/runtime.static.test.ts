@@ -37,7 +37,10 @@ const ALLOWED: Record<string, readonly string[]> = {
   "analysisFs.ts": ["node:fs", "node:path", "../schema/types.js"],
   "auditAdapter.ts": ["@phoenix/ai-client"],
   "clocks.ts": [],
+  "runnerFactory.ts": ["@phoenix/verifier"],
   "semanticHash.ts": ["@phoenix/ai-client"],
+  "startupInputs.ts": ["./analysisFs.js"],
+  "startupPorts.ts": ["@phoenix/ai-client", "@phoenix/verifier", "../config/index.js", "./startupInputs.js"],
 };
 const outside = (file: string, source: string): string[] => specifiersOf(source).filter((s) => !(ALLOWED[file] ?? []).includes(s));
 const PHOENIX_ROOT_ENTRY = /^@phoenix\/(?:ai-client|analyzer|verifier)$/;
@@ -58,7 +61,7 @@ const mentionsSibling = (source: string): boolean => specifiersOf(source).some((
 
 describe("the folder", () => {
   it("holds exactly the planned files", () => {
-    expect(files).toEqual(["analysisFs.ts", "auditAdapter.ts", "clocks.ts", "semanticHash.ts"]);
+    expect(files).toEqual(["analysisFs.ts", "auditAdapter.ts", "clocks.ts", "runnerFactory.ts", "semanticHash.ts", "startupInputs.ts", "startupPorts.ts"]);
     expect(Object.keys(ALLOWED).sort()).toEqual(files);
   });
 });
@@ -151,9 +154,28 @@ describe("(c) no access to the orchestrator, the report or approval side, evalua
 });
 
 describe("(d) nothing else in src imports the runtime folder or a sibling package; the package entry does not export it", () => {
-  // `main.ts` of task 4.9-B is the only file that will be allowed to import `./runtime/` and `@phoenix/*`; it does not exist yet. Adding it
-  // means adding its exact name to this list and nothing else.
-  const IMPORTERS: readonly string[] = [];
+  // `main.ts` (task 4.9-B, the composition root) is the only file of src that may import `./runtime/` and `@phoenix/*`. Its exception is not a
+  // skip: the test below pins its runtime and sibling imports to an exact list.
+  const IMPORTERS: readonly string[] = ["main.ts"];
+  const MAIN_RUNTIME_IMPORTS = [
+    "./runtime/analysisFs.js", "./runtime/auditAdapter.js", "./runtime/clocks.js", "./runtime/runnerFactory.js", "./runtime/semanticHash.js",
+    "./runtime/startupInputs.js", "./runtime/startupPorts.js",
+  ];
+  const MAIN_SIBLING_IMPORTS = ["@phoenix/ai-client", "@phoenix/analyzer", "@phoenix/verifier"];
+  const runtimeAndSiblingOf = (source: string): { runtime: string[]; siblings: string[] } => ({
+    runtime: [...new Set(specifiersOf(source).filter((s) => /(^|\/)runtime(\/|$)/.test(s)))].sort(),
+    siblings: [...new Set(specifiersOf(source).filter((s) => s.startsWith("@phoenix/")))].sort(),
+  });
+  it("main.ts imports exactly the listed runtime adapters and the three sibling root entries, and nothing of runtime/ is re-exported", () => {
+    const source = readFileSync(join(SRC, "main.ts"), "utf8");
+    expect(runtimeAndSiblingOf(source)).toEqual({ runtime: [...MAIN_RUNTIME_IMPORTS].sort(), siblings: MAIN_SIBLING_IMPORTS });
+    expect(source).not.toMatch(/^\s*export\s*(?:\*|\{[^}]*\})\s*from\s*["']\.\/runtime\//m);
+  });
+  it("positive control of the main.ts exception: an extra runtime import or a deep sibling import is a difference", () => {
+    const extra = runtimeAndSiblingOf('import { a } from "./runtime/other.js";\nimport { b } from "@phoenix/verifier/dist/x.js";');
+    expect(extra.runtime).not.toEqual([...MAIN_RUNTIME_IMPORTS].sort());
+    expect(extra.siblings).not.toEqual(MAIN_SIBLING_IMPORTS);
+  });
   it("holds for every file outside runtime/", () => {
     const all = walk(SRC).filter((f) => !rel(f).startsWith("runtime/"));
     expect(all.map(rel)).toEqual(expect.arrayContaining(["index.ts", "config/startup.ts", "orchestrator/loopOrchestrator.ts"]));

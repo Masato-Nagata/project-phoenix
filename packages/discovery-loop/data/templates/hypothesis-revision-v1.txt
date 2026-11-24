@@ -1,0 +1,7 @@
+Revise the supplied hypothesis using only the provided experiment records, observations, comparisons, and source evidence.
+
+Preserve valid citations, distinguish confirmed findings from unresolved assumptions, and do not claim more than the evidence supports.
+
+Return only the response required by the applicable JSON schema.
+
+Do not execute commands, call tools, or access external resources.

@@ -27,11 +27,14 @@ function foreignImports(code: string): string[] {
 // Isolation-import rule. relPath is POSIX-style and relative to SRC. Returns the offending specifiers (empty = allowed).
 const ISOLATION_SPEC = /(^|\/)isolation(\/|$)/;
 const ORCHESTRATOR_ALLOWED = new Set(["../isolation/index.js", "../isolation/types.js"]);
+/** The composition root (task 4.9-B) builds the real IsolationDeps: main.ts may import the node:fs adapter, and nothing else of the module. */
+const MAIN_ALLOWED = new Set(["./isolation/nodeDeps.js"]);
 const mentionsIsolation = (code: string): boolean => importsOf(stripComments(code)).some((s) => ISOLATION_SPEC.test(s));
 function isolationViolations(relPath: string, code: string): string[] {
   const parts = relPath.split("/");
   if (parts[0] === "isolation") return [];
   const specs = importsOf(stripComments(code)).filter((s) => ISOLATION_SPEC.test(s));
+  if (relPath === "main.ts") return specs.filter((s) => !MAIN_ALLOWED.has(s));
   // only the top level of orchestrator/ may use the two exact public specifiers; nested files may not
   const topLevelOrchestrator = parts.length === 2 && parts[0] === "orchestrator";
   return topLevelOrchestrator ? specs.filter((s) => !ORCHESTRATOR_ALLOWED.has(s)) : specs;
@@ -89,6 +92,18 @@ describe("independence of the access-denial module", () => {
     expect(isolationViolations("orchestrator/startGate.ts", `${barrel}\nimport { b } from "../isolation/nodeDeps.js";`)).toEqual(["../isolation/nodeDeps.js"]);
     expect(isolationViolations("orchestrator/sub/x.ts", 'import { a } from "../../isolation/index.js";')).toEqual(["../../isolation/index.js"]);
     expect(isolationViolations("orchestrator/startGate.ts", 'import { a } from "./other.js";\nimport { b } from "../schema/types.js";')).toEqual([]);
+  });
+  it("main.ts imports exactly the node:fs adapter of the isolation module", () => {
+    const src = readFileSync(join(SRC, "main.ts"), "utf8");
+    expect(importsOf(stripComments(src)).filter((s) => ISOLATION_SPEC.test(s))).toEqual(["./isolation/nodeDeps.js"]);
+  });
+  it("positive control: main.ts may import nodeDeps.js only, and no other file may import nodeDeps.js", () => {
+    expect(isolationViolations("main.ts", 'import { createNodeIsolationDeps } from "./isolation/nodeDeps.js";')).toEqual([]);
+    for (const spec of ["./isolation/index.js", "./isolation/verify.js", "./isolation/types.js", "./isolation/attestation.js"]) {
+      expect(isolationViolations("main.ts", `import { a } from "${spec}";`), spec).toEqual([spec]);
+    }
+    expect(isolationViolations("runtime/startupPorts.ts", 'import { a } from "../isolation/nodeDeps.js";')).toEqual(["../isolation/nodeDeps.js"]);
+    expect(isolationViolations("index.ts", 'import { a } from "./isolation/nodeDeps.js";')).toEqual(["./isolation/nodeDeps.js"]);
   });
   it("positive control: every other directory may not import the isolation module, public or not", () => {
     const cases: [string, string][] = [
