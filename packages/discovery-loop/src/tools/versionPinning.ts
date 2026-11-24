@@ -10,7 +10,8 @@ export type FindingKind =
   | "range_operator"
   | "latest"
   | "missing_entry"
-  | "not_verified";
+  | "not_verified"
+  | "workspace_mismatch";
 
 export interface PinFinding {
   readonly kind: FindingKind;
@@ -20,6 +21,8 @@ export interface PinFinding {
   readonly manifestVersion: string;
   /** Version in the Version_Pinning_Record, when an entry exists. */
   readonly recordVersion?: string;
+  /** Version of the workspace package of this repository, for a `workspace_mismatch`. */
+  readonly workspaceVersion?: string;
   /** Verification status of the record entry, when relevant. */
   readonly status?: string;
   readonly message: string;
@@ -50,9 +53,16 @@ export interface PinCheckResult {
 
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
+/**
+ * `workspaces` maps the name of each REAL workspace package of this repository (see `loadWorkspaces`) to its own exact version. A dependency
+ * with such a name is not a third-party package: it needs no entry in the record, but its declared version must be an exact version (checked
+ * first, like every other declaration) and must equal the version of the workspace package. A name that is not in the map, including an
+ * `@phoenix/*` name of a package that does not exist, gets the ordinary third-party check and is reported as `missing_entry`.
+ */
 export function checkVersionPins(
   manifests: readonly ManifestInput[],
   record: PinRecord,
+  workspaces: ReadonlyMap<string, string> = new Map(),
 ): PinCheckResult {
   const entries = new Map<string, PinRecordEntry>();
   for (const e of record.dependencies) entries.set(e.name, e);
@@ -81,6 +91,19 @@ export function checkVersionPins(
             kind: "range_operator",
             message: `${m.path}: ${name} version "${declared}" is not an exact version (range operator or tag)`,
           });
+          continue;
+        }
+
+        const workspaceVersion = workspaces.get(name);
+        if (workspaceVersion !== undefined) {
+          if (workspaceVersion !== declared) {
+            findings.push({
+              ...base,
+              kind: "workspace_mismatch",
+              workspaceVersion,
+              message: `${m.path}: workspace package ${name} is declared as ${declared} but the workspace has ${workspaceVersion}`,
+            });
+          }
           continue;
         }
 
@@ -157,6 +180,33 @@ export function loadRecord(repoRoot: string): PinRecord {
   return readJson(join(repoRoot, "docs", "version-pinning.json")) as PinRecord;
 }
 
+/**
+ * The real workspace packages: `packages/<dir>/package.json` of a repository whose root manifest lists the workspace pattern `packages/*`.
+ * A package counts only with a string name and an exact version. A name that two directories claim is ambiguous and is not included.
+ */
+export function loadWorkspaces(repoRoot: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const root = readJson(join(repoRoot, "package.json")) as { workspaces?: unknown };
+  if (!Array.isArray(root.workspaces) || !root.workspaces.includes("packages/*")) return out;
+  const packagesDir = join(repoRoot, "packages");
+  if (!existsSync(packagesDir)) return out;
+  const ambiguous = new Set<string>();
+  const names = readdirSync(packagesDir, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name)
+    .sort();
+  for (const dir of names) {
+    const file = join(packagesDir, dir, "package.json");
+    if (!existsSync(file)) continue;
+    const pkg = readJson(file) as { name?: unknown; version?: unknown };
+    if (typeof pkg.name !== "string" || pkg.name === "" || typeof pkg.version !== "string" || !EXACT_VERSION.test(pkg.version)) continue;
+    if (out.has(pkg.name)) ambiguous.add(pkg.name);
+    else out.set(pkg.name, pkg.version);
+  }
+  for (const name of ambiguous) out.delete(name);
+  return out;
+}
+
 export function checkRepository(repoRoot: string): PinCheckResult {
-  return checkVersionPins(loadManifests(repoRoot), loadRecord(repoRoot));
+  return checkVersionPins(loadManifests(repoRoot), loadRecord(repoRoot), loadWorkspaces(repoRoot));
 }
