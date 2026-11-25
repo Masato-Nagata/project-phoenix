@@ -1,6 +1,7 @@
 # Runtime image of the AI_Discovery_Loop (`discovery-runtime`, discovery-loop spec D1, R15, R20).
 #
-# NOT BUILDABLE YET: needs package-lock.json and the packages created in M1-M4, and an approved `docker build`.
+# BUILD ONLY: this file can be built with an approved `docker build` (the lockfile and the four packages exist). A successful build
+# says nothing about the runtime behavior of the image or of a Run; those are measured in later tasks (4.9-E and after).
 # Build context: repository root. The root .dockerignore excludes everything except the files the build needs,
 # so evaluation/, tests/, .kiro/, legacy/, docs/, infra/ and .env* can never enter an image layer.
 #
@@ -17,6 +18,7 @@ FROM ${BASE_IMAGE} AS build
 RUN test "$(node --version)" = "v26.13.0" && test "$(npm --version)" = "11.20.0"
 WORKDIR /build
 COPY package.json package-lock.json .npmrc ./
+COPY tsconfig.base.json tsconfig.json ./
 COPY packages/ ./packages/
 RUN npm ci --ignore-scripts \
  && npm run build \
