@@ -303,9 +303,9 @@ describe("env_names", () => {
     expect(meas(await run({ envNames: () => "HOME" }).result, "env_names")["reason"]).toBe("port_failed");
     expect(meas(await run({ envNames: () => [1] }).result, "env_names")["reason"]).toBe("port_failed");
   });
-  it("composeAllowedEnvNames adds only the module constants to what the caller passes (no credential is added by itself)", () => {
-    expect(composeAllowedEnvNames([])).toEqual(["HOME", "PHOENIX_LEASE_D_MS", "PHOENIX_LEASE_NONCE", "PHOENIX_RUN_ID"]);
-    expect(composeAllowedEnvNames(["B", "A", "HOME"])).toEqual(["A", "B", "HOME", "PHOENIX_LEASE_D_MS", "PHOENIX_LEASE_NONCE", "PHOENIX_RUN_ID"]);
+  it("composeAllowedEnvNames adds only the fixed module constants (Launcher names and runtime base names) to what the caller passes (no credential is added by itself)", () => {
+    expect(composeAllowedEnvNames([])).toEqual(["HOME", "HOSTNAME", "NODE_ENV", "NODE_VERSION", "NPM_CONFIG_UPDATE_NOTIFIER", "PATH", "PHOENIX_LEASE_D_MS", "PHOENIX_LEASE_NONCE", "PHOENIX_RUN_ID"]);
+    expect(composeAllowedEnvNames(["B", "A", "HOME"])).toEqual(["A", "B", "HOME", "HOSTNAME", "NODE_ENV", "NODE_VERSION", "NPM_CONFIG_UPDATE_NOTIFIER", "PATH", "PHOENIX_LEASE_D_MS", "PHOENIX_LEASE_NONCE", "PHOENIX_RUN_ID"]);
     expect(composeAllowedEnvNames([])).not.toContain("KIRO_API_KEY");
   });
 });

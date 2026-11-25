@@ -30,8 +30,18 @@ import {
 /** Upper bound of one port call. A port that does not answer in time fails its check with `timeout`. */
 export const PORT_TIMEOUT_MS = 5000;
 
-/** Names that the Launcher sets in the `run` profile (design, "Environment"). The image default names are fixed in task 4.9 after measurement (UNVERIFIED). */
+/** Names that the Launcher sets in the `run` profile (design, "Environment"). */
 export const MODULE_ENV_NAMES: readonly string[] = Object.freeze(["HOME", "PHOENIX_LEASE_D_MS", "PHOENIX_LEASE_NONCE", "PHOENIX_RUN_ID"]);
+
+/**
+ * Names that the runtime base provides in a real container: the image defaults of the pinned Node.js base image and of
+ * `infra/discovery/runtime.Dockerfile` (`PATH`, `NODE_VERSION`, `NODE_ENV`, `NPM_CONFIG_UPDATE_NOTIFIER`) and the name that Docker adds at
+ * run time (`HOSTNAME`). A FIXED list, taken from the real-container measurement of task 4.9-E1 (2026-11-25). It is NOT derived from
+ * `process.env` at run time, and it has no wildcard or prefix rule: a name that was not observed (for example `YARN_VERSION`) is not on it.
+ * It allows these NAMES to be present only. It grants no permission to read a value, to send anything to an AI service, or to widen an
+ * Approval, and it is not re-exported from `index.ts`. `env_values_not_inspected` stays an open residual risk.
+ */
+export const RUNTIME_BASE_ENV_NAMES: readonly string[] = Object.freeze(["HOSTNAME", "NODE_ENV", "NODE_VERSION", "NPM_CONFIG_UPDATE_NOTIFIER", "PATH"]);
 
 /**
  * Longest wait for a port call that already timed out (a late scratch preparation or a late root-file-system creation) to settle
@@ -40,13 +50,14 @@ export const MODULE_ENV_NAMES: readonly string[] = Object.freeze(["HOME", "PHOEN
 export const SETTLE_GRACE_MS = 3000;
 
 /**
- * Builds `allowedEnvNames` from names plus the module constants (`HOME`, `PHOENIX_LEASE_D_MS`, `PHOENIX_LEASE_NONCE`, `PHOENIX_RUN_ID`).
- * It is a pure function of its argument and those four constants and adds nothing else.
+ * Builds `allowedEnvNames` from names plus the module constants: `MODULE_ENV_NAMES` (`HOME`, `PHOENIX_LEASE_D_MS`, `PHOENIX_LEASE_NONCE`,
+ * `PHOENIX_RUN_ID`) and `RUNTIME_BASE_ENV_NAMES` (`HOSTNAME`, `NODE_ENV`, `NODE_VERSION`, `NPM_CONFIG_UPDATE_NOTIFIER`, `PATH`).
+ * It is a pure function of its argument and those nine fixed names and adds nothing else.
  * The caller (task 4.4) must pass ONLY names from `approval.envVarsRead`, never `approval.credentials`: a credential must not be brought
  * into the runtime (human decision of 2026-11-17, decision 2; it supersedes the `credentials` wording of tasks.md 4.2 item (2)).
  */
 export function composeAllowedEnvNames(approvalNames: readonly string[]): readonly string[] {
-  return Object.freeze([...new Set([...MODULE_ENV_NAMES, ...approvalNames])].sort());
+  return Object.freeze([...new Set([...MODULE_ENV_NAMES, ...RUNTIME_BASE_ENV_NAMES, ...approvalNames])].sort());
 }
 
 const sha256 = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");

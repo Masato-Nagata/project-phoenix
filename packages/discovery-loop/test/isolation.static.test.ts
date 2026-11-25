@@ -192,3 +192,56 @@ describe("no waiver (R15.14)", () => {
     for (const bad of ["readonly waive: boolean;", "readonly x?: string;", "readonly mode: 'a' | 'b';", "x: string;"]) expect(re.test(bad), bad).toBe(false);
   });
 });
+
+// Task 4.9-E2: where the environment-name constants and the allowed-name list are defined, composed and referenced.
+// WHAT THIS PROVES, AND WHAT IT DOES NOT. It scans the identifiers in the source text outside comments. That pins the files in which each
+// identifier occurs today: the definition and the one composition in isolation/verify.ts, the barrel re-export of the four Launcher names,
+// the one call of composeAllowedEnvNames in orchestrator/envAllowlist.ts, and the places where the allowed list is passed to env_names. Together
+// with the import rules above it shows that no AI-client, verifier, analyzer, manifest, store or config source names these identifiers. It does
+// NOT prove the data flow of a running program (a renamed alias or a string-built name would escape a text scan); that is covered by the tests
+// of the modules themselves. Presence of a NAME in the environment is a different permission from reading a value, from sending anything to an
+// AI service and from an Approval; this scan only shows that the list has no other consumer in the source.
+describe("the environment-name constants and the allowed-name list (task 4.9-E2)", () => {
+  const usesIdentifier = (code: string, name: string): boolean => new RegExp(`\\b${name}\\b`).test(stripComments(code));
+  const occurrences = (code: string, name: string): number => [...stripComments(code).matchAll(new RegExp(`\\b${name}\\b`, "g"))].length;
+  const filesUsing = (name: string): string[] =>
+    walk(SRC)
+      .filter((f) => usesIdentifier(readFileSync(f, "utf8"), name))
+      .map((f) => relative(SRC, f).split(sep).join("/"))
+      .sort();
+
+  it("RUNTIME_BASE_ENV_NAMES occurs outside comments in isolation/verify.ts only: once as the definition and once in the composition", () => {
+    expect(filesUsing("RUNTIME_BASE_ENV_NAMES")).toEqual(["isolation/verify.ts"]);
+    expect(occurrences(readFileSync(join(ISO, "verify.ts"), "utf8"), "RUNTIME_BASE_ENV_NAMES")).toBe(2);
+  });
+  it("the public barrel does not re-export RUNTIME_BASE_ENV_NAMES (the package surface is not widened)", () => {
+    expect(Object.keys(isolation)).not.toContain("RUNTIME_BASE_ENV_NAMES");
+    expect(usesIdentifier(readFileSync(join(ISO, "index.ts"), "utf8"), "RUNTIME_BASE_ENV_NAMES")).toBe(false);
+  });
+  it("MODULE_ENV_NAMES occurs only in isolation/verify.ts and in the barrel re-export isolation/index.ts", () => {
+    expect(filesUsing("MODULE_ENV_NAMES")).toEqual(["isolation/index.ts", "isolation/verify.ts"]);
+  });
+  it("composeAllowedEnvNames is used outside the isolation folder by orchestrator/envAllowlist.ts only", () => {
+    expect(filesUsing("composeAllowedEnvNames").filter((f) => !f.startsWith("isolation/"))).toEqual(["orchestrator/envAllowlist.ts"]);
+  });
+  it("the allowed list (`allowedEnvNames`) is named only by the isolation types and check, and by the start gate and its result type", () => {
+    expect(filesUsing("allowedEnvNames")).toEqual(["isolation/types.ts", "isolation/verify.ts", "orchestrator/startGate.ts", "orchestrator/types.ts"]);
+  });
+  it("no source of ai-client, verifier or analyzer names the constants, the compose function or the allowed list", () => {
+    for (const pkg of ["ai-client", "verifier", "analyzer"]) {
+      for (const f of walk(join(PKGS, pkg, "src"))) {
+        const code = readFileSync(f, "utf8");
+        for (const id of ["MODULE_ENV_NAMES", "RUNTIME_BASE_ENV_NAMES", "composeAllowedEnvNames", "allowedEnvNames"]) {
+          expect(usesIdentifier(code, id), `${pkg}/${relative(join(PKGS, pkg, "src"), f)} ${id}`).toBe(false);
+        }
+      }
+    }
+  });
+  it("positive control: the scanner counts an identifier in code, ignores a comment, and does not match a longer name", () => {
+    expect(usesIdentifier("const a = RUNTIME_BASE_ENV_NAMES;", "RUNTIME_BASE_ENV_NAMES")).toBe(true);
+    expect(usesIdentifier("// RUNTIME_BASE_ENV_NAMES is only a comment\nconst a = 1;", "RUNTIME_BASE_ENV_NAMES")).toBe(false);
+    expect(usesIdentifier("/* RUNTIME_BASE_ENV_NAMES */ const a = 1;", "RUNTIME_BASE_ENV_NAMES")).toBe(false);
+    expect(usesIdentifier("const X_RUNTIME_BASE_ENV_NAMES_Y = 1;", "RUNTIME_BASE_ENV_NAMES")).toBe(false);
+    expect(occurrences("a(RUNTIME_BASE_ENV_NAMES); b(RUNTIME_BASE_ENV_NAMES);", "RUNTIME_BASE_ENV_NAMES")).toBe(2);
+  });
+});

@@ -77,9 +77,30 @@ describe("buildAllowedEnvNames", () => {
   });
 
   it("the composition contract is unchanged: module constants plus the given names, sorted and deduplicated", () => {
-    expect(composeAllowedEnvNames(["B_ONE", "A_ONE", "B_ONE", "HOME"])).toEqual(["A_ONE", "B_ONE", "HOME", "PHOENIX_LEASE_D_MS", "PHOENIX_LEASE_NONCE", "PHOENIX_RUN_ID"]);
+    expect(composeAllowedEnvNames(["B_ONE", "A_ONE", "B_ONE", "HOME"])).toEqual(["A_ONE", "B_ONE", "HOME", "HOSTNAME", "NODE_ENV", "NODE_VERSION", "NPM_CONFIG_UPDATE_NOTIFIER", "PATH", "PHOENIX_LEASE_D_MS", "PHOENIX_LEASE_NONCE", "PHOENIX_RUN_ID"]);
     expect(buildAllowedEnvNames({ config: { envNames: ["B_ONE", "A_ONE", "B_ONE"] }, credentials: [] } as Any)).toEqual(
       composeAllowedEnvNames(["B_ONE", "A_ONE", "B_ONE"]),
     );
   });
-});
+
+  // Task 4.9-E2: the nine fixed names are the module's; the Approval-derived contract and the credential exclusion are unchanged.
+  // The expected lists are written out here, not built from the constants of verify.ts.
+  const NINE = ["HOME", "HOSTNAME", "NODE_ENV", "NODE_VERSION", "NPM_CONFIG_UPDATE_NOTIFIER", "PATH", "PHOENIX_LEASE_D_MS", "PHOENIX_LEASE_NONCE", "PHOENIX_RUN_ID"];
+
+  it("mock ticket: exactly the nine fixed names plus the configured names, sorted, and nothing else", async () => {
+    const { approval } = await issueStartup({ envNames: ["EXAMPLE_ONE", "EXAMPLE_TWO"] });
+    expect([...buildAllowedEnvNames(approval)]).toEqual([...NINE, "EXAMPLE_ONE", "EXAMPLE_TWO"].sort());
+  });
+
+  it("a kiro-cli-like ticket: the credential name is still removed and an unobserved name is not added", async () => {
+    const { approval } = await issueStartup({ provider: "kiro-cli", envNames: ["EXAMPLE_ONE", CREDENTIAL_NAME] });
+    const names = buildAllowedEnvNames(approval);
+    expect([...names]).toEqual([...NINE, "EXAMPLE_ONE"].sort());
+    expect(names).not.toContain(CREDENTIAL_NAME);
+    expect(names).not.toContain("YARN_VERSION");
+  });
+
+  it("a configured name that is already one of the nine adds nothing (the configuration cannot widen the nine)", async () => {
+    const { approval } = await issueStartup({ envNames: ["PATH"] });
+    expect([...buildAllowedEnvNames(approval)]).toEqual(NINE);
+  });});

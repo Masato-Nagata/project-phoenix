@@ -4,6 +4,7 @@
 # says nothing about the runtime behavior of the image or of a Run; those are measured in later tasks (4.9-E and after).
 # Build context: repository root. The root .dockerignore excludes everything except the files the build needs,
 # so evaluation/, tests/, .kiro/, legacy/, docs/, infra/ and .env* can never enter an image layer.
+# The build stage keeps the sources it needs to compile; the runtime stage takes only package.json, dist and data of each package (see its COPY lines).
 #
 # Started only by the host-side Launcher with `docker run` (never by `docker compose up`), with:
 #   --network phoenix-discovery-lab --read-only --cap-drop ALL --security-opt no-new-privileges:true
@@ -33,7 +34,19 @@ ENV NODE_ENV=production \
 WORKDIR /app
 COPY --from=build --chown=0:0 /build/package.json ./package.json
 COPY --from=build --chown=0:0 /build/node_modules ./node_modules
-COPY --from=build --chown=0:0 /build/packages ./packages
+# The runtime stage copies ONLY what a Run executes or reads (task 4.9-E2): per package its package.json and dist, plus the baked data of
+# verifier and discovery-loop. src/, test/, test-vectors/, fixtures and tsconfig.json stay in the build stage and never enter a runtime layer.
+# Each COPY is explicit and root-owned; there is no copy of all of /build/packages and no deletion after a copy.
+COPY --from=build --chown=0:0 /build/packages/ai-client/package.json ./packages/ai-client/package.json
+COPY --from=build --chown=0:0 /build/packages/ai-client/dist ./packages/ai-client/dist
+COPY --from=build --chown=0:0 /build/packages/analyzer/package.json ./packages/analyzer/package.json
+COPY --from=build --chown=0:0 /build/packages/analyzer/dist ./packages/analyzer/dist
+COPY --from=build --chown=0:0 /build/packages/verifier/package.json ./packages/verifier/package.json
+COPY --from=build --chown=0:0 /build/packages/verifier/dist ./packages/verifier/dist
+COPY --from=build --chown=0:0 /build/packages/verifier/data ./packages/verifier/data
+COPY --from=build --chown=0:0 /build/packages/discovery-loop/package.json ./packages/discovery-loop/package.json
+COPY --from=build --chown=0:0 /build/packages/discovery-loop/dist ./packages/discovery-loop/dist
+COPY --from=build --chown=0:0 /build/packages/discovery-loop/data ./packages/discovery-loop/data
 LABEL phoenix.discovery.role="runtime"
 USER 10001:10001
 # Entry point of the Loop_Orchestrator (created in M4).

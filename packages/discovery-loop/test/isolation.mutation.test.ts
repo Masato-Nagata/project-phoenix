@@ -12,7 +12,7 @@ import { classifyCode } from "../src/isolation/classify.js";
 import { PROBE_LOCATIONS, PROBE_OPS, PROBE_SET_SHA256 } from "../src/isolation/probeSet.js";
 import { MOUNT_NOT_MEASURED } from "../src/isolation/types.js";
 import type { AccessDenialResult, CheckId, IsolationCheck, ProbeOutcome } from "../src/isolation/types.js";
-import { MODULE_ENV_NAMES, composeAllowedEnvNames, isAccessDenialResult, verifyGroundTruthAccessDenial } from "../src/isolation/verify.js";
+import { MODULE_ENV_NAMES, RUNTIME_BASE_ENV_NAMES, composeAllowedEnvNames, isAccessDenialResult, verifyGroundTruthAccessDenial } from "../src/isolation/verify.js";
 import { assertDenialWithControl, type ProbeRunRecord } from "./support/assertDenialWithControl.js";
 import { ALLOWED, E, GOOD_BUNDLE, OK, SCRATCH, defaultFsOutcome, makeDeps, type Behavior } from "./support/isolationFakes.js";
 
@@ -262,18 +262,76 @@ describe("mutation check (7): environment allowlist", () => {
   it("the module constants are exactly the four Launcher names", () => {
     expect([...MODULE_ENV_NAMES]).toEqual(["HOME", "PHOENIX_LEASE_D_MS", "PHOENIX_LEASE_NONCE", "PHOENIX_RUN_ID"]);
   });
-  it("composeAllowedEnvNames is a pure function of its argument and the four constants and adds nothing else", () => {
+  it("composeAllowedEnvNames is a pure function of its argument and the fixed constants (four Launcher names, five runtime base names) and adds nothing else", () => {
     expect(composeAllowedEnvNames.length).toBe(1);
     fc.assert(
       fc.property(fc.array(fc.string({ maxLength: 12 }), { maxLength: 10 }), (names) => {
         const out = composeAllowedEnvNames(names);
-        expect(new Set(out)).toEqual(new Set([...names, ...MODULE_ENV_NAMES]));
+        expect(new Set(out)).toEqual(new Set([...names, ...MODULE_ENV_NAMES, ...RUNTIME_BASE_ENV_NAMES]));
         expect(out).toEqual([...new Set(out)].sort());
         expect(composeAllowedEnvNames(names)).toEqual(out); // deterministic
       }),
       { numRuns: 100, seed: 4203 },
     );
     expect(composeAllowedEnvNames(["A"])).not.toContain("KIRO_API_KEY"); // a credential name is never added by the module
+  });
+});
+
+// Guards (task 4.9-E2): composeAllowedEnvNames adds exactly the nine fixed names that the module owns (four Launcher names, five runtime base
+// names from the real-container measurement of 4.9-E1) and nothing observed, guessed or derived. The expected lists below are written out here;
+// they are NOT built from the constants of verify.ts. env_names checks the presence of NAMES only (`env_values_not_inspected` stays open).
+const FIXED_BASE_NAMES = ["HOSTNAME", "NODE_ENV", "NODE_VERSION", "NPM_CONFIG_UPDATE_NOTIFIER", "PATH"];
+const FIXED_NINE = ["HOME", "HOSTNAME", "NODE_ENV", "NODE_VERSION", "NPM_CONFIG_UPDATE_NOTIFIER", "PATH", "PHOENIX_LEASE_D_MS", "PHOENIX_LEASE_NONCE", "PHOENIX_RUN_ID"];
+const withNames = async (allowed: readonly string[], names: readonly string[]): Promise<AccessDenialResult> => {
+  const d = makeDeps({ envNames: () => names });
+  return verifyGroundTruthAccessDenial(d.deps, { allowedEnvNames: allowed });
+};
+
+describe("mutation check (7b): the nine fixed environment names", () => {
+  it("RUNTIME_BASE_ENV_NAMES is exactly the five measured names, frozen, disjoint from MODULE_ENV_NAMES, and neither prefixed nor credential-like", () => {
+    expect([...RUNTIME_BASE_ENV_NAMES]).toEqual(FIXED_BASE_NAMES);
+    expect(RUNTIME_BASE_ENV_NAMES.length).toBe(5);
+    expect(Object.isFrozen(RUNTIME_BASE_ENV_NAMES)).toBe(true);
+    for (const n of RUNTIME_BASE_ENV_NAMES) {
+      expect(MODULE_ENV_NAMES, n).not.toContain(n);
+      expect(n, n).not.toMatch(/^PHOENIX_/);
+      expect(n, n).not.toMatch(/KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/i);
+      expect(n, n).not.toMatch(/[*?]/);
+    }
+  });
+  it("composeAllowedEnvNames([]) is exactly the independent nine-name list", () => {
+    expect([...composeAllowedEnvNames([])]).toEqual(FIXED_NINE);
+  });
+  it("a world that has exactly the nine names verifies env_names with the composed list (the Launcher four and the five base names)", async () => {
+    const r = await withNames(composeAllowedEnvNames([]), FIXED_NINE);
+    expect(chk(r, "env_names").status).toBe("verified");
+    expect(meas(r, "env_names")["nameCount"]).toBe(9);
+    expect(meas(r, "env_names")["unexpectedCount"]).toBe(0);
+  });
+  it("the Approval-derived contract is kept: an approved name is allowed, a name that is not approved is still refused", async () => {
+    const allowed = composeAllowedEnvNames(["EXAMPLE_ONE"]);
+    expect(chk(await withNames(allowed, [...FIXED_NINE, "EXAMPLE_ONE"]), "env_names").status).toBe("verified");
+    const r = await withNames(allowed, [...FIXED_NINE, "EXAMPLE_TWO"]);
+    expect(chk(r, "env_names").status).toBe("failed");
+    expect(meas(r, "env_names")["reason"]).toBe("env_unexpected");
+  });
+  it("every name outside the nine is refused with the composed list: credentials, interpreter and loader switches, look-alikes, case and space variants, an unobserved name", async () => {
+    const outside = [
+      "KIRO_API_KEY", "AWS_SECRET_ACCESS_KEY", "NODE_OPTIONS", "NODE_PATH", "LD_PRELOAD", "HTTP_PROXY",
+      "HOSTNAME2", "hostname", "HOSTNAME ", "PATH ", "PATHEXT", "Path", "NODE_ENVIRONMENT", "node_env", "NODE_VERSIONS",
+      "NPM_CONFIG_UPDATE_NOTIFIERS", "npm_config_update_notifier", "NPM_CONFIG_REGISTRY", "YARN_VERSION", "PHOENIX_RUN_ID2", "HOME ", "",
+    ];
+    for (const extra of outside) {
+      const r = await withNames(composeAllowedEnvNames([]), [...FIXED_NINE, extra]);
+      expect(chk(r, "env_names").status, JSON.stringify(extra)).toBe("failed");
+      expect(meas(r, "env_names")["reason"], JSON.stringify(extra)).toBe("env_unexpected");
+      expect(meas(r, "env_names")["unexpectedCount"], JSON.stringify(extra)).toBe(1);
+      expect(r.status, JSON.stringify(extra)).toBe("failed");
+    }
+  });
+  it("a base name is not removed by the caller list, and an unobserved name is not added by it (the caller cannot widen the nine)", () => {
+    expect([...composeAllowedEnvNames(["PATH"])]).toEqual(FIXED_NINE);
+    expect(composeAllowedEnvNames([])).not.toContain("YARN_VERSION");
   });
 });
 
