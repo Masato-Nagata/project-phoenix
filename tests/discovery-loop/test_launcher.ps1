@@ -7,6 +7,8 @@
 Import-Module (Join-Path $script:ToolsDir 'DiscoveryCommon.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $script:ToolsDir 'LeaseTiming.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $script:ToolsDir 'ApprovalStore.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $script:ToolsDir 'InputFileGuard.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $script:ToolsDir 'RuntimeReport.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $script:ToolsDir 'DiscoveryLauncher.psm1') -Force -DisableNameChecking
 
 $utf8 = [System.Text.UTF8Encoding]::new($false)
@@ -22,6 +24,8 @@ function New-TestRepo {
     [void][IO.Directory]::CreateDirectory((Join-Path $root 'discovery/approvals'))
     [void][IO.Directory]::CreateDirectory((Join-Path $root 'discovery/config'))
     [void][IO.Directory]::CreateDirectory((Join-Path $root 'packages'))
+    $inputTable = Get-InputFileTable
+    foreach ($row in $inputTable) { $fp = Join-Path $root ($row.RelPath -replace '/', '\'); [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($fp)); [IO.File]::WriteAllText($fp, "synthetic test input for $($row.Label)`n", $utf8) }
     $store = Join-Path $root 'discovery/approvals/approvals.jsonl'
     if (-not $NoApproval) {
         $c = [ordered]@{ approver = 'Test Approver'; timestamp = '2026-01-01T00:00:00.000+09:00'; target = [ordered]@{ kind = 'gate'; gate_id = 'override-apply' }; decision = 'approved'; rationale = 'Test only.'; recorded_by = 'human' }
@@ -51,7 +55,8 @@ function Install-Fake {
 
 function Start-Test {
     param([string]$Root, [string]$Profile = 'run', [string]$MutexName = (New-TestMutexName))
-    Invoke-DiscoveryStart -RepoRoot $Root -Profile $Profile -MutexName $MutexName -LockPath (Join-Path $Root 'discovery/locks/discovery-run.lock') -Log $quiet
+    $extra = @{}; if ($Profile -eq 'run') { $extra['AuditConfig'] = 'fixture' }
+    Invoke-DiscoveryStart -RepoRoot $Root -Profile $Profile -MutexName $MutexName -LockPath (Join-Path $Root 'discovery/locks/discovery-run.lock') -Log $quiet @extra
 }
 
 function Get-SideEffects {
@@ -66,6 +71,139 @@ function Get-SideEffects {
 }
 function Test-NoSideEffects { param($Fx) $Fx.VolumeCreate -eq 0 -and $Fx.Create -eq 0 -and $Fx.Start -eq 0 -and -not $Fx.Leases -and -not $Fx.Runs }
 
+# ---------------------------------------------------------------- task 4.9-C2 helpers (script scope, so that fake hooks can call them)
+function Get-InputPath { param([string]$Root, [string]$Label) $tb = Get-InputFileTable; $row = @($tb | Where-Object { $_.Label -ceq $Label })[0]; Join-Path $Root ($row.RelPath -replace '/', '\') }
+# every input file can be opened for writing again (no handle of the Launcher holds it)
+function Test-InputsReleased {
+    param([string]$Root)
+    $tb = Get-InputFileTable
+    foreach ($row in $tb) {
+        $fp = Join-Path $Root ($row.RelPath -replace '/', '\')
+        if (Test-Path -LiteralPath $fp -PathType Leaf) { try { $s = [IO.File]::Open($fp, 'Open', 'Write', 'ReadWrite'); $s.Dispose() } catch { return $false } }
+    }
+    $true
+}
+# a writer is refused on every input file (the Launcher holds them)
+function Test-InputsHeld {
+    param([string]$Root)
+    $tb = Get-InputFileTable
+    foreach ($row in $tb) { $fp = Join-Path $Root ($row.RelPath -replace '/', '\'); try { $s = [IO.File]::Open($fp, 'Open', 'Write', 'ReadWrite'); $s.Dispose(); return $false } catch { } }
+    $true
+}
+function Start-C2 {
+    param([string]$Root, [string]$Profile = 'run', [string]$Audit, [switch]$NoAudit, [scriptblock]$Log = { param($m) })
+    $x = @{}; if (-not $NoAudit) { $x['AuditConfig'] = $Audit }
+    Invoke-DiscoveryStart -RepoRoot $Root -Profile $Profile -MutexName (New-TestMutexName) -LockPath (Join-Path $Root 'discovery/locks/discovery-run.lock') -Log $Log @x
+}
+function Get-LeaseDirOf { param($Container) @($Container.Mounts | Where-Object { $_.Destination -eq '/run/lease' })[0].Source }
+function Get-C2Record { param([string]$Root, [string]$RunId) foreach ($pth in @((Join-Path $Root "discovery/runs/$RunId.launcher.json"), (Join-Path $Root "discovery/runs/.incoming/$RunId.launcher.json"))) { if (Test-Path -LiteralPath $pth) { return [pscustomobject]@{ Text = [IO.File]::ReadAllText($pth); Rec = (ConvertFrom-JsonStrict -Text ([IO.File]::ReadAllText($pth))) } } }; $null }
+function Get-ReasonText { param([string]$Root, [string]$RunId) $pp = Get-RunPaths -RepoRoot $Root -RunId $RunId; foreach ($d in @($pp.Export, $pp.Final)) { $f = Join-Path $d 'REASON.json'; if (Test-Path -LiteralPath $f) { return [IO.File]::ReadAllText($f) } }; $null }
+function Get-CallIndex { param($Fake, [string]$Pattern) [Array]::FindIndex([string[]]@($Fake.State.Calls), [Predicate[string]]{ param($c) $c -like $Pattern }) }
+# A child process for the bounded capture (not Docker): writes N bytes to each stream, optionally interleaved or invalid UTF-8, sleeps, exits.
+$script:EmitScript = @"
+param([int]`$Out = 0, [int]`$Err = 0, [int]`$Sleep = 0, [int]`$Exit = 0, [switch]`$Invalid, [int]`$Interleave = 0)
+`$o = [Console]::OpenStandardOutput(); `$e = [Console]::OpenStandardError()
+function W(`$s, [long]`$n, [byte]`$v) { if (`$n -le 0) { return }; `$buf = [byte[]]::new([Math]::Min(65536, `$n)); [Array]::Fill(`$buf, `$v); `$left = `$n; while (`$left -gt 0) { `$k = [int][Math]::Min(`$left, `$buf.Length); `$s.Write(`$buf, 0, `$k); `$left -= `$k }; `$s.Flush() }
+if (`$Invalid) { `$b = [byte[]](0x7B, 0xFF, 0xC0, 0xAF, 0xED, 0xA0, 0x80, 0x7D, 0x0A); `$e.Write(`$b, 0, `$b.Length); `$e.Flush() }
+elseif (`$Interleave -gt 0) { `$wo = 0; `$we = 0; while (`$wo -lt `$Out -or `$we -lt `$Err) { if (`$wo -lt `$Out) { `$k = [Math]::Min(`$Interleave, `$Out - `$wo); W `$o `$k 0x6F; `$wo += `$k }; if (`$we -lt `$Err) { `$k = [Math]::Min(`$Interleave, `$Err - `$we); W `$e `$k 0x65; `$we += `$k } } }
+else { W `$o `$Out 0x6F; W `$e `$Err 0x65 }
+if (`$Sleep -gt 0) { Start-Sleep -Milliseconds `$Sleep }
+exit `$Exit
+"@
+function Invoke-Emit {
+    param([string]$Script, [string[]]$EmitArgs, [int]$Limit = 8192, [int]$TimeoutMs = 20000)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $r = Invoke-BoundedProcess -FileName ((Get-Process -Id $PID).Path) -Arguments (@('-NoProfile', '-NonInteractive', '-File', $Script) + $EmitArgs) -LimitBytes $Limit -TimeoutMs $TimeoutMs
+    $sw.Stop()
+    $gone = $true; if ($r.ProcessId -gt 0) { $gone = $null -eq (Get-Process -Id $r.ProcessId -ErrorAction SilentlyContinue) }
+    [pscustomobject]@{ R = $r; Ms = [long]$sw.ElapsedMilliseconds; Gone = $gone }
+}
+function Test-AllBytes { param([byte[]]$B, [byte]$V) @($B | Where-Object { $_ -ne $V }).Count -eq 0 }
+# The pwsh child process of the retention tests (task 4.9-C2 follow-up). It writes key=value lines only.
+$script:RetentionChild = @'
+param([string]$Root, [string]$ControlRoot, [string]$Tools, [string]$Lib, [string]$MutexName, [string]$Mode)
+$ErrorActionPreference = 'Stop'
+. (Join-Path $Lib 'fakeDocker.ps1')
+foreach ($m in 'DiscoveryCommon', 'LeaseTiming', 'ApprovalStore', 'InputFileGuard', 'RuntimeReport', 'DiscoveryLauncher') { Import-Module (Join-Path $Tools "$m.psm1") -Force -DisableNameChecking }
+Add-Type -TypeDefinition 'public static class PhxMutexProbe { public static string Try(string n) { string r = "none"; var t = new System.Threading.Thread(() => { try { using (var m = new System.Threading.Mutex(false, n)) { bool got = m.WaitOne(0); r = got ? "acquired" : "held"; if (got) m.ReleaseMutex(); } } catch (System.Threading.AbandonedMutexException) { r = "abandoned"; } }); t.Start(); t.Join(); return r; } }'
+$fake = New-FakeDocker -Root $Root
+Set-DockerCliInvoker -Invoker $fake.Invoker
+$script:now = 0L
+Set-LauncherTimeHooks -NowMs { $script:now } -SleepMs { param($ms) $script:now += $ms }
+$lockPath = Join-Path $Root 'discovery/locks/discovery-run.lock'
+function Collect { [GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect(); [GC]::WaitForPendingFinalizers() }
+function Test-FilesHeld { param([string]$R) $tb = Get-InputFileTable; foreach ($row in $tb) { $fp = Join-Path $R ($row.RelPath -replace '/', '\'); try { $s = [IO.File]::Open($fp, 'Open', 'Write', 'ReadWrite'); $s.Dispose(); return $false } catch { } }; $true }
+# Every input file is free: it exists AND a writer can open it. The labels in -Absent are files that the test deleted on purpose: they must NOT
+# exist. Any other missing file, or any error, is not free.
+function Test-FilesFree {
+    param([string]$R, [string[]]$Absent = @())
+    $tb = Get-InputFileTable
+    foreach ($row in $tb) {
+        $fp = Join-Path $R ($row.RelPath -replace '/', '\')
+        if ($Absent -ccontains $row.Label) { if ([IO.File]::Exists($fp) -or [IO.Directory]::Exists($fp)) { return $false }; continue }
+        if (-not [IO.File]::Exists($fp)) { return $false }
+        try { $s = [IO.File]::Open($fp, 'Open', 'Write', 'ReadWrite'); $s.Dispose() } catch { return $false }
+    }
+    $true
+}
+# 'True' only for a sharing violation (another handle holds the Run lock); 'False' when the lock directory does not exist (no start reached the
+# locks) or the open succeeds; any other error is 'error' (so that it matches neither expectation).
+function Test-LockHeld {
+    if (-not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($lockPath))) { return $false }
+    try { $s = [IO.FileStream]::new($lockPath, 'OpenOrCreate', 'ReadWrite', 'None'); $s.Dispose(); return $false }
+    catch {
+        $e = $_.Exception; while ($e -is [System.Management.Automation.MethodInvocationException] -and $null -ne $e.InnerException) { $e = $e.InnerException }
+        if ($e -is [System.IO.IOException] -and ($e.HResult -band 0xFFFF) -eq 32) { return $true }
+        return 'error'
+    }
+}
+function Start-One { param([hashtable]$X) $r = Invoke-DiscoveryStart -RepoRoot $Root -Profile 'run' -MutexName $MutexName -LockPath $lockPath -Log { param($m) } @X; "$($r.Code)|$($r.ExitCode)|$($r.RunId)" }
+function Out-Kv { param([string]$K, $V) [Console]::Out.WriteLine("$K=$V") }
+switch ($Mode) {
+    'unstopped' {
+        $fake.State.OnStart = { param($name, $s) $s.Containers[$name].Polls = $null }
+        $fake.State.StopFails = $true
+        $first = (Start-One @{ AuditConfig = 'fixture' }).Split('|')
+        $id = $first[2]
+        Collect
+        Out-Kv 'first_code' $first[0]; Out-Kv 'first_exit' $first[1]
+        Out-Kv 'retained' (Test-UnstoppedRunRetained -RunId $id); Out-Kv 'count' (Get-UnstoppedRunRetainedCount)
+        Out-Kv 'files_held_after_gc' (Test-FilesHeld $Root); Out-Kv 'lock_held_after_gc' (Test-LockHeld); Out-Kv 'mutex_after_gc' ([PhxMutexProbe]::Try($MutexName))
+        $second = (Start-One @{ AuditConfig = 'fixture' }).Split('|')
+        Collect
+        Out-Kv 'second_code' $second[0]; Out-Kv 'second_exit' $second[1]; Out-Kv 'second_run_id_empty' ([string]::IsNullOrEmpty($second[2]))
+        Out-Kv 'retained_after_second' (Test-UnstoppedRunRetained -RunId $id); Out-Kv 'count_after_second' (Get-UnstoppedRunRetainedCount)
+        Out-Kv 'files_held_after_second' (Test-FilesHeld $Root); Out-Kv 'lock_held_after_second' (Test-LockHeld); Out-Kv 'mutex_after_second' ([PhxMutexProbe]::Try($MutexName))
+        Import-Module (Join-Path $Tools 'DiscoveryLauncher.psm1') -Force -DisableNameChecking
+        Remove-Module DiscoveryLauncher -Force
+        Import-Module (Join-Path $Tools 'InputFileGuard.psm1') -Force -DisableNameChecking
+        Collect
+        Out-Kv 'retained_after_reload' ([Phoenix.Launcher.UnstoppedRunRetention]::Contains($id)); Out-Kv 'count_after_reload' ([Phoenix.Launcher.UnstoppedRunRetention]::Count)
+        Out-Kv 'files_held_after_reload' (Test-FilesHeld $Root); Out-Kv 'lock_held_after_reload' (Test-LockHeld); Out-Kv 'mutex_after_reload' ([PhxMutexProbe]::Try($MutexName))
+        # control: a guard that nothing references is closed by the garbage collector (so the retention above is not vacuous)
+        function Open-Control { $g = Open-InputFileGuard -RepoRoot $ControlRoot -Table (Get-InputFileTable); [bool]$g.Ok }
+        $opened = Open-Control
+        Out-Kv 'control_opened' $opened
+        Collect
+        Out-Kv 'control_released_by_gc' (Test-FilesFree $ControlRoot)
+    }
+    'normal' {
+        $fake.State.OnStart = { param($name, $s) $c = $s.Containers[$name]; $vol = ($c.Mounts | Where-Object { $_.Destination -eq '/run/out' }).Source; [void](New-TestSealedRun -Dir $s.Volumes[$vol]) }
+        $r = (Start-One @{ AuditConfig = 'fixture' }).Split('|')
+        Collect
+        Out-Kv 'code' $r[0]; Out-Kv 'exit' $r[1]; Out-Kv 'retained' (Test-UnstoppedRunRetained -RunId $r[2]); Out-Kv 'count' (Get-UnstoppedRunRetainedCount)
+        Out-Kv 'files_free' (Test-FilesFree $Root); Out-Kv 'lock_held' (Test-LockHeld); Out-Kv 'mutex' ([PhxMutexProbe]::Try($MutexName))
+    }
+    'refused' {
+        $a = (Start-One @{}).Split('|')
+        [IO.File]::Delete((Join-Path $Root 'discovery\config\run-config.json'))
+        $b = (Start-One @{ AuditConfig = 'fixture' }).Split('|')
+        Collect
+        Out-Kv 'code_a' $a[0]; Out-Kv 'code_b' $b[0]; Out-Kv 'count' (Get-UnstoppedRunRetainedCount)
+        Out-Kv 'files_free' (Test-FilesFree $Root -Absent @('run-config')); Out-Kv 'lock_held' (Test-LockHeld); Out-Kv 'mutex' ([PhxMutexProbe]::Try($MutexName))
+    }
+}
+'@
 Invoke-TestMain {
     Write-Host '=== Launcher (tasks 2.18, 2.21, 2.22, 2.23) ===' -ForegroundColor Cyan
 
@@ -74,7 +212,7 @@ Invoke-TestMain {
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($entry, [ref]$tokens, [ref]$errors)
     $params = @($ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
     $entryText = Get-Content -Raw -LiteralPath $entry
-    Test-Case 'static: the entry point declares only -Probe (no parameter for the mutex name or the lock path)' (($params -join ',') -ceq 'Probe' -and $errors.Count -eq 0) ($params -join ',')
+    Test-Case 'static: the entry point declares only -Probe and -AuditConfig (no parameter for the mutex name or the lock path)' (($params -join ',') -ceq 'Probe,AuditConfig' -and $errors.Count -eq 0) ($params -join ',')
     Test-Case 'static: the entry point contains the exact mutex constant and the exact lock path' ($entryText.Contains("-MutexName '$realMutex'") -and $entryText.Contains("'discovery/locks/discovery-run.lock'"))
     Test-Case 'static: the entry point reads no environment variable and installs no test hook' (-not ($entryText -match '\$env:|Set-DockerCliInvoker|Set-LauncherTimeHooks'))
     $toolText = @{}; foreach ($t in Get-ChildItem -LiteralPath $script:ToolsDir -File -Include *.ps1, *.psm1 -Recurse) { $toolText[$t.Name] = Get-Content -Raw -LiteralPath $t.FullName }
@@ -250,7 +388,10 @@ public static class PhoenixTestAbandon {
     $createArgs = (@($fake.State.Calls) | Where-Object { $_ -like 'create *' } | Select-Object -First 1)
     Test-Case 'probe: started with the toolchain image, the probe label, the packages read-only, and the lease read-only' ($createArgs -match 'phoenix/discovery-toolchain:m0' -and $createArgs -match 'phoenix.discovery.start=probe' -and $createArgs -match 'target=/workspace/packages,readonly' -and $createArgs -match 'target=/run/lease,readonly')
     Test-Case 'probe: the Launcher record marks the start probe and names the image digest; the export is incomplete (no Run_Manifest); the volume is kept' ($rec['start'] -ceq 'probe' -and $rec['imageDigest'] -ceq ('sha256:' + ('1' * 64)) -and $rec['export']['step'] -ceq 'verify' -and $rec['volumeDisposition'] -ceq 'kept_for_diagnosis' -and $fake.State.Volumes.ContainsKey($p.Volume) -and -not (Test-CompletedRun -Path $p.Export))
-    Test-Case 'probe: the probe is refused as a Run: the Run profile never uses the toolchain image' (-not ((New-ContainerCreateArgs -Profile 'run' -RepoRoot $root -RunId 'run-x' -Nonce 'n' -PropagationDelayMs 1) -contains 'phoenix/discovery-toolchain:m0'))
+    $pg = Open-InputFileGuard -RepoRoot $root -Table (Get-InputFileTable)
+    $runArgs = if ($pg.Ok) { New-ContainerCreateArgs -Profile 'run' -RepoRoot $root -RunId 'run-x' -Nonce 'n' -PropagationDelayMs 1 -ImageId ('sha256:' + ('2' * 64)) -InputGuard $pg.Guard } else { @('phoenix/discovery-toolchain:m0') }
+    if ($pg.Ok) { Close-InputFileGuard -Guard $pg.Guard }
+    Test-Case 'probe: the probe is refused as a Run: the Run profile never uses the toolchain image' (-not ($runArgs -contains 'phoenix/discovery-toolchain:m0'))
 
     # ---------------------------------------------------------------- mount inspection and recovery
     $root = New-TestRepo
@@ -387,10 +528,11 @@ public static class PhoenixTestAbandon {
     $fake.State.OnStart = { param($name, $s) $s.Containers[$name].Polls = $null }   # never ends by itself
     $fake.State.StopFails = $true
     $script:MaxRunHook = $null
-    $r4 = Invoke-DiscoveryStart -RepoRoot $root -Profile 'run' -MutexName (New-TestMutexName) -LockPath (Join-Path $root 'discovery/locks/discovery-run.lock') -Log $quiet
+    $r4 = Invoke-DiscoveryStart -RepoRoot $root -Profile 'run' -MutexName (New-TestMutexName) -LockPath (Join-Path $root 'discovery/locks/discovery-run.lock') -Log $quiet -AuditConfig 'fixture'
     $lk = Enter-RunLock -LockPath (Join-Path $root 'discovery/locks/discovery-run.lock')
     Test-Case 'end: a container that is not confirmed stopped is kept (no rm), and the Run lock is not released by the Launcher' (@($fake.State.Calls | Where-Object { $_ -like 'rm *' }).Count -eq 0 -and $fake.State.Containers.ContainsKey((Get-ContainerName -RunId $r4.RunId)) -and $null -eq $lk); if ($lk) { $lk.Dispose() }
-
+    $r4Rec = Get-C2Record $root $r4.RunId
+    Test-Case 'C2 end: while the stop is not confirmed the input file handles stay held in this process (no writer can open a file), the record says kept_stop_not_confirmed, no runtime report is taken, and the result is not complete' ((Test-InputsHeld $root) -and $null -ne $r4Rec -and $r4Rec.Rec['inputFileHandles'] -ceq 'kept_stop_not_confirmed' -and -not $r4Rec.Rec.Contains('runtimeReport') -and $r4.Code -cne 'complete' -and $r4.ExitCode -ne 0 -and @($fake.State.Calls | Where-Object { $_ -like 'logs *' }).Count -eq 0) "code=$($r4.Code)"
     $root = New-TestRepo
     $fake = Install-Fake $root
     $fake.State.Containers['phoenix-discovery-run-x'] = @{ Running = $false; ExitCode = '0'; Labels = @{ 'phoenix.discovery.role' = 'runtime'; 'phoenix.discovery.run-id' = 'run-x' }; Mounts = @(); Networks = @(); Polls = $null }
@@ -497,6 +639,246 @@ public static class PhoenixTestAbandon {
     $w = Wait-RuntimeContainer -Container 'hb' -Lease $lease -Settings (Get-LeaseSettings)
     Test-Case 'heartbeat: the counter starts at 1 and increases by 1 per beat; beats are scheduled from the previous one; a delay above H + J is counted' ($w.Beats -eq 6 -and [IO.File]::ReadAllText((Join-Path $leaseDir 'heartbeat')) -eq '7' -and $w.LateBeats -eq 1 -and $script:sleeps[0] -eq 1000 -and $script:sleeps[3] -eq 100) "beats=$($w.Beats) late=$($w.LateBeats) sleeps=$($script:sleeps -join ',')"
 
+    # ================================================================ task 4.9-C2: the safety components wired into the Launcher (fake Docker)
+    $digest = 'sha256:' + ('2' * 64)
+    $normalLine = '{"phase":"run","sealed":true,"terminationReason":"iteration_limit_reached"}'
+    $startDef = (Get-Command Invoke-DiscoveryStart).Definition
+
+    # ---- A. refusals before the Run
+    $argCases = @(
+        @{ Name = 'no -AuditConfig'; Profile = 'run'; NoAudit = $true; Audit = ''; Code = 'audit_config_missing' },
+        @{ Name = 'the value real'; Profile = 'run'; NoAudit = $false; Audit = 'real'; Code = 'audit_config_invalid' },
+        @{ Name = 'the value Fixture (letter case)'; Profile = 'run'; NoAudit = $false; Audit = 'Fixture'; Code = 'audit_config_invalid' },
+        @{ Name = 'the value FIXTURE (letter case)'; Profile = 'run'; NoAudit = $false; Audit = 'FIXTURE'; Code = 'audit_config_invalid' },
+        @{ Name = 'an empty value'; Profile = 'run'; NoAudit = $false; Audit = ''; Code = 'audit_config_invalid' },
+        @{ Name = 'a probe with -AuditConfig fixture'; Profile = 'probe'; NoAudit = $false; Audit = 'fixture'; Code = 'audit_config_with_probe' }
+    )
+    foreach ($ac in $argCases) {
+        $root = New-TestRepo; $fake = Install-Fake $root
+        $res = if ($ac.NoAudit) { Start-C2 -Root $root -Profile $ac.Profile -NoAudit } else { Start-C2 -Root $root -Profile $ac.Profile -Audit $ac.Audit }
+        Test-Case "C2 arguments: $($ac.Name) is refused as $($ac.Code) (exit 2) before any Docker call, with no Run_Volume, Run directory, lease, or container" ($res.ExitCode -eq 2 -and $res.Code -ceq $ac.Code -and $fake.State.Calls.Count -eq 0 -and (Test-NoSideEffects (Get-SideEffects $fake $root))) "exit=$($res.ExitCode) code=$($res.Code) calls=$($fake.State.Calls.Count)"
+    }
+    $tk = $null; $er = $null; $eAst = [System.Management.Automation.Language.Parser]::ParseFile($entry, [ref]$tk, [ref]$er)
+    $ap = @($eAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'AuditConfig' })
+    $apAttrs = if ($ap.Count -eq 1) { @($ap[0].Attributes | ForEach-Object { $_.Extent.Text }) } else { @() }
+    $entryNow = Get-Content -Raw -LiteralPath $entry
+    Test-Case 'C2 entry point: -AuditConfig is a [string] with [ValidateSet(fixture)] only, not mandatory (no prompt), without a default, and passed on only when given' ($ap.Count -eq 1 -and $null -eq $ap[0].DefaultValue -and ($apAttrs -ccontains "[ValidateSet('fixture')]") -and ($apAttrs -ccontains '[string]') -and $apAttrs.Count -eq 2 -and -not ($entryNow -match 'Mandatory') -and $entryNow.Contains("if (`$PSBoundParameters.ContainsKey('AuditConfig')) { `$extra['AuditConfig'] = `$AuditConfig }") -and $entryNow.Contains("'discovery/locks/discovery-run.lock') @extra"))
+    $inCases = @(
+        @{ Name = 'the fixture audit-config.mock.json is missing'; Label = 'audit-config'; Code = 'missing'; Damage = { param($r) [IO.File]::Delete((Get-InputPath $r 'audit-config')) } },
+        @{ Name = 'run-config.json is missing'; Label = 'run-config'; Code = 'missing'; Damage = { param($r) [IO.File]::Delete((Get-InputPath $r 'run-config')) } },
+        @{ Name = 'a legacy source has a second hard link'; Label = 'legacy-src-orders'; Code = 'hard_linked'; Damage = { param($r) $fp = Get-InputPath $r 'legacy-src-orders'; New-Item -ItemType HardLink -Path ($fp + '.second') -Target $fp | Out-Null } },
+        @{ Name = 'run-config.json is above 262144 bytes'; Label = 'run-config'; Code = 'too_large'; Damage = { param($r) [IO.File]::WriteAllBytes((Get-InputPath $r 'run-config'), [byte[]]::new(262145)) } }
+    )
+    foreach ($ic in $inCases) {
+        $root = New-TestRepo; $fake = Install-Fake $root; & $ic.Damage $root
+        $res = Start-C2 -Root $root -Audit 'fixture'
+        $released = Test-InputsReleased $root
+        $lk = Enter-RunLock -LockPath (Join-Path $root 'discovery/locks/discovery-run.lock')
+        Test-Case "C2 input files: $($ic.Name) is refused after the gate and before the locks (input_file_refused, $($ic.Label):$($ic.Code), exit 2), with no Run_Volume, Run directory, lease, or container, and no handle left" ($res.ExitCode -eq 2 -and $res.Code -ceq 'input_file_refused' -and $res.InputFileLabel -ceq $ic.Label -and $res.InputFileCode -ceq $ic.Code -and (Test-NoSideEffects (Get-SideEffects $fake $root)) -and $released -and $null -ne $lk -and @($fake.State.Calls | Where-Object { $_ -like 'image inspect*' }).Count -eq 1) "exit=$($res.ExitCode) code=$($res.Code) $($res.InputFileLabel):$($res.InputFileCode)"
+        if ($lk) { $lk.Dispose() }
+    }
+    Test-Case 'C2 lease D: Test-PropagationDelayValue accepts integers of 0 to 999999 only (main.ts PHOENIX_LEASE_D_MS ^[0-9]{1,6}$) and refuses 1000000, -1, 1.5, the text 5, and null' ((Test-PropagationDelayValue -Value ([long]0)) -and (Test-PropagationDelayValue -Value ([long]999999)) -and (Test-PropagationDelayValue -Value 50) -and -not (Test-PropagationDelayValue -Value ([long]1000000)) -and -not (Test-PropagationDelayValue -Value ([long]-1)) -and -not (Test-PropagationDelayValue -Value 1.5) -and -not (Test-PropagationDelayValue -Value '5') -and -not (Test-PropagationDelayValue -Value $null))
+    $iGate = $startDef.IndexOf('Test-LaunchGate -RepoRoot'); $iD = $startDef.IndexOf('Test-PropagationDelayValue -Value $gate.Timing.D'); $iIn = $startDef.IndexOf('Open-InputFileGuard -RepoRoot'); $iLk = $startDef.IndexOf('Enter-DiscoveryLocks -MutexName'); $iAud = $startDef.IndexOf("`$AuditConfig -cne 'fixture'")
+    Test-Case 'C2 order (static): arguments, then the gate, then D (lease_timing_d_invalid), then the input files, then the locks; lease.json is created by exactly one New-RunLease call' ($iAud -ge 0 -and $iAud -lt $iGate -and $iGate -lt $iD -and $iD -lt $iIn -and $iIn -lt $iLk -and $startDef.Contains("'lease_timing_d_invalid'") -and [regex]::Matches($startDef, 'New-RunLease ').Count -eq 1) "$iAud $iGate $iD $iIn $iLk"
+    $root = New-TestRepo; $fake = Install-Fake $root
+    $heldLock = Enter-RunLock -LockPath (Join-Path $root 'discovery/locks/discovery-run.lock')
+    $res = Start-C2 -Root $root -Audit 'fixture'
+    $releasedLock = Test-InputsReleased $root
+    if ($heldLock) { $heldLock.Dispose() }
+    Test-Case 'C2 locks: a held Run lock refuses the start (run_lock, exit 2) after the input check; no volume, lease, or container; the input file handles are released' ($null -ne $heldLock -and $res.Code -ceq 'run_lock' -and $res.ExitCode -eq 2 -and @($fake.State.Calls | Where-Object { $_ -like 'volume create*' -or $_ -like 'create *' }).Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $root 'discovery/leases')) -and $releasedLock) "code=$($res.Code)"
+    $root = New-TestRepo; $fake = Install-Fake $root
+    $fake.State.Containers['leftover'] = @{ Running = $true; ExitCode = '0'; Labels = @{ 'phoenix.discovery.role' = 'runtime' }; Mounts = @(); Networks = @(); Polls = $null }
+    $fake.State.StopFails = $true
+    $res = Start-C2 -Root $root -Audit 'fixture'
+    Test-Case 'C2 recovery: a recovery failure (recovery_failed, exit 3) creates no volume and releases the input file handles' ($res.Code -ceq 'recovery_failed' -and $res.ExitCode -eq 3 -and @($fake.State.Calls | Where-Object { $_ -like 'volume create*' }).Count -eq 0 -and (Test-InputsReleased $root)) "code=$($res.Code)"
+    $root = New-TestRepo; $fake = Install-Fake $root; $fake.State.ThrowOn = 'volume create*'
+    $threw = $false; try { [void](Start-C2 -Root $root -Audit 'fixture') } catch { $threw = $true }
+    $lk = Enter-RunLock -LockPath (Join-Path $root 'discovery/locks/discovery-run.lock')
+    Test-Case 'C2 exception: an exception after the locks (injected at volume create) still releases the input file handles and the Run lock' ($threw -and (Test-InputsReleased $root) -and $null -ne $lk)
+    if ($lk) { $lk.Dispose() }
+
+    # ---- B. creation, image, facts, inspection, re-check, start (a normal Run)
+    $root = New-TestRepo; $fake = Install-Fake $root
+    $script:c2Root = $root; $script:c2Seen = @{}
+    $fake.State.Containers['phoenix-discovery-run-20250101T000000Z-eeeeeeeeeeee'] = @{ Running = $false; ExitCode = '0'; Labels = @{ 'phoenix.discovery.role' = 'runtime'; 'phoenix.discovery.run-id' = 'run-20250101T000000Z-eeeeeeeeeeee' }; Mounts = @(); Networks = @(); Polls = $null }
+    $otherVol = 'phoenix-run-run-20250101T000000Z-eeeeeeeeeeee'; $fake.State.Volumes[$otherVol] = (New-TempDir)
+    $fake.State.OnCreate = { param($name, $s) $ld = Get-LeaseDirOf $s.Containers[$name]; $script:c2Seen['leaseAtCreate'] = Test-Path -LiteralPath (Join-Path $ld 'lease.json'); $script:c2Seen['factsAtCreate'] = Test-Path -LiteralPath (Join-Path $ld 'launcher-facts.json'); $script:c2Seen['heldAtCreate'] = Test-InputsHeld $script:c2Root }
+    $fake.State.OnStart = {
+        param($name, $s)
+        $c = $s.Containers[$name]; $ld = Get-LeaseDirOf $c; $fp = Join-Path $ld 'launcher-facts.json'
+        if (Test-Path -LiteralPath $fp) { $script:c2Seen['factsAtStart'] = [IO.File]::ReadAllBytes($fp) }
+        $script:c2Seen['attestationAtStart'] = Test-Path -LiteralPath (Join-Path $ld 'isolation-attestation.json')
+        $script:c2Seen['heldAtStart'] = Test-InputsHeld $script:c2Root
+        $vol = ($c.Mounts | Where-Object { $_.Destination -eq '/run/out' }).Source; [void](New-TestSealedRun -Dir $s.Volumes[$vol])
+    }
+    $script:c2Log = [System.Collections.Generic.List[string]]::new()
+    $res = Start-C2 -Root $root -Audit 'fixture' -Log { param($m) $script:c2Log.Add([string]$m) }
+    $rr = Get-C2Record $root $res.RunId; $rec = $rr.Rec
+    $createCall = @($fake.State.Calls | Where-Object { $_ -like 'create *' })[0]
+    Test-Case 'C2 create: the Run container is created from the image ID of the gate with --pull never (never the tag), as the last arguments' ($createCall.EndsWith(" --pull never $digest") -and -not $createCall.Contains('phoenix/discovery-runtime:m4') -and @($fake.State.Calls | Where-Object { $_ -like 'pull *' }).Count -eq 0) $createCall
+    $bind = @{}; foreach ($m in [regex]::Matches($createCall, '--mount type=bind,source=([^,]+),target=([^, ]+)(,readonly)?')) { $bind[$m.Groups[2].Value] = @($m.Groups[1].Value, ($m.Groups[3].Value -ceq ',readonly')) }
+    $mountBad = @(); $tbl = Get-InputFileTable
+    foreach ($row in $tbl) { $want = [IO.Path]::GetFullPath((Join-Path $root ($row.RelPath -replace '/', '\'))); if (-not $bind.ContainsKey($row.Target) -or -not [string]::Equals($bind[$row.Target][0], $want, 'OrdinalIgnoreCase') -or -not $bind[$row.Target][1]) { $mountBad += $row.Label } }
+    $oldAudit = [IO.Path]::GetFullPath((Join-Path $root 'discovery\config\audit-config.json'))
+    Test-Case 'C2 mounts: each of the 11 checked input files is bind-mounted read-only from its checked path at its table target (the audit target from audit-config.mock.json); the lease directory is the only other bind mount; the old audit-config.json is no source' ($mountBad.Count -eq 0 -and $bind.Count -eq 12 -and $bind.ContainsKey('/run/lease') -and $bind['/run/lease'][1] -and @($bind.Values | Where-Object { [string]::Equals($_[0], $oldAudit, 'OrdinalIgnoreCase') }).Count -eq 0 -and $createCall.Contains("type=volume,source=phoenix-run-$($res.RunId),target=/run/out")) ($mountBad -join ',')
+    $iVol = Get-CallIndex $fake 'volume create*'; $iCr = Get-CallIndex $fake 'create *'; $iImg = Get-CallIndex $fake 'inspect --format {{.Image}}|*'; $iMnt = Get-CallIndex $fake 'inspect --format {{json .Mounts}}*'; $iSt = Get-CallIndex $fake 'start *'; $iLogs = Get-CallIndex $fake 'logs *'; $iCopy = Get-CallIndex $fake '*export-helper*'
+    Test-Case 'C2 order: volume, create (lease.json present, no facts yet, files held), image of the created container, mount inspection, start (facts and attestation present, files held), then after the end the logs, then the export copy' ($iVol -lt $iCr -and $iCr -lt $iImg -and $iImg -lt $iMnt -and $iMnt -lt $iSt -and $iSt -lt $iLogs -and $iLogs -lt $iCopy -and $iVol -ge 0 -and $script:c2Seen['leaseAtCreate'] -eq $true -and $script:c2Seen['factsAtCreate'] -eq $false -and $script:c2Seen['heldAtCreate'] -eq $true -and $null -ne $script:c2Seen['factsAtStart'] -and $script:c2Seen['attestationAtStart'] -eq $true -and $script:c2Seen['heldAtStart'] -eq $true) "$iVol $iCr $iImg $iMnt $iSt $iLogs $iCopy"
+    $auditSha = (Get-FileHash -LiteralPath (Get-InputPath $root 'audit-config') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $factsBytes = [byte[]]$script:c2Seen['factsAtStart']
+    $fv = Test-LauncherFactsBytes -Bytes $factsBytes -ExpectedRunId $res.RunId -ExpectedAuditConfigSha256 $auditSha
+    $fkeys = @((ConvertFrom-JsonStrict -Text ([System.Text.UTF8Encoding]::new($false).GetString($factsBytes))).Keys | Sort-Object)
+    Test-Case 'C2 facts: launcher-facts.json v2 at start has exactly the six keys, the run id, the image ID of the created container, the SHA-256 of the bytes of audit-config.mock.json, and the kind fixture' ($fv.Ok -and $fv.Values.RuntimeImageId -ceq $digest -and $fv.Values.AuditConfigKind -ceq 'fixture' -and ($fkeys -join ',') -ceq 'audit_config_kind,audit_config_sha256,issued_by,run_id,runtime_image_id,schema_version') "code=$($fv.Code)"
+    $nonceArg = [regex]::Match($createCall, 'PHOENIX_LEASE_NONCE=([0-9a-f]+)').Groups[1].Value
+    Test-Case 'C2 record: the facts (written, the file hash, the two Launcher declarations), the image match, the audit configuration (switch, relative path, hash) and the run configuration hash are recorded, with relative paths only and no nonce' ($rec['launcherFacts']['outcome'] -ceq 'written' -and $rec['launcherFacts']['sha256'] -ceq (Get-Sha256Hex -Bytes $factsBytes) -and (@($rec['launcherFacts']['declaredByLauncher']) -join ',') -ceq 'audit_config_kind,runtime_image_id' -and $rec['runtimeImage']['match'] -eq $true -and $rec['runtimeImage']['createdContainerImageId'] -ceq $digest -and $rec['auditConfig']['switch'] -ceq 'fixture' -and $rec['auditConfig']['relPath'] -ceq 'discovery/config/audit-config.mock.json' -and $rec['auditConfig']['sha256'] -ceq $auditSha -and $rec['runConfig']['sha256'] -ceq (Get-FileHash -LiteralPath (Get-InputPath $root 'run-config') -Algorithm SHA256).Hash.ToLowerInvariant() -and @($rec['inputFiles']).Count -eq 11 -and $rec['inputFileRecheck']['ok'] -eq $true -and $nonceArg.Length -eq 32 -and -not $rr.Text.Contains($nonceArg) -and -not $rr.Text.Contains($root) -and -not (($script:c2Log -join "`n").Contains($nonceArg)))
+    Test-Case 'C2 end (normal): a normal sealed end with a complete export is complete (exit 0); the record has the runtime report (runtime_sealed_normal, consistent, trusted values, not an independent verification, purpose not assessed) and the result; the handles are released' ($res.ExitCode -eq 0 -and $res.Code -ceq 'complete' -and $rec['runtimeReport']['classification'] -ceq 'runtime_sealed_normal' -and $rec['runtimeReport']['consistency'] -ceq 'consistent' -and $rec['runtimeReport']['completeEligible'] -eq $true -and $rec['runtimeReport']['values']['trusted'] -eq $true -and $rec['runtimeReport']['values']['terminationReason'] -ceq 'iteration_limit_reached' -and $rec['runtimeReport']['independentVerification'] -eq $false -and $rec['runtimeReport']['purposeAssessment'] -ceq 'not_assessed' -and $rec['launcherResult']['code'] -ceq 'complete' -and $rec['launcherResult']['purposeAssessment'] -ceq 'not_assessed' -and $rec['inputFileHandles'] -ceq 'released_after_stop' -and (Test-InputsReleased $root) -and (Test-CompletedRun -Path (Get-RunPaths -RepoRoot $root -RunId $res.RunId).Final)) "code=$($res.Code)"
+    Test-Case 'C2 other Runs: the container and the volume of another Run are not removed (no rm, no volume rm of them); only this Run''s container is removed' ($fake.State.Containers.ContainsKey('phoenix-discovery-run-20250101T000000Z-eeeeeeeeeeee') -and $fake.State.Volumes.ContainsKey($otherVol) -and @($fake.State.Calls | Where-Object { $_ -like '*eeeeeeeeeeee*' -and ($_ -like 'rm *' -or $_ -like 'volume rm *') }).Count -eq 0 -and @($fake.State.Calls | Where-Object { $_ -like 'rm *' }).Count -eq 1)
+
+    # ---- B. refusals between create and start: no start, nothing of another Run touched, handles released
+    $refCases = @(
+        @{ Name = 'docker create fails'; Code = 'container_create_failed'; Setup = { param($f) $f.State.FailCreate = $true }; Facts = $false },
+        @{ Name = 'the image of the created container cannot be read'; Code = 'image_inspect_failed'; Setup = { param($f) $f.State.ImageInspectFails = $true }; Facts = $false },
+        @{ Name = 'the created container has another image ID'; Code = 'runtime_image_mismatch'; Setup = { param($f) $f.State.ImageOverride = 'sha256:' + ('3' * 64) }; Facts = $false },
+        @{ Name = 'the created container has another Run identifier label'; Code = 'container_identity_mismatch'; Setup = { param($f) $f.State.LabelRunIdOverride = 'run-20250101T000000Z-dddddddddddd' }; Facts = $false },
+        @{ Name = 'a launcher-facts.json already exists (exclusive creation refuses it and leaves it unchanged)'; Code = 'launcher_facts_failed'; Setup = { param($f) $f.State.OnCreate = { param($name, $s) [IO.File]::WriteAllText((Join-Path (Get-LeaseDirOf $s.Containers[$name]) 'launcher-facts.json'), 'foreign') } }; Facts = $true },
+        @{ Name = 'the mount inspection fails'; Code = 'mount_inspection_failed'; Setup = { param($f) $f.State.ExtraMount = [ordered]@{ Type = 'bind'; Source = 'C:\other'; Destination = '/other'; RW = $false } }; Facts = $true },
+        @{ Name = 'a held input file gets a hard link before the start (identity re-check)'; Code = 'input_file_changed'; Setup = { param($f) $f.State.OnCreate = { param($name, $s) $fp = Get-InputPath $script:c2Root 'legacy-src-db'; New-Item -ItemType HardLink -Path ($fp + '.second') -Target $fp | Out-Null } }; Facts = $true }
+    )
+    foreach ($rc in $refCases) {
+        $root = New-TestRepo; $fake = Install-Fake $root; $script:c2Root = $root
+        & $rc.Setup $fake
+        $res = Start-C2 -Root $root -Audit 'fixture'
+        $pp = Get-RunPaths -RepoRoot $root -RunId $res.RunId
+        $factsThere = Test-Path -LiteralPath (Join-Path $pp.Lease 'launcher-facts.json')
+        $reason = Get-ReasonText $root $res.RunId
+        $rcRec = Get-C2Record $root $res.RunId
+        $extraOk = switch ($rc.Code) {
+            'launcher_facts_failed' { ([IO.File]::ReadAllText((Join-Path $pp.Lease 'launcher-facts.json')) -ceq 'foreign') -and $rcRec.Rec['launcherFacts']['code'] -ceq 'exists' }
+            'input_file_changed' { $rcRec.Rec['inputFileRecheck']['code'] -ceq 'hard_linked' -and $rcRec.Rec['inputFileRecheck']['label'] -ceq 'legacy-src-db' }
+            'runtime_image_mismatch' { $rcRec.Rec['runtimeImage']['match'] -eq $false }
+            default { $true }
+        }
+        Test-Case "C2 refusal: $($rc.Name) gives $($rc.Code) (exit 3) and no docker start; the facts file is $(if ($rc.Facts) { 'there (written before)' } else { 'absent' }); the lease is revoked; the Reason_File keeps its step and names the Launcher code; the handles and the Run lock are released" ($res.ExitCode -eq 3 -and $res.Code -ceq $rc.Code -and @($fake.State.Calls | Where-Object { $_ -like 'start *' }).Count -eq 0 -and $factsThere -eq $rc.Facts -and (Test-Path -LiteralPath (Join-Path $pp.Lease 'revoked')) -and $null -ne $reason -and (ConvertFrom-JsonStrict -Text $reason)['step'] -ceq 'verify' -and $reason.Contains("launcher=$($rc.Code)") -and (Test-InputsReleased $root) -and $null -ne ($lkR = Enter-RunLock -LockPath (Join-Path $root 'discovery/locks/discovery-run.lock')) -and $extraOk) "exit=$($res.ExitCode) code=$($res.Code) facts=$factsThere"
+        if ($lkR) { $lkR.Dispose(); $lkR = $null }
+    }
+
+    # ---- C. the end of the runtime: the report and the Launcher outcome
+    $pad = { param([int]$Total) $head = '{"phase":"run","sealed":true,"terminationReason":"iteration_limit_reached"'; $head + (' ' * ($Total - $head.Length - 2)) + '}' + "`n" }
+    $endCases = @(
+        @{ Name = 'a normal sealed end whose export fails (copy failure)'; Text = ($normalLine + "`n"); Exit = '0'; Seal = $true; Copy = $false; Logs = ''; Class = 'runtime_sealed_normal'; ReportCode = $null; Code = 'ended'; ExportComplete = $false },
+        @{ Name = 'error with a sealed manifest'; Text = ('{"phase":"run","sealed":true,"terminationReason":"error"}' + "`n"); Exit = '0'; Seal = $true; Copy = $true; Logs = ''; Class = 'runtime_sealed_abnormal'; ReportCode = $null; Code = 'runtime_sealed_abnormal'; ExportComplete = $true },
+        @{ Name = 'runtime exit 1 (not sealed)'; Text = ('{"phase":"run","sealed":false,"started":true,"failure":"seal_failed"}' + "`n"); Exit = '1'; Seal = $false; Copy = $true; Logs = ''; Class = 'runtime_unsealed'; ReportCode = $null; Code = 'runtime_unsealed'; ExportComplete = $false },
+        @{ Name = 'runtime exit 2 (stage B refusal)'; Text = ('{"phase":"stage_b","refusals":[{"check":"lease","code":"lease_invalid"}]}' + "`n"); Exit = '2'; Seal = $false; Copy = $true; Logs = ''; Class = 'runtime_refused'; ReportCode = $null; Code = 'runtime_refused'; ExportComplete = $false },
+        @{ Name = 'an unexpected runtime exit code 137'; Text = ($normalLine + "`n"); Exit = '137'; Seal = $true; Copy = $true; Logs = ''; Class = 'runtime_exit_unexpected'; ReportCode = $null; Code = 'runtime_exit_unexpected'; ExportComplete = $true },
+        @{ Name = 'a sealed line with exit code 1 (inconsistent)'; Text = ($normalLine + "`n"); Exit = '1'; Seal = $true; Copy = $true; Logs = ''; Class = 'runtime_report_inconsistent'; ReportCode = $null; Code = 'runtime_report_inconsistent'; ExportComplete = $true },
+        @{ Name = 'no standard error line'; Text = ''; Exit = '0'; Seal = $true; Copy = $true; Logs = ''; Class = 'runtime_report_invalid'; ReportCode = 'report_absent'; Code = 'runtime_report_invalid'; ExportComplete = $true },
+        @{ Name = 'a line that is not JSON'; Text = ("Error: boom`n"); Exit = '0'; Seal = $true; Copy = $true; Logs = ''; Class = 'runtime_report_invalid'; ReportCode = 'report_not_json'; Code = 'runtime_report_invalid'; ExportComplete = $true },
+        @{ Name = 'an unknown termination reason'; Text = ('{"phase":"run","sealed":true,"terminationReason":"goal_reached"}' + "`n"); Exit = '0'; Seal = $true; Copy = $true; Logs = ''; Class = 'runtime_report_invalid'; ReportCode = 'report_value_invalid'; Code = 'runtime_report_invalid'; ExportComplete = $true },
+        @{ Name = 'two lines'; Text = ($normalLine + "`n" + $normalLine + "`n"); Exit = '0'; Seal = $true; Copy = $true; Logs = ''; Class = 'runtime_report_invalid'; ReportCode = 'report_not_single_line'; Code = 'runtime_report_invalid'; ExportComplete = $true },
+        @{ Name = 'exactly 8192 bytes (the bound)'; Text = (& $pad 8192); Exit = '0'; Seal = $true; Copy = $true; Logs = ''; Class = 'runtime_sealed_normal'; ReportCode = $null; Code = 'complete'; ExportComplete = $true },
+        @{ Name = '8193 bytes (above the bound)'; Text = (& $pad 8193); Exit = '0'; Seal = $true; Copy = $true; Logs = ''; Class = 'runtime_report_invalid'; ReportCode = 'report_too_large'; Code = 'runtime_report_invalid'; ExportComplete = $true },
+        @{ Name = 'docker logs fails'; Text = ($normalLine + "`n"); Exit = '0'; Seal = $true; Copy = $true; Logs = 'fail'; Class = 'runtime_report_invalid'; ReportCode = 'logs_unavailable'; Code = 'runtime_report_invalid'; ExportComplete = $true },
+        @{ Name = 'docker logs times out'; Text = ($normalLine + "`n"); Exit = '0'; Seal = $true; Copy = $true; Logs = 'timeout'; Class = 'runtime_report_invalid'; ReportCode = 'logs_unavailable'; Code = 'runtime_report_invalid'; ExportComplete = $true }
+    )
+    foreach ($ec in $endCases) {
+        $root = New-TestRepo; $fake = Install-Fake $root
+        $fake.State.RuntimeStderr = [System.Text.UTF8Encoding]::new($false).GetBytes([string]$ec.Text)
+        $fake.State.ExitCodeOnEnd = $ec.Exit
+        if ($ec.Seal) { $fake.State.OnStart = $sealed }
+        if (-not $ec.Copy) { $fake.State.FailCopy = $true }
+        if ($ec.Logs -ceq 'fail') { $fake.State.LogsFail = $true }
+        if ($ec.Logs -ceq 'timeout') { $fake.State.LogsTimeout = $true }
+        $res = Start-C2 -Root $root -Audit 'fixture'
+        $er = Get-C2Record $root $res.RunId; $rep = $er.Rec['runtimeReport']
+        $pp = Get-RunPaths -RepoRoot $root -RunId $res.RunId
+        $exportOk = (Test-Path -LiteralPath $pp.Final) -and (Test-CompletedRun -Path $pp.Final)
+        $reason = Get-ReasonText $root $res.RunId
+        $reasonOk = if ($exportOk) { $null -eq $reason } else { $null -ne $reason -and (ConvertFrom-JsonStrict -Text $reason)['detail'].Contains("runtime_classification=$($ec.Class)") }
+        $expExit = if ($ec.Code -ceq 'complete') { 0 } else { 1 }
+        $capOk = switch ($ec.Logs) { 'timeout' { $rep['capture']['timedOut'] -eq $true -and $rep['capture']['stderrExceeded'] -eq $false } 'fail' { $rep['capture']['cliExitCode'] -ne 0 } default { $true } }
+        if ($ec.ReportCode -ceq 'report_too_large') { $capOk = $rep['capture']['stderrExceeded'] -eq $true -and $rep['capture']['stderrBytes'] -eq 8193 -and $rep['capture']['timedOut'] -eq $false }
+        if ($ec.Code -ceq 'complete') { $capOk = $capOk -and $rep['capture']['stderrBytes'] -eq 8192 -and $rep['capture']['stderrExceeded'] -eq $false }
+        if ($ec.Class -ceq 'runtime_report_inconsistent') { $capOk = $capOk -and $rep['values']['trusted'] -eq $false -and $rep['consistency'] -ceq 'inconsistent' }
+        if ($null -ne $ec.ReportCode) { $capOk = $capOk -and -not $rep.Contains('values') }
+        Test-Case "C2 runtime end: $($ec.Name) gives $($ec.Code) (exit $expExit), classification $($ec.Class)$(if ($ec.ReportCode) { ", report code $($ec.ReportCode)" }), export complete = $($ec.ExportComplete), complete only when eligible AND exported; the Reason_File (if any) keeps its step and names the classification" ($res.Code -ceq $ec.Code -and $res.ExitCode -eq $expExit -and $rep['classification'] -ceq $ec.Class -and ($null -eq $ec.ReportCode -or $rep['reportCode'] -ceq $ec.ReportCode) -and $exportOk -eq $ec.ExportComplete -and $er.Rec['launcherResult']['code'] -ceq $ec.Code -and $rep['purposeAssessment'] -ceq 'not_assessed' -and ($rep['completeEligible'] -eq ($ec.Class -ceq 'runtime_sealed_normal')) -and $reasonOk -and $capOk -and (Test-InputsReleased $root)) "code=$($res.Code) class=$($rep['classification']) reportCode=$($rep['reportCode']) export=$exportOk"
+    }
+    # no raw text of the runtime or of Docker, and no nonce, in the record, the Reason_File, the log, or the result
+    $marker = 'SECRET-MARKER-C2-7f3a'
+    $root = New-TestRepo; $fake = Install-Fake $root
+    $fake.State.RuntimeStderr = [System.Text.UTF8Encoding]::new($false).GetBytes('{"phase":"run","sealed":false,"started":true,"failure":"' + $marker + '"}' + "`n")
+    $fake.State.ExitCodeOnEnd = '1'
+    $script:c2Log = [System.Collections.Generic.List[string]]::new()
+    $res = Start-C2 -Root $root -Audit 'fixture' -Log { param($m) $script:c2Log.Add([string]$m) }
+    $lr = Get-C2Record $root $res.RunId; $reason = Get-ReasonText $root $res.RunId
+    $nonceArg = [regex]::Match(@($fake.State.Calls | Where-Object { $_ -like 'create *' })[0], 'PHOENIX_LEASE_NONCE=([0-9a-f]+)').Groups[1].Value
+    $everything = $lr.Text + "`n" + [string]$reason + "`n" + ($script:c2Log -join "`n") + "`n" + (ConvertTo-Json -InputObject $res -Depth 8)
+    Test-Case 'C2 no leak: a refused line with a marker value leaves neither the marker nor the nonce in the Launcher record, the Reason_File, the log, or the result; the report is refused (report_value_invalid)' ($lr.Rec['runtimeReport']['reportCode'] -ceq 'report_value_invalid' -and $nonceArg.Length -eq 32 -and -not $everything.Contains($marker) -and -not $everything.Contains($nonceArg) -and $null -ne $reason)
+
+    # ---- D. the probe is unchanged
+    $root = New-TestRepo; $fake = Install-Fake $root
+    $res = Start-Test -Root $root -Profile 'probe'
+    $pc = @($fake.State.Calls | Where-Object { $_ -like 'create *' })[0]
+    $prr = Get-C2Record $root $res.RunId; $ppp = Get-RunPaths -RepoRoot $root -RunId $res.RunId
+    Test-Case 'C2 probe: a probe takes no audit configuration, is created from the toolchain tag without --pull, reads no created image, writes no launcher-facts.json, takes no runtime report, and holds no input file' ($pc.Contains(' phoenix/discovery-toolchain:m0 node ') -and -not $pc.Contains('--pull') -and @($fake.State.Calls | Where-Object { $_ -like 'inspect --format {{.Image}}*' -or $_ -like 'logs *' }).Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $ppp.Lease 'launcher-facts.json')) -and -not $prr.Rec.Contains('runtimeReport') -and -not $prr.Rec.Contains('auditConfig') -and -not $prr.Rec.Contains('inputFileHandles') -and (Test-InputsReleased $root))
+
+    # ---- E. the bounded capture of the Docker invoker (D5), with a pwsh child process that is NOT Docker
+    $emitDir = New-TempDir; $emit = Join-Path $emitDir 'emit.ps1'; [IO.File]::WriteAllText($emit, $script:EmitScript, $utf8)
+    $e1 = Invoke-Emit $emit @('-Err', '8192')
+    Test-Case 'bounded: exactly 8192 bytes on standard error are kept whole (not exceeded, not killed, exit 0, process gone, streams drained)' ($e1.R.Stderr.Length -eq 8192 -and (Test-AllBytes $e1.R.Stderr 0x65) -and -not $e1.R.StderrExceeded -and -not $e1.R.Killed -and -not $e1.R.TimedOut -and $e1.R.ExitCode -eq 0 -and $e1.R.Exited -and $e1.R.StreamsDrained -and $e1.Gone) "len=$($e1.R.Stderr.Length) ex=$($e1.R.StderrExceeded) exit=$($e1.R.ExitCode)"
+    $e2 = Invoke-Emit $emit @('-Err', '8193', '-Sleep', '20000')
+    Test-Case 'bounded: 8193 bytes on standard error exceed the bound WHILE reading: the still-running child is killed at once (well before its 20 s sleep), 8193 bytes kept, flagged, the process is gone' ($e2.R.StderrExceeded -and $e2.R.Stderr.Length -eq 8193 -and $e2.R.Killed -and -not $e2.R.TimedOut -and $e2.R.Exited -and $e2.R.StreamsDrained -and $e2.Gone -and $e2.Ms -lt 15000) "ms=$($e2.Ms) len=$($e2.R.Stderr.Length)"
+    $e3 = Invoke-Emit $emit @('-Out', '8193', '-Sleep', '20000')
+    Test-Case 'bounded: the bound works on standard output too (8193 bytes: exceeded, killed, standard error empty)' ($e3.R.StdoutExceeded -and -not $e3.R.StderrExceeded -and $e3.R.Stdout.Length -eq 8193 -and $e3.R.Stderr.Length -eq 0 -and $e3.R.Killed -and $e3.Gone -and $e3.Ms -lt 15000) "ms=$($e3.Ms)"
+    $e4 = Invoke-Emit $emit @('-Err', '20000000', '-Out', '100')
+    Test-Case 'bounded: a flood of 20 MB on standard error does not deadlock: exceeded, killed, quick' ($e4.R.StderrExceeded -and $e4.R.Killed -and -not $e4.R.TimedOut -and $e4.Gone -and $e4.Ms -lt 15000) "ms=$($e4.Ms)"
+    $e5 = Invoke-Emit $emit @('-Out', '20000000', '-Err', '100')
+    Test-Case 'bounded: a flood of 20 MB on standard output does not deadlock: exceeded, killed, quick' ($e5.R.StdoutExceeded -and $e5.R.Killed -and -not $e5.R.TimedOut -and $e5.Gone -and $e5.Ms -lt 15000) "ms=$($e5.Ms)"
+    $e6 = Invoke-Emit $emit @('-Out', '20000000', '-Err', '20000000', '-Interleave', '65536')
+    Test-Case 'bounded: floods on both streams at the same time do not deadlock: a stream is exceeded, the child is killed, quick' (($e6.R.StdoutExceeded -or $e6.R.StderrExceeded) -and $e6.R.Killed -and -not $e6.R.TimedOut -and $e6.Gone -and $e6.Ms -lt 15000) "ms=$($e6.Ms)"
+    $e7 = Invoke-Emit $emit @('-Out', '8000', '-Err', '8000', '-Interleave', '500')
+    Test-Case 'bounded: both streams written alternately (8000 bytes each) are read independently and completely' ($e7.R.Stdout.Length -eq 8000 -and $e7.R.Stderr.Length -eq 8000 -and (Test-AllBytes $e7.R.Stdout 0x6F) -and (Test-AllBytes $e7.R.Stderr 0x65) -and -not $e7.R.StdoutExceeded -and -not $e7.R.StderrExceeded -and $e7.R.ExitCode -eq 0 -and $e7.Gone) "out=$($e7.R.Stdout.Length) err=$($e7.R.Stderr.Length)"
+    $e8 = Invoke-Emit $emit @('-Invalid')
+    Test-Case 'bounded: invalid UTF-8 bytes are returned exactly as written (no replacement) and the parser then refuses them as report_not_utf8' ((Test-BytesEqual $e8.R.Stderr ([byte[]](0x7B, 0xFF, 0xC0, 0xAF, 0xED, 0xA0, 0x80, 0x7D, 0x0A))) -and (ConvertFrom-RuntimeReport -Bytes $e8.R.Stderr -ExitCode 0).ReportCode -ceq 'report_not_utf8')
+    $e9 = Invoke-Emit $emit @('-Sleep', '60000') -TimeoutMs 1500
+    Test-Case 'bounded: a child that runs past the time limit is TimedOut (not exceeded), killed, reaped, and its streams drained, well before its 60 s sleep' ($e9.R.TimedOut -and -not $e9.R.StdoutExceeded -and -not $e9.R.StderrExceeded -and $e9.R.Killed -and $e9.R.Exited -and $e9.R.StreamsDrained -and $e9.Gone -and $e9.Ms -lt 15000) "ms=$($e9.Ms)"
+    $e10 = Invoke-Emit $emit @('-Err', '10', '-Exit', '7')
+    Test-Case 'bounded: the exit code of the child is passed through (7)' ($e10.R.ExitCode -eq 7 -and $e10.R.Stderr.Length -eq 10 -and -not $e10.R.Killed)
+    $root = New-TestRepo; $fake = Install-Fake $root
+    $bads = @(
+        { param([string[]]$Arguments, $Capture) [pscustomobject]@{ ExitCode = 0; Output = ''; Error = '' } },
+        { param([string[]]$Arguments, $Capture) [pscustomobject]@{ ExitCode = 0; Stdout = [byte[]]@(); Stderr = 'text'; StdoutExceeded = $false; StderrExceeded = $false; TimedOut = $false; Exited = $true; StreamsDrained = $true } },
+        { param([string[]]$Arguments, $Capture) [pscustomobject]@{ ExitCode = 0; Stdout = [byte[]]@(); Stderr = [byte[]]@(1); StdoutExceeded = $false; StderrExceeded = $false; TimedOut = $false; Exited = $true; StreamsDrained = $false } },
+        { param([string[]]$Arguments, $Capture) [pscustomobject]@{ ExitCode = 0; Stdout = [byte[]]@(); Stderr = [byte[]]::new(9000); StdoutExceeded = $false; StderrExceeded = $false; TimedOut = $false; Exited = $true; StreamsDrained = $true } },
+        { param([string[]]$Arguments, $Capture) throw 'boom' }
+    )
+    $badValid = @(); foreach ($b in $bads) { Set-DockerCliInvoker -Invoker $b; $badValid += (Invoke-DockerCliCapture -Arguments @('logs', 'x') -LimitBytes 8192 -TimeoutMs 1000).Valid }
+    Set-DockerCliInvoker -Invoker $fake.Invoker
+    Test-Case 'bounded: a capture answer that is not the bounded shape (no bytes, text instead of bytes, streams not drained, more than limit + 1 bytes, an exception) is invalid and never used' (@($badValid | Where-Object { $_ }).Count -eq 0 -and $badValid.Count -eq 5)
+    $plain = Invoke-DockerCli -Arguments @('version', '--format', '{{.Server.Version}}')
+    $launcherText = [IO.File]::ReadAllText((Join-Path $script:ToolsDir 'DiscoveryLauncher.psm1'))
+    Test-Case 'bounded: a call without a capture is unchanged: Invoke-DockerCli still returns ExitCode, Output, Error as text, and the original reading code (ReadToEndAsync of both streams, WaitForExit) is still the path without a capture' ($plain.ExitCode -eq 0 -and $plain.Output -ceq '29.0.0-test' -and $plain.Error -is [string] -and $launcherText.Contains('    $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()') -and $launcherText.Contains('    [pscustomobject]@{ ExitCode = $p.ExitCode; Output = $out.Result; Error = $err.Result }') -and $launcherText.Contains('if ($null -ne $Capture) { return (Invoke-BoundedProcess -FileName ''docker'''))
+    # ---- F. retention of the resources of a Run whose stop is not confirmed (garbage collection in pwsh child processes; this process never
+    # opens these guards or locks, so it cannot keep them alive by itself)
+    $retDir = New-TempDir; $retScript = Join-Path $retDir 'retention-child.ps1'; [IO.File]::WriteAllText($retScript, $script:RetentionChild, $utf8)
+    $libDir = Join-Path $PSScriptRoot 'lib'
+    $readKv = { param($Out) $h = @{}; foreach ($ln in ($Out -split "`r?`n")) { if ($ln -match '^([a-z_0-9]+)=(.*)$') { $h[$Matches[1]] = $Matches[2] } }; $h }
+    $uRoot = New-TestRepo; $cRoot = New-TestRepo
+    $u = Invoke-ChildPwsh -ScriptPath $retScript -Arguments @('-Root', $uRoot, '-ControlRoot', $cRoot, '-Tools', $script:ToolsDir, '-Lib', $libDir, '-MutexName', (New-TestMutexName), '-Mode', 'unstopped') -TimeoutSec 300
+    $k = & $readKv $u.Output
+    Test-Case 'C2 retention: after Invoke-DiscoveryStart returns with the stop not confirmed, and after an explicit garbage collection with finalizers, the Run is retained (1 entry) and every input file still refuses a writer, the Run lock refuses another open, and the mutex is held (another thread cannot take it)' ($u.ExitCode -eq 0 -and $k['first_code'] -cne 'complete' -and $k['first_exit'] -cne '0' -and $k['retained'] -ceq 'True' -and $k['count'] -ceq '1' -and $k['files_held_after_gc'] -ceq 'True' -and $k['lock_held_after_gc'] -ceq 'True' -and $k['mutex_after_gc'] -ceq 'held') "exit=$($u.ExitCode) $($u.Output -replace "`r?`n", ' ') $($u.Error)"
+    Test-Case 'C2 retention: the control is real: a guard that nothing references is closed by the garbage collector in the same child (its files become writable)' ($k['control_opened'] -ceq 'True' -and $k['control_released_by_gc'] -ceq 'True')
+    Test-Case 'C2 retention: a later start in the same process is refused before any resource (run_lock, exit 2, no Run ID) and does not replace or release the earlier entry: after another collection it is still retained (1 entry) and everything is still held' ($k['second_code'] -ceq 'run_lock' -and $k['second_exit'] -ceq '2' -and $k['second_run_id_empty'] -ceq 'True' -and $k['retained_after_second'] -ceq 'True' -and $k['count_after_second'] -ceq '1' -and $k['files_held_after_second'] -ceq 'True' -and $k['lock_held_after_second'] -ceq 'True' -and $k['mutex_after_second'] -ceq 'held')
+    Test-Case 'C2 retention: Import-Module -Force and Remove-Module of the Launcher do not release it (the store is a static .NET field): after a collection the entry, the file handles, the Run lock, and the mutex are still held' ($k['retained_after_reload'] -ceq 'True' -and $k['count_after_reload'] -ceq '1' -and $k['files_held_after_reload'] -ceq 'True' -and $k['lock_held_after_reload'] -ceq 'True' -and $k['mutex_after_reload'] -ceq 'held')
+    $nRoot = New-TestRepo
+    $n = Invoke-ChildPwsh -ScriptPath $retScript -Arguments @('-Root', $nRoot, '-ControlRoot', $cRoot, '-Tools', $script:ToolsDir, '-Lib', $libDir, '-MutexName', (New-TestMutexName), '-Mode', 'normal') -TimeoutSec 300
+    $kn = & $readKv $n.Output
+    Test-Case 'C2 retention: a normal end (complete, stop confirmed) retains nothing: after a collection the files are writable, the Run lock is free, and the mutex can be taken' ($n.ExitCode -eq 0 -and $kn['code'] -ceq 'complete' -and $kn['exit'] -ceq '0' -and $kn['retained'] -ceq 'False' -and $kn['count'] -ceq '0' -and $kn['files_free'] -ceq 'True' -and $kn['lock_held'] -ceq 'False' -and $kn['mutex'] -ceq 'acquired') "exit=$($n.ExitCode) $($n.Output -replace "`r?`n", ' ') $($n.Error)"
+    $fRoot = New-TestRepo
+    $f = Invoke-ChildPwsh -ScriptPath $retScript -Arguments @('-Root', $fRoot, '-ControlRoot', $cRoot, '-Tools', $script:ToolsDir, '-Lib', $libDir, '-MutexName', (New-TestMutexName), '-Mode', 'refused') -TimeoutSec 300
+    $kf = & $readKv $f.Output
+    Test-Case 'C2 retention: refusals before any resource (audit_config_missing, input_file_refused) retain nothing: no entry, the files writable, the Run lock and the mutex free' ($f.ExitCode -eq 0 -and $kf['code_a'] -ceq 'audit_config_missing' -and $kf['code_b'] -ceq 'input_file_refused' -and $kf['count'] -ceq '0' -and $kf['files_free'] -ceq 'True' -and $kf['lock_held'] -ceq 'False' -and $kf['mutex'] -ceq 'acquired') "exit=$($f.ExitCode) $($f.Output -replace "`r?`n", ' ') $($f.Error)"
+    $lt = [IO.File]::ReadAllText((Join-Path $script:ToolsDir 'DiscoveryLauncher.psm1'))
+    $storeSrc = [regex]::Match($lt, '(?s)public static class UnstoppedRunRetention.*?\n    \}').Value
+    Test-Case 'C2 retention (static): the store is add-only (TryAdd; no TryRemove, Clear, indexer write, or release function), it is filled at exactly one place under "container exists and stop not confirmed", and no retained content is logged' ($storeSrc.Contains('Held.TryAdd(runId, resources)') -and -not ($storeSrc -match 'TryRemove|Clear\(|TryUpdate|Held\[') -and [regex]::Matches($lt, 'Save-UnstoppedRunResources -RunId').Count -eq 1 -and $lt.Contains('if ($null -ne $container -and -not $stopConfirmed -and $null -ne $runId) {') -and -not ($lt -match 'Remove-UnstoppedRun|Clear-UnstoppedRun|Release-UnstoppedRun') -and ((@((Get-Module DiscoveryLauncher).ExportedFunctions.Keys | Where-Object { $_ -like '*Unstopped*' } | Sort-Object)) -join ',') -ceq 'Get-UnstoppedRunRetainedCount,Test-UnstoppedRunRetained')
     # ---------------------------------------------------------------- the verification against the TypeScript vector
     $vector = Join-Path $script:RepoRoot 'packages/discovery-loop/test-vectors/sealed-run'
     if (Test-Path -LiteralPath (Join-Path $vector 'manifest.json')) {

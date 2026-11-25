@@ -15,14 +15,21 @@
   that changes them. Every use of Docker goes through Invoke-DockerCli of DiscoveryLauncher.psm1.
 .PARAMETER Probe
   Starts the toolchain-image probe of task 2.20 instead of a Run (OD-12, option (a)). A probe is not a Run and is evidence for no M4 isolation requirement.
+.PARAMETER AuditConfig
+  Required for a Run, refused with -Probe (task 4.9-C2; decision of 2026-11-25). The only value is `fixture` (exactly, in lower case): the
+  synthetic audit configuration discovery/config/audit-config.mock.json, mounted read-only at /run/config/audit-config.json. There is no
+  default, no prompt, and no fallback to any other audit configuration.
 #>
 [CmdletBinding()]
-param([switch]$Probe)
+param([switch]$Probe, [ValidateSet('fixture')][string]$AuditConfig)
 $ErrorActionPreference = 'Stop'
 $repo = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 Import-Module (Join-Path $PSScriptRoot 'DiscoveryLauncher.psm1') -Force -DisableNameChecking
+# -AuditConfig is passed on only when it was given, so the Launcher itself refuses a missing value (no prompt, no default).
+$extra = @{}
+if ($PSBoundParameters.ContainsKey('AuditConfig')) { $extra['AuditConfig'] = $AuditConfig }
 $result = Invoke-DiscoveryStart -RepoRoot $repo -Profile $(if ($Probe) { 'probe' } else { 'run' }) `
     -MutexName 'Local\ProjectPhoenixGroundTruthEvaluation' `
-    -LockPath (Join-Path $repo 'discovery/locks/discovery-run.lock')
+    -LockPath (Join-Path $repo 'discovery/locks/discovery-run.lock') @extra
 Write-Host "result: $($result.Code)"
 exit $result.ExitCode

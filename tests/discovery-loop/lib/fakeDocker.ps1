@@ -17,12 +17,20 @@ function New-FakeDocker {
         RunPolls = 3; ExitCodeOnEnd = '0'
         OnStart = $null
         OnRunDetached = $null
+        # task 4.9-C2: the runtime report (bytes of the container's standard error and output, as `docker logs` gives them), faults, and hooks
+        RuntimeStderr = [System.Text.UTF8Encoding]::new($false).GetBytes('{"phase":"run","sealed":true,"terminationReason":"iteration_limit_reached"}' + "`n")
+        RuntimeStdout = [byte[]]@()
+        LogsFail = $false; LogsTimeout = $false
+        ImageInspectFails = $false; ImageOverride = $null; LabelRunIdOverride = $null
+        OnCreate = $null; FailCreate = $false
+        ThrowOn = $null
     })
     [void][IO.Directory]::CreateDirectory($state.VolumeRoot)
     $invoker = {
-        param([string[]]$Arguments)
+        param([string[]]$Arguments, $Capture)
         $s = $state
         [void]$s.Calls.Add(($Arguments -join ' '))
+        if ($null -ne $s.ThrowOn -and ($Arguments -join ' ') -like $s.ThrowOn) { throw 'fake: injected failure' }
         $ok = { param($out = '') [pscustomobject]@{ ExitCode = 0; Output = [string]$out; Error = '' } }
         $no = { param($err = 'error') [pscustomobject]@{ ExitCode = 1; Output = ''; Error = [string]$err } }
         $argAfter = { param($name) $i = [Array]::IndexOf($Arguments, $name); if ($i -ge 0 -and $i + 1 -lt $Arguments.Count) { $Arguments[$i + 1] } else { $null } }
@@ -81,7 +89,15 @@ function New-FakeDocker {
                 $mounts = [System.Collections.ArrayList]::new(); foreach ($m in @(& $allAfter '--mount')) { [void]$mounts.Add((& $parseMount $m)) }
                 if ($null -ne $s.ExtraMount) { [void]$mounts.Add($s.ExtraMount) }
                 $networks = @(& $argAfter '--network'); if ($null -ne $s.ExtraNetwork) { $networks += $s.ExtraNetwork }
-                $s.Containers[$name] = @{ Running = $false; ExitCode = '0'; Labels = $labels; Mounts = $mounts; Networks = $networks; Polls = $s.RunPolls; Env = @(& $allAfter '--env') }
+                # the image is the first argument that is not an option (or an option value); an image ID must be one that exists (no pull)
+                $valued = @('--name', '--network', '--cap-drop', '--security-opt', '--user', '--tmpfs', '--memory', '--cpus', '--pids-limit', '--label', '--env', '--mount', '--workdir', '--pull')
+                $imageRef = $null
+                for ($i = 1; $i -lt $Arguments.Count; $i++) { $x = $Arguments[$i]; if ($valued -contains $x) { $i++; continue }; if ($x -like '--*') { continue }; $imageRef = $x; break }
+                $imageId = if ($imageRef -cmatch '^sha256:[0-9a-f]{64}$') { $imageRef } elseif ($null -ne $imageRef -and $s.Images.ContainsKey($imageRef)) { $s.Images[$imageRef] } else { $null }
+                if ($s.FailCreate) { return (& $no 'Error: create failed') }
+                if ($imageRef -cmatch '^sha256:' -and @($s.Images.Values) -cnotcontains $imageRef) { return (& $no 'Error: No such image') }
+                $s.Containers[$name] = @{ Running = $false; ExitCode = '0'; Labels = $labels; Mounts = $mounts; Networks = $networks; Polls = $s.RunPolls; Env = @(& $allAfter '--env'); Image = $imageId; ImageRef = $imageRef; Pull = (& $argAfter '--pull') }
+                if ($null -ne $s.OnCreate) { & $s.OnCreate $name $s }
                 return (& $ok "id-$name")
             }
             'start' {
@@ -94,6 +110,12 @@ function New-FakeDocker {
                 $name = & $key $Arguments[-1]; $c = $s.Containers[$name]
                 if ($null -eq $c) { return (& $no 'Error: No such object') }
                 $format = & $argAfter '--format'
+                if ($format -like '{{.Image}}|*') {
+                    if ($s.ImageInspectFails) { return (& $no 'Error: inspect failed') }
+                    $img = if ($null -ne $s.ImageOverride) { $s.ImageOverride } else { $c.Image }
+                    $rid = if ($null -ne $s.LabelRunIdOverride) { $s.LabelRunIdOverride } else { $c.Labels['phoenix.discovery.run-id'] }
+                    return (& $ok "$img|id-$name|$rid|$($c.Labels['phoenix.discovery.role'])")
+                }
                 if ($format -like '{{.Id}}|*') { $lid = if ($null -ne $s.IdOverride) { $s.IdOverride } else { "id-$name" }; return (& $ok ("$lid|$($c.Labels['phoenix.discovery.run-id'])|$($c.Labels['phoenix.discovery.role'])|" + $(if ($c.Running) { 'true' } else { 'false' }))) }
                 if ($format -eq '{{.State.Running}}') {
                     if ($c.Running -and $null -ne $c.Polls) { $c.Polls--; if ($c.Polls -le 0) { $c.Running = $false; $c.ExitCode = $s.ExitCodeOnEnd } }
@@ -103,6 +125,19 @@ function New-FakeDocker {
                 $mj = '[' + ((@($c.Mounts) | ForEach-Object { '{"Type":"' + $_.Type + '","Source":"' + ([string]$_.Source).Replace('\', '\\') + '","Destination":"' + $_.Destination + '","RW":' + ([string]$_.RW).ToLowerInvariant() + '}' }) -join ',') + ']'
                 $nj = '{' + ((@($c.Networks) | ForEach-Object { '"' + $_ + '":{}' }) -join ',') + '}'
                 return (& $ok "$mj|$nj|{}|false")
+            }
+            'logs' {
+                # the shape of Invoke-BoundedProcess; the byte limit of the capture is applied as the real reader applies it (limit + 1 bytes kept)
+                $n = & $key $Arguments[-1]; $c = $s.Containers[$n]
+                $lim = if ($null -ne $Capture) { [int]$Capture.LimitBytes } else { [int]::MaxValue - 1 }
+                $shape = { param($exit, [byte[]]$out, [byte[]]$err, [bool]$outEx, [bool]$errEx, [bool]$timed) [pscustomobject]@{ ExitCode = [int]$exit; Output = ''; Error = ''; Stdout = [byte[]]$out; Stderr = [byte[]]$err; StdoutExceeded = $outEx; StderrExceeded = $errEx; TimedOut = $timed; Killed = ($outEx -or $errEx -or $timed); Exited = $true; StreamsDrained = $true; Started = $true; ProcessId = 0 } }
+                if ($null -eq $c -or $s.LogsFail) { return (& $shape 1 ([byte[]]@()) ([System.Text.UTF8Encoding]::new($false).GetBytes("Error: No such container`n")) $false $false $false) }
+                if ($s.LogsTimeout) { return (& $shape -1 ([byte[]]@()) ([byte[]]@()) $false $false $true) }
+                $err = [byte[]]$s.RuntimeStderr; $out = [byte[]]$s.RuntimeStdout
+                $errEx = $err.Length -gt $lim; $outEx = $out.Length -gt $lim
+                if ($errEx) { $err = [byte[]]$err[0..$lim] }
+                if ($outEx) { $out = [byte[]]$out[0..$lim] }
+                return (& $shape $(if ($errEx -or $outEx) { -1 } else { 0 }) $out $err $outEx $errEx $false)
             }
             'stop' { $c = $s.Containers[$Arguments[-1]]; if ($null -ne $c -and -not $s.StopFails) { $c.Running = $false; $c.Polls = $null }; return (& $ok '') }
             'kill' { $c = $s.Containers[$Arguments[-1]]; if ($null -ne $c -and -not $s.StopFails) { $c.Running = $false; $c.Polls = $null }; return (& $ok '') }
