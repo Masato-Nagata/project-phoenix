@@ -218,6 +218,187 @@ function Get-RelativeFiles {
     , $out
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# Bounded verification support (task 4.10, part B3a). Everything below is used by Test-RunDirectory only, and only the reader
+# (Read-RunFile) is used in both modes. Without -Bounded nothing here limits or rejects anything: the limits are $null.
+#
+# What the bounds guarantee, and what they do not:
+# - The raw bytes that the verification reads from manifest.json, COMPLETE, records.jsonl and every artifact are counted AS THEY ARE READ
+#   (the stream length is never trusted), against one total and against a limit per file. Reading stops one byte past the limit; that one
+#   byte is counted, and the verification fails. This is a budget of raw bytes read, not a limit on the memory of the process.
+# - The enumeration counts entries (files and directories) while it walks, and stops at the first entry above the limit.
+# - A reparse point (symbolic link, junction, mount point) is refused before it is entered or opened. The check and the open are two steps:
+#   a replacement in between, a hard link, a subst or mapped drive, and a changed ancestor after the check are NOT detected.
+#   The time-of-check to time-of-use gap is reduced, not closed.
+# A failure of a bound is a failed verification with a fixed reason code. No partial hash or partial result is returned as a success.
+$script:RunBoundDefaults = [pscustomobject]@{
+    MaxTotalBytes    = [long](64 * 1024 * 1024)   # one verification (design: replay input budget, 64 MiB)
+    MaxManifestBytes = [long](4 * 1024 * 1024)    # TypeScript MAX_MANIFEST_BYTES
+    MaxMarkerBytes   = [long]128                  # COMPLETE is 64 hex characters, optionally CRLF (66 bytes); 128 leaves room for a BOM
+    MaxEntries       = [long]10000                # files + directories; the contract has no limit (see the design note)
+    MaxDepth         = [long]16                   # TypeScript MAX_WALK_DEPTH
+}
+
+function Stop-RunBound {
+    param([string]$Code)
+    throw [System.InvalidOperationException]::new("RUNBOUND:$Code")
+}
+
+# An int or long between $Min and Int64.MaxValue - 1 (so that limit + 1 and used + count cannot overflow), or the default when $null.
+function Resolve-RunBound {
+    param($Value, [string]$Name, [long]$Default, [long]$Min = 1)
+    if ($null -eq $Value) { return $Default }
+    if ($Value -isnot [int] -and $Value -isnot [long]) { throw [System.ArgumentException]::new("$Name must be an integer (int or long)") }
+    $v = [long]$Value
+    if ($v -lt $Min -or $v -ge [long]::MaxValue) { throw [System.ArgumentException]::new("$Name is out of range") }
+    $v
+}
+
+function New-RunReadContext {
+    param([bool]$Bounded, [bool]$Reject, [long]$Total, [long]$Manifest, [long]$Marker, [long]$Entries, [long]$Depth)
+    [pscustomobject]@{
+        Bounded = $Bounded; Reject = $Reject; TotalLimit = $Total; ManifestLimit = $Manifest; MarkerLimit = $Marker
+        MaxEntries = $Entries; MaxDepth = $Depth; Used = [long]0; EntryCount = [long]0
+        Reads = @{ manifest = 0; complete = 0; records = 0; artifact = 0 }
+    }
+}
+
+# Reads one open stream to its end through one 64 KiB buffer, counting what was actually read. With -HashOnly the bytes are hashed and not kept.
+# Returns [pscustomobject]@{ Bytes; Sha256; Count }. Throws RUNBOUND:file_too_large or RUNBOUND:budget_exceeded when the limit is crossed.
+function Read-RunStream {
+    param([System.IO.Stream]$Stream, $Ctx, [long]$FileLimit, [switch]$HashOnly)
+    $limited = [bool]$Ctx.Bounded
+    $limit = [long]::MaxValue
+    $code = 'file_too_large'
+    if ($limited) {
+        $remaining = [long]$Ctx.TotalLimit - [long]$Ctx.Used
+        if ($remaining -lt $FileLimit) { $limit = $remaining; $code = 'budget_exceeded' } else { $limit = $FileLimit }
+    }
+    $buf = [byte[]]::new(65536)
+    $count = [long]0
+    $ms = if ($HashOnly) { $null } else { [System.IO.MemoryStream]::new() }
+    $hasher = [System.Security.Cryptography.IncrementalHash]::CreateHash([System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    try {
+        while ($true) {
+            $ask = $buf.Length
+            if ($limited) { $left = $limit - $count + 1; if ($left -lt $ask) { $ask = [int]$left } }
+            $n = $Stream.Read($buf, 0, $ask)
+            if ($n -le 0) { break }
+            $count += $n
+            if ($limited -and $count -gt $limit) { $Ctx.Used = [long]$Ctx.Used + $count; Stop-RunBound $code }
+            $hasher.AppendData($buf, 0, $n)
+            if ($null -ne $ms) { $ms.Write($buf, 0, $n) }
+        }
+        $Ctx.Used = [long]$Ctx.Used + $count
+        $bytes = if ($null -ne $ms) { $ms.ToArray() } else { $null }
+        [pscustomobject]@{ Bytes = $bytes; Sha256 = [Convert]::ToHexString($hasher.GetHashAndReset()).ToLowerInvariant(); Count = $count }
+    } finally { $hasher.Dispose(); if ($null -ne $ms) { $ms.Dispose() } }
+}
+
+# Opens one file once (one handle, closed in finally) and reads it through Read-RunStream. Role names the counter of opens.
+function Read-RunFile {
+    param($Ctx, [string]$Path, [string]$Role, [long]$FileLimit = [long]::MaxValue, [switch]$HashOnly, [System.IO.FileShare]$Share = [System.IO.FileShare]::Read)
+    $Ctx.Reads[$Role] = [int]$Ctx.Reads[$Role] + 1
+    $fs = $null
+    try {
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $Share)
+        Read-RunStream -Stream $fs -Ctx $Ctx -FileLimit $FileLimit -HashOnly:$HashOnly
+    } catch {
+        if ($_.Exception.Message -like 'RUNBOUND:*') { throw }
+        if ($Ctx.Bounded) { Stop-RunBound 'read_failed' }
+        throw
+    } finally { if ($null -ne $fs) { $fs.Dispose() } }
+}
+
+# Windows device names, alternate data streams and trailing dot or space in one relative path component. Only for the bounded mode.
+function Test-RunPathComponent {
+    param([string]$Component)
+    if ($Component.Contains(':') -or $Component.EndsWith('.') -or $Component.EndsWith(' ')) { return $false }
+    $stem = $Component.Split('.')[0].TrimEnd(' ')
+    $stem -cnotmatch '^(?i:CON|PRN|AUX|NUL|CLOCK\$|COM[0-9\u00B9\u00B2\u00B3]|LPT[0-9\u00B9\u00B2\u00B3])$'
+}
+
+# $true: a regular file that is not a link. $false: nothing there (the caller reports it as missing, as before). Throws RUNBOUND for a link,
+# a directory, or any other state in the bounded mode. Without -RejectReparsePoints this is Test-Path -PathType Leaf, as before.
+function Test-RunLeaf {
+    param($Ctx, [string]$Path)
+    if (-not $Ctx.Reject) { return (Test-Path -LiteralPath $Path -PathType Leaf) }
+    try { $a = [System.IO.File]::GetAttributes($Path) }
+    catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { return $false }
+    catch { Stop-RunBound 'path_unsafe' }
+    if (($a -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { Stop-RunBound 'reparse_point' }
+    if (($a -band [System.IO.FileAttributes]::Directory) -ne 0) { Stop-RunBound 'path_unsafe' }
+    $true
+}
+
+# The root and every ancestor of it must not be a reparse point. A root that does not exist is left to the caller (no_manifest).
+function Assert-RunRootPlain {
+    param([string]$FullRoot)
+    if ($FullRoot.StartsWith('\\.\') -or $FullRoot.StartsWith('\\?\')) { Stop-RunBound 'path_unsafe' }
+    $cur = $FullRoot.TrimEnd('\', '/')
+    if ($cur.Length -eq 2 -and $cur[1] -eq ':') { $cur += '\' }
+    while ($true) {
+        try { $a = [System.IO.File]::GetAttributes($cur) }
+        catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { return }
+        catch { Stop-RunBound 'path_unsafe' }
+        if (($a -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { Stop-RunBound 'reparse_point' }
+        $parent = [System.IO.Path]::GetDirectoryName($cur)
+        if ([string]::IsNullOrEmpty($parent)) { return }
+        $cur = $parent
+    }
+}
+
+# The directories between the root and a relative file path must not be reparse points (an artifact below a junction).
+function Assert-RunParentsPlain {
+    param([string]$FullRoot, [string]$Rel)
+    $parts = $Rel.Split('/')
+    $cur = $FullRoot
+    for ($i = 0; $i -lt $parts.Length - 1; $i++) {
+        $cur = Join-Path $cur $parts[$i]
+        try { $a = [System.IO.File]::GetAttributes($cur) }
+        catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { return }
+        catch { Stop-RunBound 'path_unsafe' }
+        if (($a -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { Stop-RunBound 'reparse_point' }
+    }
+}
+
+# Bounded enumeration of the files under a Run root: a depth-first walk over a stack of directories, with a lazy enumerator, so the walk
+# stops at the first entry above the limit and never builds the whole list first. Root: depth 0; its direct children are level 0; a
+# directory at level >= MaxDepth fails (the TypeScript walk reports such a directory as unlisted). Every entry (file or directory,
+# valid or not) is counted when it is seen, before it is judged; a count equal to the limit passes and one more fails. A link is refused
+# when -RejectReparsePoints is set; otherwise a directory link is not entered, as Get-ChildItem -Recurse does not enter it. Any error of
+# the enumeration fails the verification.
+function Get-RunFilesBounded {
+    param($Ctx, [string]$FullRoot)
+    $out = [System.Collections.Generic.List[string]]::new()
+    if (-not (Test-Path -LiteralPath $FullRoot -PathType Container)) { return , $out }
+    $opts = [System.IO.EnumerationOptions]::new()
+    $opts.RecurseSubdirectories = $false; $opts.AttributesToSkip = [System.IO.FileAttributes]0; $opts.IgnoreInaccessible = $false; $opts.ReturnSpecialDirectories = $false
+    $stack = [System.Collections.Generic.Stack[object]]::new()
+    $stack.Push(@($FullRoot, '', 0))
+    while ($stack.Count -gt 0) {
+        $top = $stack.Pop()
+        try {
+            foreach ($e in ([System.IO.DirectoryInfo]::new([string]$top[0])).EnumerateFileSystemInfos('*', $opts)) {
+                $Ctx.EntryCount = [long]$Ctx.EntryCount + 1
+                if ($Ctx.EntryCount -gt $Ctx.MaxEntries) { Stop-RunBound 'entry_limit' }
+                $isLink = (($e.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+                if ($isLink -and $Ctx.Reject) { Stop-RunBound 'reparse_point' }
+                $rel = if ([string]$top[1] -eq '') { $e.Name } else { "$($top[1])/$($e.Name)" }
+                if (($e.Attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
+                    if ($isLink) { continue }
+                    if ([long]$top[2] -ge [long]$Ctx.MaxDepth) { Stop-RunBound 'depth_limit' }
+                    $stack.Push(@($e.FullName, $rel, ([long]$top[2] + 1)))
+                } else { $out.Add($rel) }
+            }
+        } catch {
+            if ($_.Exception.Message -like 'RUNBOUND:*') { throw }
+            Stop-RunBound 'enumeration_failed'
+        }
+    }
+    , $out
+}
+
 function Add-BlobRefs {
     param($Element, [System.Collections.Generic.HashSet[string]]$Set)
     if ($Element.ValueKind -eq 'Object') {
@@ -230,21 +411,69 @@ function Add-BlobRefs {
     }
 }
 
+# Without -Bounded the behavior, the result, and the reasons are the existing ones: no limit, no link check. Bounded mode (all of the
+# following need -Bounded; see the notes above Stop-RunBound):
+#   -MaxTotalBytes, -MaxManifestBytes, -MaxMarkerBytes   raw bytes read (int or long; defaults 64 MiB, 4 MiB, 128 bytes)
+#   -MaxEntries, -MaxDepth                               files and directories counted while walking (defaults 10000, 16)
+#   -RejectReparsePoints                                 refuse links in the root, its ancestors, and everything under the root
+#   -IncludeVerifiedData (with -RequireMarker)           adds the property VerifiedData: the verified manifest hash, the manifest parsed from
+#                                                        the same bytes, and the records bytes that were hashed and walked; $null unless the
+#                                                        result is success and COMPLETE equals the manifest hash. Nothing is printed.
+# A bound that is crossed returns Incomplete = $true with IncompleteReason budget_exceeded, file_too_large, entry_limit, depth_limit,
+# reparse_point, path_unsafe, read_failed, or enumeration_failed, ManifestSha256 = $null, and no Detail (no path, hash, or content).
 function Test-RunDirectory {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Path, [switch]$RequireMarker)
+    param(
+        [Parameter(Mandatory)][string]$Path, [switch]$RequireMarker,
+        [switch]$Bounded, $MaxTotalBytes, $MaxManifestBytes, $MaxMarkerBytes, $MaxEntries, $MaxDepth,
+        [switch]$RejectReparsePoints, [switch]$IncludeVerifiedData
+    )
+    $limitGiven = $PSBoundParameters.ContainsKey('MaxTotalBytes') -or $PSBoundParameters.ContainsKey('MaxManifestBytes') -or $PSBoundParameters.ContainsKey('MaxMarkerBytes') -or $PSBoundParameters.ContainsKey('MaxEntries') -or $PSBoundParameters.ContainsKey('MaxDepth')
+    if (-not $Bounded -and ($limitGiven -or $RejectReparsePoints -or $IncludeVerifiedData)) { throw [System.ArgumentException]::new('a limit, -RejectReparsePoints, and -IncludeVerifiedData need -Bounded') }
+    if ($IncludeVerifiedData -and -not $RequireMarker) { throw [System.ArgumentException]::new('-IncludeVerifiedData needs -RequireMarker') }
+    $d = $script:RunBoundDefaults
+    $ctx = if ($Bounded) {
+        New-RunReadContext -Bounded $true -Reject ([bool]$RejectReparsePoints) -Total (Resolve-RunBound $MaxTotalBytes 'MaxTotalBytes' $d.MaxTotalBytes) `
+            -Manifest (Resolve-RunBound $MaxManifestBytes 'MaxManifestBytes' $d.MaxManifestBytes) -Marker (Resolve-RunBound $MaxMarkerBytes 'MaxMarkerBytes' $d.MaxMarkerBytes) `
+            -Entries (Resolve-RunBound $MaxEntries 'MaxEntries' $d.MaxEntries) -Depth (Resolve-RunBound $MaxDepth 'MaxDepth' $d.MaxDepth -Min 0)
+    } else { New-RunReadContext -Bounded $false -Reject $false -Total ([long]::MaxValue) -Manifest ([long]::MaxValue) -Marker ([long]::MaxValue) -Entries ([long]::MaxValue) -Depth ([long]::MaxValue) }
     $incomplete = {
         param($reason, $detail, $sha)
-        [pscustomobject]@{ Result = 'failure'; Incomplete = $true; IncompleteReason = $reason; Detail = $detail; Mismatches = @(); ManifestSha256 = $sha }
+        $r = [pscustomobject]@{ Result = 'failure'; Incomplete = $true; IncompleteReason = $reason; Detail = $detail; Mismatches = @(); ManifestSha256 = $sha }
+        if ($IncludeVerifiedData) { Add-Member -InputObject $r -NotePropertyName VerifiedData -NotePropertyValue $null }
+        $r
     }
+    try {
+        if ($Bounded) {
+            if ($Path.Contains([char]0)) { Stop-RunBound 'path_unsafe' }
+            try { $Path = [System.IO.Path]::GetFullPath($Path) } catch { Stop-RunBound 'path_unsafe' }
+            if ($RejectReparsePoints) { Assert-RunRootPlain -FullRoot $Path }
+        }
+        return (Invoke-RunDirectoryVerification -Path $Path -RequireMarker:$RequireMarker -Ctx $ctx -Incomplete $incomplete -IncludeVerifiedData:$IncludeVerifiedData)
+    } catch {
+        if ($_.Exception.Message -like 'RUNBOUND:*') { return (& $incomplete $_.Exception.Message.Substring(9) $null $null) }
+        throw
+    }
+}
+
+function Invoke-RunDirectoryVerification {
+    param([string]$Path, [switch]$RequireMarker, $Ctx, [scriptblock]$Incomplete, [switch]$IncludeVerifiedData)
+    $incomplete = $Incomplete
     $manifestPath = Join-Path $Path 'manifest.json'
-    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return (& $incomplete 'no_manifest' $null $null) }
-    $manifestBytes = [System.IO.File]::ReadAllBytes($manifestPath)
+    if (-not (Test-RunLeaf -Ctx $Ctx -Path $manifestPath)) { return (& $incomplete 'no_manifest' $null $null) }
+    $manifestBytes = (Read-RunFile -Ctx $Ctx -Path $manifestPath -Role 'manifest' -FileLimit $Ctx.ManifestLimit).Bytes
     $manifestSha = Get-Sha256Hex -Bytes $manifestBytes
     $markerPath = Join-Path $Path 'COMPLETE'
-    $markerText = if (Test-Path -LiteralPath $markerPath -PathType Leaf) { [System.IO.File]::ReadAllText($markerPath) } else { $null }
+    $markerText = $null
+    if (Test-RunLeaf -Ctx $Ctx -Path $markerPath) {
+        $markerBytes = (Read-RunFile -Ctx $Ctx -Path $markerPath -Role 'complete' -FileLimit $Ctx.MarkerLimit).Bytes
+        # the decoding of File.ReadAllText: UTF-8, byte order mark honored
+        $rd = [System.IO.StreamReader]::new([System.IO.MemoryStream]::new($markerBytes), [System.Text.Encoding]::UTF8, $true)
+        try { $markerText = $rd.ReadToEnd() } finally { $rd.Dispose() }
+    }
     if ($RequireMarker -and $null -eq $markerText) { return (& $incomplete 'no_completion_marker' $null $manifestSha) }
 
+    $manifest = $null
     try {
         $manifest = ConvertFrom-JsonStrict -Text $script:Utf8Strict.GetString($manifestBytes)
         if ($manifest -isnot [System.Collections.IDictionary]) { throw 'the manifest is not an object' }
@@ -267,16 +496,31 @@ function Test-RunDirectory {
     $found = @{}
     $flag = { param($where, $kind) $found["$kind`0$where"] = [pscustomobject]@{ Where = $where; Kind = $kind } }
 
-    # 2. the hash of every listed artifact
+    # In the bounded mode the walk comes first, so that a tree that is too large or too deep fails before any artifact is read.
+    $present = $null
+    if ($Ctx.Bounded) {
+        foreach ($rel in $listed.Keys) { foreach ($c in $rel.Split('/')) { if (-not (Test-RunPathComponent -Component $c)) { Stop-RunBound 'path_unsafe' } } }
+        $present = Get-RunFilesBounded -Ctx $Ctx -FullRoot $Path
+    }
+    # 2. the hash of every listed artifact. records.jsonl is read once: the bytes that are hashed here are the bytes of the chain walk (4).
+    $recordsBytes = $null
+    $recordsRead = $false
     foreach ($rel in $listed.Keys) {
         $full = Join-Path $Path $rel
-        if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { & $flag $rel 'missing'; continue }
-        $h = Get-Sha256HexOfFile -Path $full
+        if ($Ctx.Reject) { Assert-RunParentsPlain -FullRoot $Path -Rel $rel }
+        if (-not (Test-RunLeaf -Ctx $Ctx -Path $full)) { & $flag $rel 'missing'; continue }
+        if ($rel -ieq 'records.jsonl') {
+            $rr = Read-RunFile -Ctx $Ctx -Path $full -Role 'records' -Share ([System.IO.FileShare]::ReadWrite)
+            $recordsBytes = $rr.Bytes; $recordsRead = $true; $h = $rr.Sha256
+        } else {
+            $h = (Read-RunFile -Ctx $Ctx -Path $full -Role 'artifact' -HashOnly -Share ([System.IO.FileShare]::ReadWrite)).Sha256
+        }
         if ($h -cne $listed[$rel]) { & $flag $rel 'modified' }
         elseif ($rel.StartsWith('blobs/') -and $rel -cne "blobs/$($listed[$rel])") { & $flag $rel 'modified' }
     }
     # 3. files present but not listed
-    foreach ($rel in (Get-RelativeFiles -Root $Path)) {
+    if ($null -eq $present) { $present = Get-RelativeFiles -Root $Path }
+    foreach ($rel in $present) {
         if ($listed.ContainsKey($rel)) { continue }
         if (-not $rel.Contains('/') -and ($script:UnlistedOk -contains $rel)) { continue }
         & $flag $rel 'unlisted'
@@ -286,8 +530,12 @@ function Test-RunDirectory {
     $count = 0
     $lastStored = $script:GenesisHash
     $recordsPath = Join-Path $Path 'records.jsonl'
-    if (Test-Path -LiteralPath $recordsPath -PathType Leaf) {
-        $text = $script:Utf8.GetString([System.IO.File]::ReadAllBytes($recordsPath))
+    if ($recordsRead -or (Test-RunLeaf -Ctx $Ctx -Path $recordsPath)) {
+        if (-not $recordsRead) {
+            if ($Ctx.Reject) { Assert-RunParentsPlain -FullRoot $Path -Rel 'records.jsonl' }
+            $recordsBytes = (Read-RunFile -Ctx $Ctx -Path $recordsPath -Role 'records' -Share ([System.IO.FileShare]::ReadWrite)).Bytes
+        }
+        $text = $script:Utf8.GetString($recordsBytes)
         $lines = [System.Collections.Generic.List[string]]($text.Split("`n"))
         if ($lines[$lines.Count - 1] -eq '') { $lines.RemoveAt($lines.Count - 1) }
         elseif ($lines.Count -gt 0) { & $flag ('rec-{0:D6}' -f $lines.Count) 'chain_break' }
@@ -343,10 +591,24 @@ function Test-RunDirectory {
     foreach ($b in $blobRefs) { if (-not $listed.ContainsKey("blobs/$b")) { & $flag "blobs/$b" 'missing' } }
 
     $mismatches = @($found.Values | Sort-Object -Property @{ Expression = { $_.Where }; Ascending = $true }, @{ Expression = { $_.Kind }; Ascending = $true })
-    [pscustomobject]@{
+    $result = [pscustomobject]@{
         Result = $(if ($mismatches.Count -eq 0) { 'success' } else { 'failure' })
         Incomplete = $false; IncompleteReason = $null; Detail = $null; Mismatches = $mismatches; ManifestSha256 = $manifestSha
     }
+    if ($IncludeVerifiedData) {
+        # The data that the caller may use without reading the Run again. Only for a success whose COMPLETE equals the hash of the manifest
+        # bytes that were parsed; everything else gets $null (never data of a failed or half-verified Run). Same decision as Test-CompletedRun.
+        $verified = $null
+        if ($result.Result -ceq 'success' -and ($markerText -replace '\r?\n$', '') -ceq $manifestSha) {
+            $verified = [pscustomobject]@{
+                ManifestSha256 = $manifestSha; Manifest = $manifest; MarkerMatchesManifest = $true; RecordsBytes = $recordsBytes
+                ReadCounts = [pscustomobject]@{ manifest = [int]$Ctx.Reads['manifest']; complete = [int]$Ctx.Reads['complete']; records = [int]$Ctx.Reads['records']; artifact = [int]$Ctx.Reads['artifact'] }
+                BytesRead = [long]$Ctx.Used; EntryCount = [long]$Ctx.EntryCount
+            }
+        }
+        Add-Member -InputObject $result -NotePropertyName VerifiedData -NotePropertyValue $verified
+    }
+    $result
 }
 
 # The acceptance rule of a completed Run directory (R12.23): COMPLETE exists, its content equals the SHA-256 of manifest.json,

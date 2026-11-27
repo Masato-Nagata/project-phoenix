@@ -17,6 +17,9 @@ $realMutex = 'Local\ProjectPhoenixGroundTruthEvaluation'
 function New-TestMutexName { 'Local\PhoenixTest-Launcher-' + [guid]::NewGuid().ToString('N') }
 $quiet = { param($m) }
 
+# (task 4.9-B1) Synthetic run-config.json text for the tests: valid JSON with a limits.runSeconds; the default fixture uses 1800, the same cap as the old fixed limit.
+function New-RunConfigText { param([Parameter(Mandatory)][string]$RunSeconds) '{"schemaVersion":1,"limits":{"runSeconds":' + $RunSeconds + '}}' + "`n" }
+
 # A temporary repository root with an approved override-apply (temporary store) and a valid lease-timing record (synthetic numbers).
 function New-TestRepo {
     param([switch]$NoApproval, [switch]$NoTiming, [long]$D = 100)
@@ -25,7 +28,7 @@ function New-TestRepo {
     [void][IO.Directory]::CreateDirectory((Join-Path $root 'discovery/config'))
     [void][IO.Directory]::CreateDirectory((Join-Path $root 'packages'))
     $inputTable = Get-InputFileTable
-    foreach ($row in $inputTable) { $fp = Join-Path $root ($row.RelPath -replace '/', '\'); [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($fp)); [IO.File]::WriteAllText($fp, "synthetic test input for $($row.Label)`n", $utf8) }
+    foreach ($row in $inputTable) { $fp = Join-Path $root ($row.RelPath -replace '/', '\'); [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($fp)); [IO.File]::WriteAllText($fp, $(if ($row.Label -ceq 'run-config') { New-RunConfigText -RunSeconds 1800 } else { "synthetic test input for $($row.Label)`n" }), $utf8) }
     $store = Join-Path $root 'discovery/approvals/approvals.jsonl'
     if (-not $NoApproval) {
         $c = [ordered]@{ approver = 'Test Approver'; timestamp = '2026-01-01T00:00:00.000+09:00'; target = [ordered]@{ kind = 'gate'; gate_id = 'override-apply' }; decision = 'approved'; rationale = 'Test only.'; recorded_by = 'human' }
@@ -1036,6 +1039,194 @@ public static class PhoenixTestAbandon {
     $plain = Invoke-DockerCli -Arguments @('version', '--format', '{{.Server.Version}}')
     $launcherText = [IO.File]::ReadAllText((Join-Path $script:ToolsDir 'DiscoveryLauncher.psm1'))
     Test-Case 'bounded: a call without a capture is unchanged: Invoke-DockerCli still returns ExitCode, Output, Error as text, and the original reading code (ReadToEndAsync of both streams, WaitForExit) is still the path without a capture' ($plain.ExitCode -eq 0 -and $plain.Output -ceq '29.0.0-test' -and $plain.Error -is [string] -and $launcherText.Contains('    $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()') -and $launcherText.Contains('    [pscustomobject]@{ ExitCode = $p.ExitCode; Output = $out.Result; Error = $err.Result }') -and $launcherText.Contains('if ($null -ne $Capture) { return (Invoke-BoundedProcess -FileName ''docker'''))
+    # ================================================================ task 4.9-B1: the Launcher limit follows the validated runSeconds
+    # Synthetic run-config.json texts only, the fake Docker, and the fake clock (no real waiting). `docker` cannot be found through PATH while these tests
+    # run, so a fall-back of the fake CLI to the real one would fail loudly.
+    $b1Before = $script:PassCount + $script:FailCount
+    $b1Path = $env:PATH
+    function Invoke-B1ConfigCheck {
+        param([byte[]]$Bytes, [switch]$TamperHash, [switch]$CloseFirst)
+        $r = New-TestRepo
+        [IO.File]::WriteAllBytes((Get-InputPath $r 'run-config'), $Bytes)
+        $o = Open-InputFileGuard -RepoRoot $r -Table (Get-InputFileTable)
+        if (-not $o.Ok) { throw "the guard refused the synthetic fixture: $($o.Label):$($o.Code)" }
+        try {
+            if ($TamperHash) { (Get-InputFileGuardEntry -Guard $o.Guard -Label 'run-config').Sha256 = ('0' * 64) }
+            if ($CloseFirst) { Close-InputFileGuard -Guard $o.Guard }
+            Get-LauncherRunConfigLimit -Guard $o.Guard
+        } finally { Close-InputFileGuard -Guard $o.Guard }
+    }
+    function Invoke-B1Start {
+        param([string]$ConfigText, [long]$RunPolls = 100000, [string]$Profile = 'run', [scriptblock]$Log = { param($m) })
+        $r = New-TestRepo
+        if ($PSBoundParameters.ContainsKey('ConfigText')) { [IO.File]::WriteAllText((Get-InputPath $r 'run-config'), $ConfigText, $utf8) }
+        $f = Install-Fake $r; $f.State.RunPolls = $RunPolls
+        $res = if ($Profile -eq 'run') { Start-C2 -Root $r -Audit 'fixture' -Log $Log } else { Start-C2 -Root $r -Profile 'probe' -NoAudit -Log $Log }
+        $rid = $res.PSObject.Properties['RunId']
+        $rr = if ($null -ne $rid -and $null -ne $rid.Value) { Get-C2Record $r $rid.Value } else { $null }
+        [pscustomobject]@{ Root = $r; Fake = $f; Res = $res; Rec = $(if ($null -ne $rr) { $rr.Rec } else { $null }) }
+    }
+    try {
+        $b1Empty = New-TempDir; $env:PATH = $b1Empty
+        Test-Case 'B1 isolation: PATH holds only an empty directory during the B1 tests, so no docker executable can be started' ($env:PATH -ceq $b1Empty -and -not (Test-Path -LiteralPath (Join-Path $b1Empty 'docker.exe')))
+
+        # ---- the cap calculation
+        foreach ($c in @(@(1, 121000L), @(300, 420000L), @(1800, 1920000L), @(1801, 1921000L), @(3600, 3720000L))) {
+            $lim = Get-LauncherRunLimitMs -RunSeconds $c[0]
+            Test-Case "B1 cap: runSeconds $($c[0]) gives $($c[0] + 120) s and $($c[1]) ms" ($lim.Ok -and $lim.Seconds -eq $c[0] -and $lim.CapSeconds -eq ($c[0] + 120) -and $lim.Ms -eq $c[1] -and $lim.Ms -is [long]) "ms=$($lim.Ms)"
+        }
+
+        # ---- values that must be refused, with no conversion before the check
+        $b1Bad = @(
+            @{ N = '0'; V = 0 }, @{ N = '3601'; V = 3601 }, @{ N = '-1'; V = -1 }, @{ N = '1.5'; V = 1.5 }, @{ N = '0.5'; V = 0.5 }, @{ N = '3600.5'; V = 3600.5 },
+            @{ N = 'the double 1e30'; V = [double]1e30 }, @{ N = 'the largest long'; V = [long]::MaxValue }, @{ N = 'the smallest int'; V = [int]::MinValue },
+            @{ N = 'a number literal above the long range'; V = 99999999999999999999 },
+            @{ N = 'the text 1800'; V = '1800' }, @{ N = 'the text 300'; V = '300' }, @{ N = 'an empty text'; V = '' },
+            @{ N = 'null'; V = $null }, @{ N = 'true'; V = $true }, @{ N = 'false'; V = $false },
+            @{ N = 'an array holding 1800'; V = @(1800) }, @{ N = 'an empty hashtable'; V = @{} }, @{ N = 'an ordered dictionary'; V = ([ordered]@{ runSeconds = 1 }) },
+            @{ N = 'NaN'; V = [double]::NaN }, @{ N = 'positive infinity'; V = [double]::PositiveInfinity }, @{ N = 'negative infinity'; V = [double]::NegativeInfinity }
+        )
+        foreach ($b in $b1Bad) {
+            $t = Test-LauncherRunSeconds -Value $b.V; $l = Get-LauncherRunLimitMs -RunSeconds $b.V
+            Test-Case "B1 invalid runSeconds: $($b.N) is refused by both functions (no conversion to a number first)" (-not $t.Ok -and $null -eq $t.Seconds -and -not $l.Ok -and $null -eq $l.Ms -and $null -eq $l.CapSeconds)
+        }
+        $b1Good = @(@(1, 1), @([long]3600, 3600), @(300.0, 300), @(1.8e3, 1800), @([long]1800, 1800), @([double]1800, 1800), @([int]3600, 3600))
+        $b1GoodBad = @($b1Good | Where-Object { $t = Test-LauncherRunSeconds -Value $_[0]; -not ($t.Ok -and $t.Seconds -eq $_[1] -and $t.Seconds -is [long]) })
+        Test-Case 'B1 valid runSeconds: 1, 3600 as int and long, and integral doubles (300.0, 1800.0, 1.8e3) are accepted and become [long]' ($b1GoodBad.Count -eq 0)
+
+        # ---- the run-config.json read from the held handle (real InputFileGuard on a temporary repository)
+        $row = { param($n, $t, $s, $d = $false) @{ N = $n; T = $t; Ok = $true; S = [long]$s; D = $d } }
+        $rej = { param($n, $t, $c) @{ N = $n; T = $t; Ok = $false; C = $c } }
+        $b1Rows = @(
+            (& $row 'runSeconds 1800' '{"limits":{"runSeconds":1800}}' 1800),
+            (& $row 'runSeconds 1800.0 (the runtime accepts it: an integer value)' '{"limits":{"runSeconds":1800.0}}' 1800),
+            (& $row 'runSeconds 1.8e3 (the runtime accepts it)' '{"limits":{"runSeconds":1.8e3}}' 1800),
+            (& $row 'runSeconds 1800.0000000000000000001 (a double that equals 1800, as in the runtime)' '{"limits":{"runSeconds":1800.0000000000000000001}}' 1800),
+            (& $row 'runSeconds 300' '{"limits":{"runSeconds":300}}' 300),
+            (& $row 'runSeconds 1' '{"limits":{"runSeconds":1}}' 1),
+            (& $row 'runSeconds 3600' '{"limits":{"runSeconds":3600}}' 3600),
+            (& $row 'runSeconds 3600.0' '{"limits":{"runSeconds":3600.0}}' 3600),
+            (& $row 'whitespace around the tokens' ("  {`r`n `"limits`" : { `"runSeconds`" : 300 }`r`n}`r`n") 300),
+            (& $row 'a key written with an escape (run\u0053econds is runSeconds for the runtime too)' '{"limits":{"run\u0053econds":300}}' 300),
+            (& $row 'runSeconds absent (default 1800)' '{"limits":{}}' 1800 $true),
+            (& $row 'limits absent (default 1800; the runtime refuses the missing key itself)' '{"schemaVersion":1}' 1800 $true),
+            (& $row 'an empty object (default 1800)' '{}' 1800 $true),
+            (& $row 'a key that differs only in letter case is not runSeconds (default 1800; the runtime refuses the unknown key itself)' '{"limits":{"RUNSECONDS":5}}' 1800 $true),
+            (& $row 'LIMITS in capitals is not limits (default 1800; the runtime refuses the unknown key itself)' '{"LIMITS":{"runSeconds":5}}' 1800 $true),
+            (& $rej 'runSeconds 1.5' '{"limits":{"runSeconds":1.5}}' 'run_seconds_invalid'),
+            (& $rej 'runSeconds "1800" (text)' '{"limits":{"runSeconds":"1800"}}' 'run_seconds_invalid'),
+            (& $rej 'runSeconds null (never treated as absent)' '{"limits":{"runSeconds":null}}' 'run_seconds_invalid'),
+            (& $rej 'runSeconds true' '{"limits":{"runSeconds":true}}' 'run_seconds_invalid'),
+            (& $rej 'runSeconds [1800]' '{"limits":{"runSeconds":[1800]}}' 'run_seconds_invalid'),
+            (& $rej 'runSeconds {"a":1}' '{"limits":{"runSeconds":{"a":1}}}' 'run_seconds_invalid'),
+            (& $rej 'runSeconds 0' '{"limits":{"runSeconds":0}}' 'run_seconds_invalid'),
+            (& $rej 'runSeconds 3601' '{"limits":{"runSeconds":3601}}' 'run_seconds_invalid'),
+            (& $rej 'runSeconds -5' '{"limits":{"runSeconds":-5}}' 'run_seconds_invalid'),
+            (& $rej 'runSeconds -0' '{"limits":{"runSeconds":-0}}' 'run_seconds_invalid'),
+            (& $rej 'runSeconds 1e30' '{"limits":{"runSeconds":1e30}}' 'run_seconds_invalid'),
+            (& $rej 'runSeconds 99999999999999999999' '{"limits":{"runSeconds":99999999999999999999}}' 'run_seconds_invalid'),
+            (& $rej 'runSeconds 1e999 (not finite)' '{"limits":{"runSeconds":1e999}}' 'run_seconds_invalid'),
+            (& $rej 'limits null' '{"limits":null}' 'limits_not_object'),
+            (& $rej 'limits 5' '{"limits":5}' 'limits_not_object'),
+            (& $rej 'limits []' '{"limits":[]}' 'limits_not_object'),
+            (& $rej 'limits "x"' '{"limits":"x"}' 'limits_not_object'),
+            (& $rej 'the root is an array' '[]' 'not_object'),
+            (& $rej 'the root is null' 'null' 'not_object'),
+            (& $rej 'the root is a string' '"x"' 'not_object'),
+            (& $rej 'a duplicate runSeconds key' '{"limits":{"runSeconds":1,"runSeconds":2}}' 'invalid_json'),
+            (& $rej 'a duplicate limits key' '{"limits":{},"limits":{}}' 'invalid_json'),
+            (& $rej 'text that is not JSON' 'not json' 'invalid_json'),
+            (& $rej 'a trailing comma' '{"limits":{"runSeconds":300,}}' 'invalid_json'),
+            (& $rej 'text after the document' '{"limits":{}} x' 'invalid_json'),
+            (& $rej 'a byte order mark in front (the runtime refuses it too)' ([string][char]0xFEFF + '{"limits":{"runSeconds":300}}') 'invalid_json')
+        )
+        foreach ($br in $b1Rows) {
+            $r = Invoke-B1ConfigCheck -Bytes $utf8.GetBytes($br.T)
+            $ok = if ($br.Ok) { $r.Ok -and $r.Code -eq $null -and $r.Seconds -eq $br.S -and $r.Seconds -is [long] -and $r.CapSeconds -eq ($br.S + 120) -and $r.Ms -eq (($br.S + 120) * 1000) -and $r.Defaulted -eq $br.D }
+                  else { -not $r.Ok -and $r.Code -ceq $br.C -and $null -eq $r.Ms -and $null -eq $r.Seconds }
+            Test-Case "B1 run-config: $($br.N)$(if ($br.Ok) { " gives $($br.S) s" } else { " is refused as $($br.C)" })" $ok "ok=$($r.Ok) code=$($r.Code) s=$($r.Seconds)"
+        }
+        $r = Invoke-B1ConfigCheck -Bytes ([byte[]](0x7B, 0xFF, 0x7D))
+        Test-Case 'B1 run-config: bytes that are not UTF-8 are refused as not_utf8' (-not $r.Ok -and $r.Code -ceq 'not_utf8')
+        $r = Invoke-B1ConfigCheck -Bytes $utf8.GetBytes('{"limits":{"runSeconds":300}}') -TamperHash
+        Test-Case 'B1 run-config: bytes whose SHA-256 differs from the one the guard recorded are refused (changed), although they parse' (-not $r.Ok -and $r.Code -ceq 'changed' -and $null -eq $r.Ms)
+        $r = Invoke-B1ConfigCheck -Bytes $utf8.GetBytes('{"limits":{"runSeconds":300}}') -CloseFirst
+        Test-Case 'B1 run-config: a guard whose handles are closed is refused (read_failed)' (-not $r.Ok -and $r.Code -ceq 'read_failed')
+        $b1Mark = 'SECRET-B1-MARK-7c1e'
+        $r = Invoke-B1ConfigCheck -Bytes $utf8.GetBytes('{"limits":{"runSeconds":"' + $b1Mark + '"}}')
+        Test-Case 'B1 run-config: the refusal result holds the code only and never the refused value' (-not $r.Ok -and -not ((ConvertTo-Json -InputObject $r -Depth 4).Contains($b1Mark)))
+
+        # ---- the wiring: Invoke-DiscoveryStart gives Wait-RuntimeContainer the cap of the validated runSeconds (fake clock; the fake container never stops)
+        $b1Out = @{}
+        foreach ($c in @(@(300, 421), @(1800, 1921), @(1801, 1922), @(3600, 3721), @(1, 122))) {
+            $o = Invoke-B1Start -ConfigText (New-RunConfigText -RunSeconds ([string]$c[0]))
+            $b1Out[[int]$c[0]] = $o
+            Test-Case "B1 wiring: runSeconds $($c[0]) gives the Launcher limit $($c[0] + 120) s: a container that never stops ends after $($c[1]) heartbeats as run_time_exceeded (error_end, exit 1)" (($null -ne $o.Rec) -and $o.Rec['ended'] -ceq 'run_time_exceeded' -and $o.Rec['heartbeats'] -eq $c[1] -and $o.Res.Code -ceq 'error_end' -and $o.Res.ExitCode -eq 1) "beats=$(if ($o.Rec) { $o.Rec['heartbeats'] }) code=$($o.Res.Code)"
+        }
+        foreach ($p in @(@(420, 'container_stopped', 420, 'a container that stops just before the limit ends normally'), @(421, 'container_stopped', 421, 'a container that stops at the same beat as the limit is reached is a normal stop (the existing priority)'), @(422, 'run_time_exceeded', 421, 'a container that is still running when the limit is passed is an exceeded Run'))) {
+            $o = Invoke-B1Start -ConfigText (New-RunConfigText -RunSeconds '300') -RunPolls $p[0]
+            Test-Case "B1 wiring (runSeconds 300, cap 420 s): $($p[3]); polls $($p[0]) end $($p[1]) after $($p[2]) heartbeats" (($null -ne $o.Rec) -and $o.Rec['ended'] -ceq $p[1] -and $o.Rec['heartbeats'] -eq $p[2]) "ended=$(if ($o.Rec) { $o.Rec['ended'] }) beats=$(if ($o.Rec) { $o.Rec['heartbeats'] })"
+        }
+        $o = $b1Out[300]; $pp = Get-RunPaths -RepoRoot $o.Root -RunId $o.Res.RunId
+        $lkB = Enter-RunLock -LockPath (Join-Path $o.Root 'discovery/locks/discovery-run.lock')
+        Test-Case 'B1 end at the limit: the stop is confirmed, the lease is revoked, the volume is kept (the Run is abnormal), the handles and the Run lock are released, and the Launcher record has no new run-limit field' (($null -ne $o.Rec) -and $o.Rec['containerStopConfirmed'] -eq $true -and (Test-Path -LiteralPath (Join-Path $pp.Lease 'revoked')) -and $o.Rec['volumeCleanup']['outcome'] -ceq 'kept' -and $o.Rec['inputFileHandles'] -ceq 'released_after_stop' -and (Test-InputsReleased $o.Root) -and $null -ne $lkB -and @($o.Fake.State.Calls | Where-Object { $_ -like 'stop *' }).Count -ge 1 -and @($o.Rec.Keys | Where-Object { $_ -match 'limit|maxRun|cap' }).Count -eq 0)
+        if ($lkB) { $lkB.Dispose() }
+        Test-Case 'B1 wiring: the limit is no longer the fixed 1920 s: 300, 1801, 3600, and 1 give other heartbeat counts than the 1921 of the old fixed limit, and 1800 gives exactly the old count' ($b1Out[300].Rec['heartbeats'] -ne 1921 -and $b1Out[1801].Rec['heartbeats'] -ne 1921 -and $b1Out[3600].Rec['heartbeats'] -ne 1921 -and $b1Out[1].Rec['heartbeats'] -ne 1921 -and $b1Out[1800].Rec['heartbeats'] -eq 1921)
+        $o = Invoke-B1Start -Profile 'probe'
+        Test-Case 'B1 probe: a probe keeps the fixed limit of 1920 s (1921 heartbeats for a container that never stops)' (($null -ne $o.Rec) -and $o.Rec['ended'] -ceq 'run_time_exceeded' -and $o.Rec['heartbeats'] -eq 1921)
+        $o = Invoke-B1Start -Profile 'probe' -ConfigText 'not json {' -RunPolls 5
+        Test-Case 'B1 probe: a probe does not read run-config.json (an invalid file does not stop it)' (($null -ne $o.Rec) -and $o.Rec['ended'] -ceq 'container_stopped' -and @($o.Fake.State.Calls | Where-Object { $_ -like 'start *' }).Count -eq 1)
+
+        $rootW = New-TestRepo; $fW = Install-Fake $rootW
+        $fW.State.Containers['hb2'] = @{ Running = $true; ExitCode = '0'; Labels = @{}; Mounts = @(); Networks = @(); Polls = 100000 }
+        $leaseW = Join-Path $rootW 'discovery/leases/hb2'; [void][IO.Directory]::CreateDirectory((Split-Path $leaseW))
+        $leaseObj = New-RunLease -LeaseDir $leaseW -RunId 'hb2' -Nonce 'n' -Settings (Get-LeaseSettings)
+        $script:fakeNow = 0L
+        $wDef = Wait-RuntimeContainer -Container 'hb2' -Lease $leaseObj -Settings (Get-LeaseSettings)
+        Test-Case 'B1 Wait-RuntimeContainer: without -MaxRunMs the default is still 1920 s (1921 heartbeats)' ($wDef.Ended -ceq 'run_time_exceeded' -and $wDef.Beats -eq 1921)
+        $fW.State.Containers['hb2'].Running = $true; $fW.State.Containers['hb2'].Polls = 100000; $script:fakeNow = 0L
+        $wExp = Wait-RuntimeContainer -Container 'hb2' -Lease $leaseObj -Settings (Get-LeaseSettings) -MaxRunMs 420000
+        Test-Case 'B1 Wait-RuntimeContainer: -MaxRunMs 420000 ends the wait after 421 heartbeats' ($wExp.Ended -ceq 'run_time_exceeded' -and $wExp.Beats -eq 421)
+
+        # ---- refusals: a pre-volume refusal with no side effect, and no value in the log or the result
+        $b1Inv = @(
+            @{ N = 'runSeconds 0'; T = '{"limits":{"runSeconds":0}}'; C = 'run_seconds_invalid' }, @{ N = 'runSeconds 3601'; T = '{"limits":{"runSeconds":3601}}'; C = 'run_seconds_invalid' },
+            @{ N = 'runSeconds -1'; T = '{"limits":{"runSeconds":-1}}'; C = 'run_seconds_invalid' }, @{ N = 'runSeconds "1800" (text)'; T = '{"limits":{"runSeconds":"1800"}}'; C = 'run_seconds_invalid' },
+            @{ N = 'runSeconds null'; T = '{"limits":{"runSeconds":null}}'; C = 'run_seconds_invalid' }, @{ N = 'runSeconds 1.5'; T = '{"limits":{"runSeconds":1.5}}'; C = 'run_seconds_invalid' },
+            @{ N = 'runSeconds true'; T = '{"limits":{"runSeconds":true}}'; C = 'run_seconds_invalid' }, @{ N = 'runSeconds [1800]'; T = '{"limits":{"runSeconds":[1800]}}'; C = 'run_seconds_invalid' },
+            @{ N = 'runSeconds {"a":1}'; T = '{"limits":{"runSeconds":{"a":1}}}'; C = 'run_seconds_invalid' },
+            @{ N = 'a duplicate key'; T = '{"limits":{"runSeconds":300,"runSeconds":300}}'; C = 'invalid_json' }, @{ N = 'text that is not JSON'; T = 'not json'; C = 'invalid_json' }
+        )
+        foreach ($bi in $b1Inv) {
+            $o = Invoke-B1Start -ConfigText $bi.T
+            $lkI = Enter-RunLock -LockPath (Join-Path $o.Root 'discovery/locks/discovery-run.lock')
+            $callsBad = @($o.Fake.State.Calls | Where-Object { $_ -like 'volume *' -or $_ -like 'create *' -or $_ -like 'start *' -or $_ -like 'stop *' -or $_ -like 'rm *' -or $_ -like 'run *' })
+            Test-Case "B1 refusal: $($bi.N) is refused before the locks (input_file_refused, run-config:$($bi.C), exit 2); no Run_Volume, Run directory, lease, or container; the handles are released and the Run lock is free" ($o.Res.ExitCode -eq 2 -and $o.Res.Code -ceq 'input_file_refused' -and $o.Res.InputFileLabel -ceq 'run-config' -and $o.Res.InputFileCode -ceq $bi.C -and (Test-NoSideEffects (Get-SideEffects $o.Fake $o.Root)) -and $callsBad.Count -eq 0 -and (Test-InputsReleased $o.Root) -and $null -ne $lkI) "exit=$($o.Res.ExitCode) code=$($o.Res.Code) $($o.Res.InputFileCode)"
+            if ($lkI) { $lkI.Dispose() }
+        }
+        $b1Log = [System.Collections.Generic.List[string]]::new()
+        $o = Invoke-B1Start -ConfigText ('{"limits":{"runSeconds":"' + $b1Mark + '"}}') -Log { param($m) $b1Log.Add([string]$m) }
+        Test-Case 'B1 refusal: the refused value is in neither the log nor the result' ($o.Res.InputFileCode -ceq 'run_seconds_invalid' -and $b1Log.Count -ge 1 -and -not (($b1Log -join "`n") + (ConvertTo-Json -InputObject $o.Res -Depth 4)).Contains($b1Mark))
+
+        # ---- defaults and the number spellings that the runtime accepts
+        $o = Invoke-B1Start -ConfigText '{"schemaVersion":1}'
+        Test-Case 'B1 default: limits absent gives the default 1800 s, so the limit is 1920 s (1921 heartbeats)' (($null -ne $o.Rec) -and $o.Rec['ended'] -ceq 'run_time_exceeded' -and $o.Rec['heartbeats'] -eq 1921)
+        $o1 = Invoke-B1Start -ConfigText '{"limits":{"runSeconds":1800.0}}'; $o2 = Invoke-B1Start -ConfigText '{"limits":{"runSeconds":1.8e3}}'
+        Test-Case 'B1 runtime parity: runSeconds written 1800.0 and 1.8e3 are accepted and give the 1800 s limit (1921 heartbeats), as the runtime accepts them' (($null -ne $o1.Rec) -and ($null -ne $o2.Rec) -and $o1.Rec['heartbeats'] -eq 1921 -and $o2.Rec['heartbeats'] -eq 1921)
+
+        # ---- static checks of the wiring (the existing order test is unchanged and still runs above)
+        $startNow = (Get-Command Invoke-DiscoveryStart).Definition
+        $iOpen = $startNow.IndexOf('Open-InputFileGuard -RepoRoot'); $iLim = $startNow.IndexOf('Get-LauncherRunConfigLimit -Guard $guard'); $iCls = $startNow.IndexOf('Close-InputFileGuard -Guard $guard'); $iLck = $startNow.IndexOf('Enter-DiscoveryLocks -MutexName')
+        Test-Case 'B1 order (static): the input files, then the run limit check (which releases the handles on a refusal), then the locks' ($iOpen -ge 0 -and $iOpen -lt $iLim -and $iLim -lt $iCls -and $iCls -lt $iLck) "$iOpen $iLim $iCls $iLck"
+        $waitNow = (Get-Command Wait-RuntimeContainer).Definition
+        Test-Case 'B1 wiring (static): Wait-RuntimeContainer is called once, with -MaxRunMs $maxRunMs; the probe value is the single fixed initial value; the default of Wait-RuntimeContainer is unchanged' ([regex]::Matches($startNow, 'Wait-RuntimeContainer ').Count -eq 1 -and $startNow.Contains('Wait-RuntimeContainer -Container $container -Lease $lease -Settings $settings -MaxRunMs $maxRunMs') -and [regex]::Matches($startNow, '\$maxRunMs = ').Count -eq 2 -and $startNow.Contains('$maxRunMs = [long]($script:MaxRunSeconds * 1000)') -and $startNow.Contains('$maxRunMs = [long]$runLimit.Ms') -and $waitNow.Contains('[long]$MaxRunMs = ($script:MaxRunSeconds * 1000)') -and -not $startNow.Contains("record['runLimit']") -and -not $startNow.Contains("record['maxRun"))
+        $readDef = & (Get-Module DiscoveryLauncher) { (Get-Command Get-LauncherRunConfigLimit).Definition + "`n" + (Get-Command Read-LauncherHeldBytes).Definition + "`n" + (Get-Command Test-LauncherRunSeconds).Definition }
+        Test-Case 'B1 reading (static): the run limit is read from the held handle (RandomAccess), compared with the guard SHA-256, parsed with ConvertFrom-JsonStrict; no path read, no typed parameter in the value check' ($readDef.Contains('RandomAccess') -and $readDef.Contains('Get-Sha256Hex -Bytes') -and $readDef.Contains('ConvertFrom-JsonStrict -Text') -and -not ($readDef -match 'ReadAllBytes|ReadAllText|Get-Content|File\]::Open|ConvertFrom-Json\b|ConvertFrom-Json ') -and -not ((Get-Command Test-LauncherRunSeconds).Parameters['Value'].ParameterType -ne [object]) -and -not ((Get-Command Get-LauncherRunLimitMs).Parameters['RunSeconds'].ParameterType -ne [object]))
+    } finally {
+        $env:PATH = $b1Path
+    }
+    Write-Host "B1 section: $(($script:PassCount + $script:FailCount) - $b1Before) test cases" -ForegroundColor Cyan
+
     # ---- F. retention of the resources of a Run whose stop is not confirmed (garbage collection in pwsh child processes; this process never
     # opens these guards or locks, so it cannot keep them alive by itself)
     $retDir = New-TempDir; $retScript = Join-Path $retDir 'retention-child.ps1'; [IO.File]::WriteAllText($retScript, $script:RetentionChild, $utf8)

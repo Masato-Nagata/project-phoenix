@@ -13,8 +13,19 @@
 # What this does NOT give (residual risks, status unresolved): the hash chain detects edits, it does not prevent them; without an
 # external anchor (task 4.10) removal of trailing records is not detected; `recorded_by` is a declaration, not an authenticated
 # identity. A zero exit status of a verification means "no mismatch among the records present", not "the store is complete".
+#
+# External anchor (task 4.10, step B2): -AnchorPath names an anchor file that a human keeps outside the repository (see
+# ApprovalAnchor.psm1). With an anchor the chain is checked up to the anchored record (a missing record is `missing`, a different hash
+# is `modified`). Records AFTER the anchored one are checked for internal consistency only. Removal of records after the anchor, a
+# rollback to a state that still contains the anchored record, and a simultaneous edit of store and anchor are NOT detected. An anchor
+# that cannot be used is a refusal; it never falls back to "no anchor". This module only reads the anchor.
+#
+# Before the atomic write, under the store mutex, the store file is read again and compared with the bytes that were verified. A
+# difference (created, deleted or modified in between) refuses the write. A window between that comparison and File.Replace
+# remains, and a process that does not take the mutex (or runs in another Windows logon session) is not stopped by it.
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'DiscoveryCommon.psm1') -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'ApprovalAnchor.psm1') -DisableNameChecking
 
 $script:StoreMutexName = 'Local\ProjectPhoenixApprovalStore'
 $script:Genesis = '0' * 64
@@ -211,11 +222,15 @@ function Get-ApprovalStoreAnalysis {
         }
     }
 
+    $anchorSeq = $null
+    $afterAnchor = $null
     if ($null -ne $Anchor) {
         $at = $null
+        $anchorSeq = [long]$Anchor.seq
         foreach ($l in $lines) { if ([long]$l['seq'] -eq [long]$Anchor.seq) { $at = $l } }
         if ($null -eq $at) { & $add ([long]$Anchor.seq) 'missing' "anchored record $($Anchor.seq) is not in the store" }
         elseif ($at['hash'] -cne $Anchor.hash) { & $add ([long]$Anchor.seq) 'modified' 'hash differs from the anchored hash' }
+        else { $afterAnchor = @($lines | Where-Object { [long]$_['seq'] -gt $anchorSeq }).Count }
     }
 
     $sorted = @($mismatches | Sort-Object -Property @{ Expression = { $_.Seq } }, @{ Expression = { Get-KindOrder $_.Kind } })
@@ -227,7 +242,10 @@ function Get-ApprovalStoreAnalysis {
         LineCount = $lineTexts.Count
         Mismatches = $sorted
         RuleViolations = $sortedViolations
-        TailTruncation = $(if ($null -ne $Anchor -and $ok) { 'excluded_by_anchor' } else { 'not_checked' })
+        # 'checked_to_anchor_only': removal of records at or below the anchored sequence number is excluded; nothing after the anchor is.
+        TailTruncation = $(if ($null -ne $Anchor -and $ok) { 'checked_to_anchor_only' } else { 'not_checked' })
+        AnchorSeq = $anchorSeq
+        RecordsAfterAnchor = $afterAnchor
         Lines = $lines
         Approvals = $approvals
         SupersededBy = $supersededBy
@@ -317,16 +335,74 @@ function Read-StoreBytes {
     } finally { $fs.Dispose() }
 }
 
-# Read-only verification of the store file (R23.9). Opens for reading only.
+# The state of the store file as one value: does it exist as a file, and what are its bytes. A missing file and an empty file are
+# different states. A directory at the path counts as "no file", as Read-StoreBytes does.
+function Read-StoreState {
+    param([string]$StorePath)
+    try { $fs = [System.IO.File]::Open($StorePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite) }
+    catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { return [pscustomobject]@{ Exists = $false; Bytes = [byte[]]@() } }
+    catch [System.UnauthorizedAccessException] {
+        if (Test-Path -LiteralPath $StorePath -PathType Container) { return [pscustomobject]@{ Exists = $false; Bytes = [byte[]]@() } }
+        throw
+    }
+    try {
+        $ms = [System.IO.MemoryStream]::new()
+        $fs.CopyTo($ms)
+        [pscustomobject]@{ Exists = $true; Bytes = $ms.ToArray() }
+    } finally { $fs.Dispose() }
+}
+
+# '' when the two states are the same, otherwise the kind of change.
+function Get-StoreStateChange {
+    param($Before, $After)
+    if (-not $Before.Exists -and $After.Exists) { return 'created' }
+    if ($Before.Exists -and -not $After.Exists) { return 'deleted' }
+    if (-not [System.Linq.Enumerable]::SequenceEqual([byte[]]$Before.Bytes, [byte[]]$After.Bytes)) { return 'modified' }
+    ''
+}
+
+# What a verification with this anchor state covers. The text never contains a path or a hash.
+function Get-AnchorProtectionNote {
+    param($AnchorSeq, [bool]$Ok = $true)
+    if ($null -ne $AnchorSeq -and -not $Ok) { return 'The store does not verify against the external anchor or in itself; see the reported mismatches. Nothing about completeness is claimed.' }
+    if ($null -eq $AnchorSeq) {
+        return 'No mismatch among the records present does not mean that the store is complete (tail removal is detected only with an external anchor), and recorded_by is a declaration.'
+    }
+    "The chain was checked up to and including the anchored record (seq $AnchorSeq). Records after it are checked for internal consistency only. Removal of records after the anchor, a rollback to a state that still contains the anchored record, and a simultaneous edit of the store and the anchor are not detected, so this does not mean that the store is complete. The anchor is only as trustworthy as the independent storage in which the human keeps it, and recorded_by is a declaration."
+}
+
+# Read-only verification of the store file (R23.9). Opens for reading only. -Anchor takes an object with `seq` and `hash` (existing
+# contract). -AnchorPath takes the path of an anchor file (strict format, see ApprovalAnchor.psm1); when it is given and the anchor
+# cannot be used, the result is not Ok (AnchorStatus 'rejected', fixed AnchorCode) and the store is not compared without it. This
+# operation does not take the store mutex, as before: it only reads, and an append that happens during the read extends the chain
+# without changing the anchored prefix.
 function Test-ApprovalStore {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$StorePath, $Anchor)
+    param([Parameter(Mandatory)][string]$StorePath, $Anchor, [string]$AnchorPath)
+    $stale = (Test-Path -LiteralPath ($StorePath + '.tmp'))
+    if ($PSBoundParameters.ContainsKey('AnchorPath')) {
+        $code = $null
+        if ($PSBoundParameters.ContainsKey('Anchor') -and $null -ne $Anchor) { $code = 'anchor_path_invalid' }
+        else {
+            $ar = Read-ApprovalAnchor -Path $AnchorPath
+            if ($ar.Ok) { $Anchor = $ar.Anchor } else { $code = $ar.Code }
+        }
+        if ($null -ne $code) {
+            return [pscustomobject]@{
+                Ok = $false; LineCount = 0; Mismatches = @(); RuleViolations = @(); TailTruncation = 'not_checked'; StaleTemp = $stale
+                AnchorStatus = 'rejected'; AnchorCode = $code; AnchorSeq = $null; RecordsAfterAnchor = $null
+                Note = "The external anchor could not be used ($code); the store was not verified. There is no fallback to a verification without the anchor."
+            }
+        }
+    }
     $bytes = Read-StoreBytes -StorePath $StorePath
     $a = Get-ApprovalStoreAnalysis -Bytes $bytes -Anchor $Anchor
     [pscustomobject]@{
         Ok = $a.Ok; LineCount = $a.LineCount; Mismatches = $a.Mismatches; RuleViolations = $a.RuleViolations
-        TailTruncation = $a.TailTruncation; StaleTemp = (Test-Path -LiteralPath ($StorePath + '.tmp'))
-        Note = 'No mismatch among the records present does not mean that the store is complete (tail removal is detected only with an external anchor), and recorded_by is a declaration.'
+        TailTruncation = $a.TailTruncation; StaleTemp = $stale
+        AnchorStatus = $(if ($null -eq $Anchor) { 'none' } else { 'applied' }); AnchorCode = $null
+        AnchorSeq = $a.AnchorSeq; RecordsAfterAnchor = $a.RecordsAfterAnchor
+        Note = (Get-AnchorProtectionNote -AnchorSeq $a.AnchorSeq -Ok $a.Ok)
     }
 }
 
@@ -368,8 +444,8 @@ function Write-StoreAtomically {
 }
 
 function New-RequestResult {
-    param([string]$Outcome, [int]$ExitCode, $Issues = @(), $Line = $null, [string]$Message = '', $Report = $null)
-    [pscustomobject]@{ Outcome = $Outcome; ExitCode = $ExitCode; Issues = @($Issues); Line = $Line; Message = $Message; Report = $Report }
+    param([string]$Outcome, [int]$ExitCode, $Issues = @(), $Line = $null, [string]$Message = '', $Report = $null, [string]$Reason = '')
+    [pscustomobject]@{ Outcome = $Outcome; ExitCode = $ExitCode; Issues = @($Issues); Line = $Line; Message = $Message; Report = $Report; Reason = $Reason }
 }
 
 # The only write path. $Request is a dictionary: operation (append | modify | delete | anything else), and for append the
@@ -381,7 +457,8 @@ function Invoke-ApprovalStoreRequest {
         [Parameter(Mandatory)]$Request,
         [string]$MutexName = $script:StoreMutexName,
         [scriptblock]$TargetResolver,
-        [int]$MutexWaitMs = 10000
+        [int]$MutexWaitMs = 10000,
+        [string]$AnchorPath   # optional external anchor file; when it is given it must be usable, there is no fallback to no anchor
     )
     $operation = $null
     if ($Request -is [System.Collections.IDictionary] -and $Request.Contains('operation')) { $operation = $Request['operation'] }
@@ -394,8 +471,16 @@ function Invoke-ApprovalStoreRequest {
         try { $held = $mutex.WaitOne($MutexWaitMs) } catch [System.Threading.AbandonedMutexException] { $held = $true }
         if (-not $held) { return (New-RequestResult -Outcome 'mutex_timeout' -ExitCode 2 -Message 'the store mutex could not be taken; nothing was written') }
 
-        try { $bytes = Read-StoreBytes -StorePath $StorePath } catch { return (New-RequestResult -Outcome 'write_failed' -ExitCode 2 -Message 'the store could not be read; nothing was written') }
-        $analysis = Get-ApprovalStoreAnalysis -Bytes $bytes
+        $anchor = $null
+        if ($PSBoundParameters.ContainsKey('AnchorPath')) {
+            $ar = Read-ApprovalAnchor -Path $AnchorPath
+            if (-not $ar.Ok) { return (New-RequestResult -Outcome 'anchor_rejected' -ExitCode 2 -Reason $ar.Code -Message "the external anchor could not be used ($($ar.Code)); nothing was written") }
+            $anchor = $ar.Anchor
+        }
+
+        try { $state = Read-StoreState -StorePath $StorePath } catch { return (New-RequestResult -Outcome 'write_failed' -ExitCode 2 -Message 'the store could not be read; nothing was written') }
+        $bytes = $state.Bytes
+        $analysis = Get-ApprovalStoreAnalysis -Bytes $bytes -Anchor $anchor
         if (-not $analysis.Ok) {
             return (New-RequestResult -Outcome 'store_invalid' -ExitCode 2 -Report $analysis -Message 'the chain does not verify; it is reported and not extended')
         }
@@ -414,6 +499,10 @@ function Invoke-ApprovalStoreRequest {
         $line['hash'] = Get-StoredLineHash -Line $line
         $text = ConvertTo-StoredLineText -Line $line
         $newBytes = [byte[]]($bytes + $script:Utf8.GetBytes($text))
+        # Immediately before the write (still under the mutex): the file must be in the state that was verified.
+        try { $now = Read-StoreState -StorePath $StorePath } catch { return (New-RequestResult -Outcome 'write_failed' -ExitCode 2 -Message 'the store could not be read again before the write; nothing was written') }
+        $change = Get-StoreStateChange -Before $state -After $now
+        if ($change -ne '') { return (New-RequestResult -Outcome 'store_changed' -ExitCode 2 -Reason "store_$change" -Message "the store was $change after it was verified (store_$change); nothing was written") }
         try { Write-StoreAtomically -StorePath $StorePath -Content $newBytes }
         catch { return (New-RequestResult -Outcome 'write_failed' -ExitCode 2 -Message "the write failed and is not reported as stored: $($_.Exception.Message)") }
         if ($operation -ceq 'append') { return (New-RequestResult -Outcome 'stored' -ExitCode 0 -Line $line -Message "stored seq $($line['seq'])") }

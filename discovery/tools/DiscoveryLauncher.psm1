@@ -27,7 +27,12 @@ $script:HelperImage = 'docker.io/library/node:26.13.0-trixie-slim@sha256:5adad64
 $script:RuntimeUid = '10001:10001'
 $script:LabNetwork = 'phoenix-discovery-lab'
 $script:NodeModulesVolume = 'phoenix-node-modules'
-$script:MaxRunSeconds = 1800 + 120   # the default total Run time limit (R11.10) plus the abort and seal time
+$script:MaxRunSeconds = 1800 + 120   # the default total Run time limit (R11.10) plus the abort and seal time; the limit of a probe, and the default of Wait-RuntimeContainer
+# (task 4.9-B1) A Run takes its Launcher limit from the validated limits.runSeconds of run-config.json: runSeconds + LauncherRunMarginSeconds.
+$script:RunSecondsDefault = 1800     # limits.runSeconds when the key is absent (limits.ts RUN_LIMITS.runSeconds.default)
+$script:RunSecondsMin = 1
+$script:RunSecondsMax = 3600
+$script:LauncherRunMarginSeconds = 120
 
 function Get-LauncherConstants {
     [pscustomobject]@{
@@ -649,6 +654,105 @@ function Write-LauncherRecord {
 }
 
 # ---------------------------------------------------------------------------------------------------------------------
+# The Launcher limit of a Run (task 4.9-B1; tasks.md 4.9(a), the runSeconds part, and 4.9(c)).
+#
+# What the limit is: a monitoring cap of the Launcher, runSeconds + 120 seconds, counted by the Launcher from the start of Wait-RuntimeContainer
+# (after `docker start`). It is NOT the stop guarantee of the runtime: the runtime stops a Run within runSeconds + 30 seconds (R11.12, R11.17),
+# and a killed Launcher is covered by the lease (R24.12). The 120 seconds are a margin chosen by decision, not a measured value; the cap does not
+# prove R11.17 and is not a bound on the delay of a heartbeat-sized step. A probe keeps the fixed limit of $script:MaxRunSeconds.
+#
+# Acceptance of limits.runSeconds, equal to the runtime (strictParse and the schema "run-config": `type: integer`, 1 to 3600; the validator applies 1800
+# only when the key is absent): the JSON NUMBER must be an integer VALUE (1800, 1800.0 and 1.8e3 are accepted as the runtime accepts them after parsing;
+# 1.5 is not), and null, strings, booleans, arrays, and objects are refused (R11.8 (b)). The type is checked BEFORE any conversion: no parameter below is
+# typed, so PowerShell cannot convert "1800", $true, or 1800.7 into a number first.
+
+# The value of limits.runSeconds, after a JSON parse (ConvertFrom-JsonStrict gives [long] or [double] for a number). Ok and Seconds ([long]).
+function Test-LauncherRunSeconds {
+    param([AllowNull()]$Value)
+    $bad = [pscustomobject]@{ Ok = $false; Seconds = $null }
+    if ($null -eq $Value) { return $bad }
+    if ($Value -is [int] -or $Value -is [long]) { $n = [long]$Value }
+    elseif ($Value -is [double]) {
+        if (-not [double]::IsFinite($Value) -or [Math]::Floor($Value) -ne $Value) { return $bad }
+        if ($Value -lt $script:RunSecondsMin -or $Value -gt $script:RunSecondsMax) { return $bad }
+        $n = [long]$Value
+    }
+    else { return $bad }
+    if ($n -lt $script:RunSecondsMin -or $n -gt $script:RunSecondsMax) { return $bad }
+    [pscustomobject]@{ Ok = $true; Seconds = [long]$n }
+}
+
+# The Launcher limit of a Run from validated runSeconds: capSeconds = runSeconds + 120, Ms = capSeconds * 1000. Ok is false for any invalid value.
+function Get-LauncherRunLimitMs {
+    param([AllowNull()]$RunSeconds)
+    $v = Test-LauncherRunSeconds -Value $RunSeconds
+    if (-not $v.Ok) { return [pscustomobject]@{ Ok = $false; Seconds = $null; CapSeconds = $null; Ms = $null } }
+    $cap = [long]$v.Seconds + [long]$script:LauncherRunMarginSeconds
+    [pscustomobject]@{ Ok = $true; Seconds = [long]$v.Seconds; CapSeconds = $cap; Ms = [long]($cap * 1000) }
+}
+
+# A member of a parsed JSON object by its EXACT name (ConvertFrom-JsonStrict returns case-insensitive dictionaries; the runtime compares case-sensitively).
+function Get-LauncherJsonMember {
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Dictionary, [Parameter(Mandatory)][string]$Name)
+    foreach ($k in $Dictionary.Keys) { if ([string]$k -ceq $Name) { return [pscustomobject]@{ Found = $true; Value = $Dictionary[$k] } } }
+    [pscustomobject]@{ Found = $false; Value = $null }
+}
+
+# The bytes of a held file, read from the HELD handle (positional reads, as InputFileGuard does; no stream wraps or closes the handle). $null on any failure.
+function Read-LauncherHeldBytes {
+    param([Parameter(Mandatory)]$Held, [Parameter(Mandatory)][long]$Size, [Parameter(Mandatory)][long]$MaxBytes)
+    try {
+        if ($null -eq $Held -or $Held.IsClosed -or $Size -lt 1 -or $Size -gt $MaxBytes) { return $null }
+        $buf = [byte[]]::new([int]$Size)
+        $off = [long]0
+        while ($off -lt $Size) {
+            $list = [System.Collections.Generic.List[System.Memory[byte]]]::new()
+            $list.Add([System.Memory[byte]]::new($buf, [int]$off, [int]($Size - $off)))
+            $n = [long][System.IO.RandomAccess]::Read($Held.Handle, $list, $off)
+            if ($n -le 0) { return $null }
+            $off += $n
+        }
+        $extra = [System.Collections.Generic.List[System.Memory[byte]]]::new()
+        $extra.Add([System.Memory[byte]]::new([byte[]]::new(1)))
+        if ([System.IO.RandomAccess]::Read($Held.Handle, $extra, $Size) -ne 0) { return $null }
+        , $buf
+    } catch { $null }
+}
+
+# The Launcher limit of a Run, read from the run-config.json that InputFileGuard holds (called after Open-InputFileGuard and before any lock or Docker call).
+# The bytes are read again from the held handle and must have the SHA-256 that the guard recorded; then they are parsed with ConvertFrom-JsonStrict
+# (duplicate keys, invalid JSON refused). The root must be an object; `limits` absent or an object; `runSeconds` absent (1800) or valid.
+# Result: Ok, Code (null when Ok; a refusal code that never contains a value of the file), Seconds, CapSeconds, Ms, Defaulted. Never throws.
+function Get-LauncherRunConfigLimit {
+    param([Parameter(Mandatory)]$Guard)
+    $fail = { param($code) [pscustomobject]@{ Ok = $false; Code = $code; Seconds = $null; CapSeconds = $null; Ms = $null; Defaulted = $false } }
+    try {
+        $e = Get-InputFileGuardEntry -Guard $Guard -Label 'run-config'
+        if ($null -eq $e -or -not $e.HashRequired -or [string]$e.Sha256 -cnotmatch '^[0-9a-f]{64}$') { return (& $fail 'read_failed') }
+        $bytes = Read-LauncherHeldBytes -Held $e.Held -Size ([long]$e.Size) -MaxBytes ([long]$e.MaxBytes)
+        if ($null -eq $bytes) { return (& $fail 'read_failed') }
+        if ((Get-Sha256Hex -Bytes $bytes) -cne [string]$e.Sha256) { return (& $fail 'changed') }
+        try { $text = [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes) } catch { return (& $fail 'not_utf8') }
+        try { $doc = ConvertFrom-JsonStrict -Text $text } catch { return (& $fail 'invalid_json') }
+        if ($doc -isnot [System.Collections.IDictionary]) { return (& $fail 'not_object') }
+        $seconds = $script:RunSecondsDefault; $defaulted = $true
+        $lim = Get-LauncherJsonMember -Dictionary $doc -Name 'limits'
+        if ($lim.Found) {
+            if ($lim.Value -isnot [System.Collections.IDictionary]) { return (& $fail 'limits_not_object') }
+            $rs = Get-LauncherJsonMember -Dictionary $lim.Value -Name 'runSeconds'
+            if ($rs.Found) {
+                $chk = Test-LauncherRunSeconds -Value $rs.Value
+                if (-not $chk.Ok) { return (& $fail 'run_seconds_invalid') }
+                $seconds = $chk.Seconds; $defaulted = $false
+            }
+        }
+        $limit = Get-LauncherRunLimitMs -RunSeconds $seconds
+        if (-not $limit.Ok) { return (& $fail 'run_seconds_invalid') }
+        [pscustomobject]@{ Ok = $true; Code = $null; Seconds = $limit.Seconds; CapSeconds = $limit.CapSeconds; Ms = $limit.Ms; Defaulted = $defaulted }
+    } catch { & $fail 'read_failed' }
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
 # The heartbeat loop while the container runs: one beat at most every H, scheduled from the previous beat so that delays do not
 # accumulate; beats later than H + J are counted. Returns when the container is no longer running or the Run time is exceeded.
 function Wait-RuntimeContainer {
@@ -954,10 +1058,20 @@ function Invoke-DiscoveryStart {
 
     # (2) pre-volume: every bind-mount source of a Run, opened and held
     $guard = $null
+    $maxRunMs = [long]($script:MaxRunSeconds * 1000)   # a probe: the fixed limit; a Run: set from run-config.json below
     if ($Profile -eq 'run') {
         $opened = Open-InputFileGuard -RepoRoot $RepoRoot -Table (Get-InputFileTable)
         if (-not $opened.Ok) { & $Log "refused: input_file_refused ($($opened.Label):$($opened.Code))"; return (& $result 2 'input_file_refused' @{ InputFileLabel = $opened.Label; InputFileCode = $opened.Code }) }
         $guard = $opened.Guard
+        # (2b) task 4.9-B1: the Launcher limit of this Run, from the held run-config.json (runSeconds + 120 s). A refusal is a pre-volume refusal: no lock is
+        # held and nothing exists yet, so only the input file handles are released; the refused value is never logged.
+        $runLimit = Get-LauncherRunConfigLimit -Guard $guard
+        if (-not $runLimit.Ok) {
+            Close-InputFileGuard -Guard $guard
+            & $Log "refused: input_file_refused (run-config:$($runLimit.Code))"
+            return (& $result 2 'input_file_refused' @{ InputFileLabel = 'run-config'; InputFileCode = $runLimit.Code })
+        }
+        $maxRunMs = [long]$runLimit.Ms
     }
 
     $runId = $null; $lease = $null; $container = $null; $containerId = $null; $exportResult = $null; $stopConfirmed = $false; $wait = $null; $endCode = $null
@@ -1060,7 +1174,7 @@ function Invoke-DiscoveryStart {
             # (11)
             if ((Invoke-DockerCli -Arguments @('start', $container)).ExitCode -ne 0) { $endCode = 'container_start_failed'; return (& $result 1 $endCode @{ RunId = $runId }) }
             $started = $true
-            $wait = Wait-RuntimeContainer -Container $container -Lease $lease -Settings $settings
+            $wait = Wait-RuntimeContainer -Container $container -Lease $lease -Settings $settings -MaxRunMs $maxRunMs
             $record['heartbeats'] = [long]$wait.Beats
             $record['lateHeartbeats'] = [long]$wait.LateBeats
             $record['ended'] = $wait.Ended
@@ -1313,4 +1427,4 @@ function Write-LauncherFactsFile {
     if (-not $v.Ok) { return [pscustomobject]@{ Ok = $false; Code = 'facts_verify_failed'; Sha256 = $null } }
     [pscustomobject]@{ Ok = $true; Code = $null; Sha256 = $w.Sha256 }
 }
-Export-ModuleMember -Function Get-LauncherConstants, Invoke-DockerCli, Set-DockerCliInvoker, Set-LauncherTimeHooks, Enter-RunLock, Enter-DiscoveryLocks, Exit-ConformanceMutex, Exit-RunLock, New-DiscoveryRunId, Test-RunIdFormat, Get-RunPaths, Test-RunIdFree, Write-TextAtomically, Get-AtomicReplaceSettings, Get-LastAtomicReplace, Test-TransientReplaceDenial, Write-ReasonFile, New-LeaseNonce, New-RunLease, Step-LeaseHeartbeat, Revoke-RunLease, Stop-LeftoverRuntimeContainers, Test-ContainerRunning, Stop-ContainerConfirmed, Set-InterruptedRuns, Get-ContainerName, New-ContainerCreateArgs, Get-ExpectedMountTargets, Get-MountInspection, Test-LaunchGate, Invoke-RunExport, Invoke-VolumeOwnerHelper, Get-VolumeKind, Get-RunVolumes, Write-LauncherRecord, Wait-RuntimeContainer, ConvertTo-FlatList, Test-EvidenceSaved, Remove-OwnRunContainer, Invoke-DiscoveryStart, Get-LauncherFactsContract, Test-LauncherFactsValues, New-LauncherFactsText, Test-LauncherFactsText, Test-LauncherFactsBytes, Write-FileExclusive, Write-LauncherFactsFile, Invoke-BoundedProcess, Invoke-DockerCliCapture, Test-PropagationDelayValue, Get-CreatedContainerImage, ConvertTo-RuntimeReportRecord, Get-RuntimeExitReport, Get-ReasonSummary, Get-RunOutcome, Test-UnstoppedRunRetained, Get-UnstoppedRunRetainedCount, Remove-RunVolume, Get-VolumeKeepReason, Get-VolumeKeepReasons, Test-RunNormalEnd, Test-ExportFinalVerified, Test-RunVolumeIdentity
+Export-ModuleMember -Function Get-LauncherConstants, Invoke-DockerCli, Set-DockerCliInvoker, Set-LauncherTimeHooks, Enter-RunLock, Enter-DiscoveryLocks, Exit-ConformanceMutex, Exit-RunLock, New-DiscoveryRunId, Test-RunIdFormat, Get-RunPaths, Test-RunIdFree, Write-TextAtomically, Get-AtomicReplaceSettings, Get-LastAtomicReplace, Test-TransientReplaceDenial, Write-ReasonFile, New-LeaseNonce, New-RunLease, Step-LeaseHeartbeat, Revoke-RunLease, Stop-LeftoverRuntimeContainers, Test-ContainerRunning, Stop-ContainerConfirmed, Set-InterruptedRuns, Get-ContainerName, New-ContainerCreateArgs, Get-ExpectedMountTargets, Get-MountInspection, Test-LaunchGate, Invoke-RunExport, Invoke-VolumeOwnerHelper, Get-VolumeKind, Get-RunVolumes, Write-LauncherRecord, Wait-RuntimeContainer, ConvertTo-FlatList, Test-EvidenceSaved, Remove-OwnRunContainer, Invoke-DiscoveryStart, Get-LauncherFactsContract, Test-LauncherFactsValues, New-LauncherFactsText, Test-LauncherFactsText, Test-LauncherFactsBytes, Write-FileExclusive, Write-LauncherFactsFile, Invoke-BoundedProcess, Invoke-DockerCliCapture, Test-PropagationDelayValue, Get-CreatedContainerImage, ConvertTo-RuntimeReportRecord, Get-RuntimeExitReport, Get-ReasonSummary, Get-RunOutcome, Test-UnstoppedRunRetained, Get-UnstoppedRunRetainedCount, Remove-RunVolume, Get-VolumeKeepReason, Get-VolumeKeepReasons, Test-RunNormalEnd, Test-ExportFinalVerified, Test-RunVolumeIdentity, Test-LauncherRunSeconds, Get-LauncherRunLimitMs, Get-LauncherRunConfigLimit
