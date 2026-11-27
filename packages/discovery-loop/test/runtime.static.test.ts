@@ -156,7 +156,10 @@ describe("(c) no access to the orchestrator, the report or approval side, evalua
 describe("(d) nothing else in src imports the runtime folder or a sibling package; the package entry does not export it", () => {
   // `main.ts` (task 4.9-B, the composition root) is the only file of src that may import `./runtime/` and `@phoenix/*`. Its exception is not a
   // skip: the test below pins its runtime and sibling imports to an exact list.
-  const IMPORTERS: readonly string[] = ["main.ts"];
+  // (task 4.7 step A2, human decision D2 of 2026-11-27) `replayMain.ts`, the replay composition root, is the one further exception. It is pinned
+  // by its own exact lists (fewer runtime adapters than main.ts, exact named imports), in the describe block "(d2)" below. No other file may be
+  // added: the list is a constant and the loop below checks every other file of src.
+  const IMPORTERS: readonly string[] = ["main.ts", "replayMain.ts"];
   const MAIN_RUNTIME_IMPORTS = [
     "./runtime/analysisFs.js", "./runtime/auditAdapter.js", "./runtime/clocks.js", "./runtime/runnerFactory.js", "./runtime/semanticHash.js",
     "./runtime/startupInputs.js", "./runtime/startupPorts.js",
@@ -215,6 +218,83 @@ describe("(d) nothing else in src imports the runtime folder or a sibling packag
     ]) {
       expect(mentionsRuntime(ok), ok).toBe(false);
     }
+  });
+});
+
+describe("(d2) the replay composition root replayMain.ts (task 4.7 step A2, human decision D2 of 2026-11-27)", () => {
+  const REPLAY_MAIN = readFileSync(join(SRC, "replayMain.ts"), "utf8");
+  /** Exactly these runtime adapters, and of each exactly these names. No clock, Runner factory, start-up port, analysis file system or audit adapter factory. */
+  const REPLAY_RUNTIME_NAMES: Record<string, readonly string[]> = {
+    "./runtime/auditAdapter.js": ["buildRequestEnvelope"],
+    "./runtime/semanticHash.js": ["semanticSha256Of"],
+  };
+  /** Exactly these names of the sibling root entries: no provider factory, no auditor, no Source_Bundler, no Runner, no lease, no HTTP. */
+  const REPLAY_SIBLING_NAMES: Record<string, readonly string[]> = {
+    "@phoenix/ai-client": ["gateProviderResult", "gateResponse", "resolveResponseLimits"],
+    "@phoenix/analyzer": ["validateDeclarations", "validateExpr", "verifyCitations"],
+    "@phoenix/verifier": [
+      "PolicyConfig", "PrepTable", "compare", "createAcceptanceCheck", "evaluateForRecord", "executionIdentity", "loadPolicyConfig", "loadPreparationTable",
+      "policyConfigSha256", "preparationTableSha256",
+    ],
+  };
+  /** The names imported from one specifier (value and type imports together), sorted. A namespace or default import is reported as "*". */
+  const namesFrom = (source: string, specifier: string): string[] => {
+    const names: string[] = [];
+    const c = stripComments(source);
+    for (const m of c.matchAll(/^\s*import\s+(type\s+)?([^;]*?)\s*\bfrom\s*["']([^"']+)["']/gm)) {
+      if (m[3] !== specifier) continue;
+      const clause = (m[2] as string).trim();
+      const braces = /^\{([^}]*)\}$/.exec(clause);
+      if (braces === null) {
+        names.push("*");
+        continue;
+      }
+      for (const n of (braces[1] as string).split(",").map((x) => x.trim()).filter((x) => x !== "")) names.push(n.replace(/^type\s+/, "").split(/\s+as\s+/)[0] as string);
+    }
+    return [...new Set(names)].sort();
+  };
+  const runtimeAndSiblingOf = (source: string): { runtime: string[]; siblings: string[] } => ({
+    runtime: [...new Set(specifiersOf(source).filter((s) => /(^|\/)runtime(\/|$)/.test(s)))].sort(),
+    siblings: [...new Set(specifiersOf(source).filter((s) => s.startsWith("@phoenix/")))].sort(),
+  });
+  it("imports exactly the two runtime modules and the three sibling root entries", () => {
+    expect(runtimeAndSiblingOf(REPLAY_MAIN)).toEqual({ runtime: Object.keys(REPLAY_RUNTIME_NAMES).sort(), siblings: Object.keys(REPLAY_SIBLING_NAMES).sort() });
+  });
+  it("imports exactly the listed names from each of them, and re-exports nothing of runtime/ or of a sibling", () => {
+    for (const [spec, names] of Object.entries({ ...REPLAY_RUNTIME_NAMES, ...REPLAY_SIBLING_NAMES })) expect(namesFrom(REPLAY_MAIN, spec), spec).toEqual([...names].sort());
+    expect(REPLAY_MAIN).not.toMatch(/^\s*export\s*(?:\*|\{[^}]*\})\s*from\s*["'](?:\.\/runtime\/|@phoenix\/)/m);
+  });
+  it("positive controls: an extra name, a namespace import, an extra runtime module and a re-export are all differences", () => {
+    expect(namesFrom('import { buildRequestEnvelope, createAuditAdapter } from "./runtime/auditAdapter.js";', "./runtime/auditAdapter.js")).not.toEqual(REPLAY_RUNTIME_NAMES["./runtime/auditAdapter.js"]);
+    expect(namesFrom('import * as ai from "@phoenix/ai-client";', "@phoenix/ai-client")).toEqual(["*"]);
+    expect(namesFrom('import { createProvider, gateProviderResult, gateResponse, resolveResponseLimits } from "@phoenix/ai-client";', "@phoenix/ai-client")).not.toEqual(REPLAY_SIBLING_NAMES["@phoenix/ai-client"]);
+    expect(namesFrom('import type { PolicyConfig, PrepTable } from "@phoenix/verifier";\nimport { compare as c } from "@phoenix/verifier";', "@phoenix/verifier")).toEqual(["PolicyConfig", "PrepTable", "compare"]);
+    expect(runtimeAndSiblingOf('import { a } from "./runtime/clocks.js";').runtime).toEqual(["./runtime/clocks.js"]);
+    expect('export { buildRequestEnvelope } from "./runtime/auditAdapter.js";').toMatch(/^\s*export\s*(?:\*|\{[^}]*\})\s*from\s*["'](?:\.\/runtime\/|@phoenix\/)/m);
+  });
+  it("negative control: the exact replayMain lists differ from the main.ts lists (it is not a copy of the main.ts exception)", () => {
+    const mainRuntime = runtimeAndSiblingOf(readFileSync(join(SRC, "main.ts"), "utf8")).runtime;
+    expect(Object.keys(REPLAY_RUNTIME_NAMES).every((s) => mainRuntime.includes(s))).toBe(true);
+    expect(mainRuntime.length).toBeGreaterThan(Object.keys(REPLAY_RUNTIME_NAMES).length);
+  });
+  it("the set of src files that import runtime/ or a sibling package is exactly main.ts and replayMain.ts (another composition root cannot be added)", () => {
+    const importers = walk(SRC)
+      .filter((f) => !rel(f).startsWith("runtime/"))
+      .filter((f) => {
+        const s = readFileSync(f, "utf8");
+        return mentionsRuntime(s) || mentionsSibling(s);
+      })
+      .map(rel)
+      .sort();
+    expect(importers).toEqual(["main.ts", "replayMain.ts"]);
+  });
+  it("positive control of the importer set: a third file with such an import would be listed", () => {
+    const fake = [
+      ["main.ts", 'import { a } from "./runtime/clocks.js";'],
+      ["replayMain.ts", 'import { b } from "@phoenix/verifier";'],
+      ["replay/other.ts", 'import { c } from "../runtime/auditAdapter.js";'],
+    ] as const;
+    expect(fake.filter(([, s]) => mentionsRuntime(s) || mentionsSibling(s)).map(([f]) => f)).toEqual(["main.ts", "replayMain.ts", "replay/other.ts"]);
   });
 });
 

@@ -223,9 +223,47 @@ describe("(c) nothing imports the orchestrator except the orchestrator", () => {
     expect(all.some((f) => rel(f).startsWith("isolation/"))).toBe(true);
     for (const f of all) {
       // the one exception (task 4.9-B): the composition root main.ts, and only for these two exact specifiers (checked below)
-      if (rel(f) === "main.ts") continue;
+      // (task 4.7 step A2, human decision D2 of 2026-11-27) and the replay composition root replayMain.ts, only for its four exact specifiers (checked below)
+      if (rel(f) === "main.ts" || rel(f) === "replayMain.ts") continue;
       expect(mentionsOrchestrator(readFileSync(f, "utf8")), rel(f)).toBe(false);
     }
+  });
+  // The replay drives the iteration control directly. It may import the session, the record writer, the id counters and `runIterations`, and
+  // nothing else of the orchestrator: no start gate, no startRun, no terminate, no loopOrchestrator, no runComposition, no manifest port, no types.
+  const REPLAY_MAIN_ORCHESTRATOR_IMPORTS = ["./orchestrator/ids.js", "./orchestrator/iteration.js", "./orchestrator/recordWriter.js", "./orchestrator/session.js"];
+  const REPLAY_MAIN_ORCHESTRATOR_NAMES: Record<string, readonly string[]> = {
+    "./orchestrator/ids.js": ["createIdCounters"],
+    "./orchestrator/iteration.js": ["runIterations"],
+    "./orchestrator/recordWriter.js": ["createRecordWriter"],
+    "./orchestrator/session.js": ["createRunSession"],
+  };
+  const importedNames = (source: string, specifier: string): string[] => {
+    const out: string[] = [];
+    for (const m of stripComments(source).matchAll(/^\s*import\s+(?:type\s+)?([^;]*?)\s*\bfrom\s*["']([^"']+)["']/gm)) {
+      if (m[2] !== specifier) continue;
+      const braces = /^\{([^}]*)\}$/.exec((m[1] as string).trim());
+      if (braces === null) out.push("*");
+      else for (const n of (braces[1] as string).split(",").map((x) => x.trim()).filter((x) => x !== "")) out.push(n.replace(/^type\s+/, "").split(/\s+as\s+/)[0] as string);
+    }
+    return [...new Set(out)].sort();
+  };
+  it("replayMain.ts imports exactly ids.js, iteration.js, recordWriter.js and session.js of the orchestrator, one name each, and re-exports nothing of it", () => {
+    const source = readFileSync(join(SRC, "replayMain.ts"), "utf8");
+    expect([...new Set(specifiersOf(source).filter((s) => /(^|\/)orchestrator(\/|$)/.test(s)))].sort()).toEqual(REPLAY_MAIN_ORCHESTRATOR_IMPORTS);
+    for (const [spec, names] of Object.entries(REPLAY_MAIN_ORCHESTRATOR_NAMES)) expect(importedNames(source, spec), spec).toEqual(names);
+    expect(source).not.toMatch(/^\s*export\s*(?:\*|\{[^}]*\})\s*from\s*["']\.\/orchestrator\//m);
+  });
+  it("positive controls of the replayMain.ts exception: the start gate, startRun, terminate, the Run composition, an extra name or a namespace import are differences", () => {
+    const base = REPLAY_MAIN_ORCHESTRATOR_IMPORTS.map((s) => `import { x } from "${s}";`).join("\n");
+    for (const extra of ["./orchestrator/startGate.js", "./orchestrator/startRun.js", "./orchestrator/terminate.js", "./orchestrator/loopOrchestrator.js", "./orchestrator/runComposition.js", "./orchestrator/types.js"]) {
+      expect([...new Set(specifiersOf(`${base}\nimport { y } from "${extra}";`).filter((s) => /(^|\/)orchestrator(\/|$)/.test(s)))].sort(), extra).not.toEqual(REPLAY_MAIN_ORCHESTRATOR_IMPORTS);
+    }
+    expect(importedNames('import { runIterations, runExperimentPhase } from "./orchestrator/iteration.js";', "./orchestrator/iteration.js")).not.toEqual(["runIterations"]);
+    expect(importedNames('import * as it from "./orchestrator/iteration.js";', "./orchestrator/iteration.js")).toEqual(["*"]);
+    expect(importedNames('import { createRunSession } from "./orchestrator/session.js";', "./orchestrator/session.js")).toEqual(["createRunSession"]);
+  });
+  it("negative control: the replayMain.ts list shares no module with the main.ts list", () => {
+    expect(REPLAY_MAIN_ORCHESTRATOR_IMPORTS.filter((s) => MAIN_ORCHESTRATOR_IMPORTS.includes(s))).toEqual([]);
   });
   const MAIN_ORCHESTRATOR_IMPORTS = ["./orchestrator/loopOrchestrator.js", "./orchestrator/runComposition.js"];
   const orchestratorImportsOf = (source: string): string[] => [...new Set(specifiersOf(source).filter((s) => /(^|\/)orchestrator(\/|$)/.test(s)))].sort();

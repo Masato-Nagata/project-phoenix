@@ -469,6 +469,8 @@ export interface MockFixture { requestKind: RequestKind; matchRequestSha256?: Sh
 export class ReplayProvider implements AiProvider {          // R22.4, R22.5
   constructor(recorded: readonly { requestSha256: Sha256; response: Uint8Array }[]);
 }
+// (amended 2026-11-27, task 4.7 step A2, human decision D3) SUPERSEDED: there is no ReplayProvider in ai-client and `createProvider` has no
+// `replay` factory (it keeps refusing the name). The record-replay source is part of discovery-loop; see "replayRun and the replay command".
 export class KiroCliProvider implements AiProvider { /* file channel to the sandbox controller (M6) */ }
 
 // Payload_Auditor (R2)
@@ -645,10 +647,80 @@ export function mayStartRun(payloadAuditConfig: 'pass' | 'blocked', accessDenial
 // true only when payloadAuditConfig === 'pass' && accessDenial === 'verified'
 
 // Reproducibility (R22)
-export function compareRuns(dirA: string, dirB: string): Promise<{ result: 'identical' } | { result: 'different'; firstDifferingRecord: string }>;
+// (amended 2026-11-27, task 4.7 step A1, human decisions D1 and D4) The earlier two-argument form `compareRuns(dirA, dirB)` with the two results `identical` and `different` is superseded.
+// Final types and rules: "compareRuns and the comparison command" below. The file system is an injected read-only port, as for `acceptRun`.
+export function compareRuns(fs: ReadOnlyFileSystemPort, dirA: string, dirB: string, options?: { validator?: SchemaValidator }): Promise<CompareRunsResult>;
 export function replayRun(dir: string, cfg: RunConfig, deps: LoopDeps): Promise<{ result: 'identical' | 'diverged'; firstDifferingRecord?: string }>;
+// (amended 2026-11-27, task 4.7 step A2, human decisions D1 to D5) The form above is superseded. Final types and rules: "replayRun and the
+// replay command" below.
 ```
 
+### compareRuns and the comparison command (task 4.7, step A1; human decisions D1 and D4 of 2026-11-27)
+
+```ts
+export type CompareSideStatus =
+  | { accepted: true }
+  | { accepted: false; reason: RunRejectionReason | 'excluded_fields_contract'; detail?: string; mismatches?: Mismatch[] };
+export type CompareRunsResult =
+  | { result: 'identical'; records: number }
+  | { result: 'different'; firstDifferingRecord: string; difference: 'content' | 'only_in_a' | 'only_in_b'; recordsA: number; recordsB: number }
+  | { result: 'incomplete'; a: CompareSideStatus; b: CompareSideStatus };
+```
+
+1. **Acceptance first (R22.7, R22.8, R12.23, R12.24).** Both Runs are accepted with the existing `acceptRun`, unchanged. A Run that is not accepted makes the result `incomplete` with the status of each side, and nothing is compared. `incomplete` is never reported as `different`.
+2. **What is compared (R22.1, R22.9).** The ordered record sequences, each record in full (`schemaVersion`, `seq`, `id`, `kind`, `prevHash`, `payload`, `hash`). The Run_Manifest as a whole, the Completion_Marker, the Reason_File and the Launcher record are not compared. The manifest's `excludedFields` must equal `["runId","wallClock"]` on both sides (the schema already requires it; `compareRuns` checks it again and reports `excluded_fields_contract` as `incomplete`). A record holds none of the excluded fields (the envelope has no run id or wall-clock field, and the `run_started` payload is empty), so removing them from a record changes nothing and no other field is excluded.
+3. **Canonical, not raw (R22.1).** Each line of `records.jsonl` is parsed and compared by its canonical serialization. The raw bytes of `records.jsonl` are not compared: `verifyRunDirectory` recomputes every record hash from the parsed record, so acceptance does not guarantee that a stored line is itself in canonical form. A Run whose `records.jsonl` differs only in raw form is `identical`.
+4. **One read.** `compareRuns` hands `acceptRun` a read-only port that keeps the bytes of `records.jsonl` that were read for verification. Those verified bytes are the compared bytes; the file is not read a second time. Blobs are content-addressed and verified by `acceptRun` against their names, and records carry the blob hash, so equal records mean equal blobs.
+5. **First difference.** The first index at which the canonical records differ, or the first index present in only one Run (one Run is a prefix of the other), gives `firstDifferingRecord` (`rec-` plus the sequence number, six digits) and `difference` (`content`, `only_in_a`, `only_in_b`).
+6. **Errors.** A state that acceptance rules out, or a failed read, is thrown (`CompareRunsInternalError` for the former), never returned as a result.
+
+Comparison command (`packages/discovery-loop/src/tools/compareRunsCli.ts`, built to `dist/tools/compareRunsCli.js`; not part of `main.ts`): `compare-runs <run-dir-a> <run-dir-b>`, exactly two arguments, no options. It reads only (its file-system port has `listDir` and `readFile` only) and writes exactly one canonical JSON line with the keys `tool` (`compare-runs`), `schemaVersion` (1), `result`, and the fields of the result type. It holds no path, no wall-clock value and no error message text.
+
+| Result | Exit code | Line goes to |
+|--------|-----------|--------------|
+| `identical` | 0 | standard output |
+| `different` | 1 | standard output |
+| `incomplete` | 2 | standard output |
+| `usage_error` (`wrong_argument_count`, `unknown_option`, `empty_path`) | 2 | standard error |
+| `error` (`internal_error`, optional closed `detail`) | 2 | standard error |
+
+The structured `result` field tells the cases apart. An internal error uses exit code 2 and never 0 or 1, so it cannot look like a comparison verdict. `replayRun` (R22.4, R22.5) is unchanged by this amendment and is specified in a later step.
+
+### replayRun and the replay command (task 4.7, step A2; human decisions D1 to D5 of 2026-11-27)
+
+Change management: this section is an amendment of the design made after the start of M4 (requirements 21.21); it is reviewed at the M4 checkpoint (task 4.19). It changes no requirement, no task, no Run_Manifest `schemaVersion` and no artifact format.
+
+```ts
+// packages/discovery-loop/src/replayMain.ts (the replay composition root; not exported by the package entry, not reachable from main.ts)
+export function replayRun(input: { port: BoundedReadPort; runDir: string; policyConfig: BoundedRead; preparationTable: BoundedRead }): Promise<ReplayRunResult>;
+export type ReplayRunResult =
+  | { result: 'identical'; records: number; regenerated: number; terminationReason: string; guarantees: ReplayGuarantees }
+  | { result: 'different'; firstDifferingRecord: string; difference: 'content' | 'only_in_original' | 'only_in_replay' | 'termination_reason' | 'replay_source_mismatch' | 'recorded_data_unconsumed'; cause?: string; guarantees: ReplayGuarantees }
+  | { result: 'diverged'; firstDifferingRecord: string; cause: RequestMismatchCode; recordedRequestRecord?: string; guarantees: ReplayGuarantees }
+  | { result: 'incomplete'; reason: ReplayIncompleteReason; detail?: string };
+```
+
+1. **Method (D1, "record-derived").** The REAL code regenerates the requests, the response gate, the hypothesis checks, the Citation verification, the `experiment` records, the Experiment_Policy decisions (re-evaluated) and the comparisons (the Comparator re-executed). From the records come only: the provider answers (the ReplayProvider), the Runner values (restored from the Observations by the recorded Runner) and the audit verdicts (reused after the request hash was compared). The iteration control `runIterations` of the Loop_Orchestrator is driven directly; `startGate`, `startRun`, `mayStartRun`, `composeRun` and `terminate` are not called and not changed, and nothing is presented to them.
+2. **Acceptance and inputs (R12.23, R22.8).** The Run is accepted with the unchanged `acceptRun` through a read-only port that bounds every read by the rest of a 64 MiB budget BEFORE the bytes are taken, keeps the bytes it handed to `acceptRun`, and notices a file read twice with different bytes. Only these verified bytes are used afterwards. Every record is strictly parsed and validated against `record-envelope` (`additionalProperties: false`); the payloads the replay uses are checked against closed shapes and the existing schemas (`experiment`, `observation`, `comparison-result`), and their references (payload_audit -> ai_output -> ai_call, experiment -> policy_decision -> observation -> comparison, blobs, hashes, the Run_Manifest counts) are checked. The known gap of `acceptRun` (no payload validation, R12.23) stays open for a later step.
+3. **External inputs.** `policy-config.json` and `preparation-table.json` are named explicitly by a human (`--policy-config`, `--preparation-table`), read once each (bounded by 262144 bytes), loaded with the stage B functions of the verifier, and their hashes must equal `manifest.config` and every `policy_decision`. There is no default, no current-value fill-in and no environment variable. The allowlist, the audit configuration and the template texts are not inputs of a replay.
+4. **Source_Bundle and requests (D4, C2).** The Source_Bundle and the template table (id and SHA-256 per request kind) are restored from the recorded request envelopes and checked against `source_bundle_manifest`, `manifest.sourceBundle` and each other. Each request is regenerated by `buildRequestEnvelope` of `runtime/auditAdapter.ts`, the pure function that `prepareAudit` of a Run calls (extracted without change; a hand-written vector and the HEAD copy pin its bytes). The recorded request bytes are never returned as a request. The Source_Bundler and the allowlist check are not re-executed.
+5. **Audit verdicts (D1).** The regenerated request is compared with the NEXT recorded `payload_audit` (kind and SHA-256), and the recorded `ai_call` with it. Only then the recorded verdict is reused; the audit is not executed again (`audit: reused_not_reexecuted`). `blocked` stays `blocked` and gives no provider call.
+6. **ReplayProvider (D3).** In `packages/discovery-loop/src/replay/`, not an ai-client provider, not registered in `createProvider` (which keeps refusing `replay`), no network, process or file module (pinned by static tests). It checks the request object (created by the replay audit of the same session), the recorded `payloadAuditRecordId`, kind, attempt and hash, and answers the verified recorded response, provider error or provider-side timeout. The recorded provider identity is used as historical information; no real provider is called.
+7. **Recorded Runner.** It checks the Experiment id, the canonical normalized Experiment (the existing normalization: without `localKey`, plus `experimentId`), the decision record id, the call order and the verifier acceptance check over the regenerated records, and answers the Runner value restored from the Observation: `executed`; `not_executed` (reason, step and detail are mirrored in the Observation) except `lease_unavailable`, `runner_internal_error` and the detail `run_time_limit`; `aborted` with `address_not_allowed`. A policy rejection never reaches it.
+8. **Session and store (D5).** A fixed monotonic clock, timers that never fire, and a lease port that answers `valid` (`lease: not_measured`); they are replay-only and never injected into a Run. The store is an in-memory `RunRecordStore` (unchanged); the first three records (`run_started`, `isolation_checks`, `source_bundle_manifest`) are copied with their payloads and must get the original ids, seq and hashes (`context: copied_inputs`, not new measurements). No termination record, seal, Run_Manifest, Completion_Marker, Launcher record or isolation attestation is written, and nothing is written to the original Run.
+9. **Comparison (D5, R22.1, R22.4, R22.5).** Records 4 to the one before `termination` are compared with the regenerated records in canonical form, `hash` and `prevHash` included, in order, without exclusions. The termination reason is decided as `terminate()` decides it (without writing it) and compared with the original. A request-side mismatch (hash, kind, order, attempt, an extra request, a request that cannot be built) is `diverged` with the first differing record and the recorded request record; the replay stops before any provider call for that request. Any other difference, a runner-side mismatch, or recorded answers or Observations that were not used is `different`. A mismatch found after the replay started is never `incomplete`.
+10. **Pre-replay judgement (from the original Run and the inputs only).** `incomplete` for: a Run that is not accepted; a structure or reference that does not hold; the termination reasons `time_limit_reached`, `lease_unavailable`, `launcher_killed`, `isolation_violation` and `error` (clock, lease, Launcher, isolation measurement, or causes of `error` that the records do not identify); a `lease_event`, `store_rejection` or `error` record; an `ai_call` with `interrupted` or a timeout by the orchestrator; withheld request bytes; an Observation whose Runner value is not restorable (item 7); a missing, too large, invalid or mismatching external input. R22.4 states no such boundary explicitly; it follows from R22.1 (records are a function of configuration, Mock_Provider answers and the Legacy_App starting state only), and Property 23 asserts that no Run of its domain is rejected this way. This reading is flagged for human confirmation at task 4.19.
+11. **Guarantee scope (in every verdict).** `providerRequest: regenerated_hash_compared`, `providerResponse: recorded`, `observation: recorded`, `policy: reevaluated`, `comparator: reexecuted`, `audit: reused_not_reexecuted`, `sourceBundler: not_reexecuted`, `allowlist: not_reverified`, `lease: not_measured`, `isolation: not_measured`, `legacy: no_new_experiment`, `realAi: not_called`, `context: copied_inputs`.
+
+Replay command (`node dist/replayMain.js --run <run-dir> --policy-config <path>/policy-config.json --preparation-table <path>/preparation-table.json`): exactly these three options, each once; a path with a parent segment, `.incoming`, `evaluation` or `approvals`, or an input with another file name, is a usage error. One canonical JSON line (`tool` `replay-run`, `schemaVersion` 1, the fields of the result), no path, credential, request or response text or exception message.
+
+| Result | Exit code | Line goes to |
+|--------|-----------|--------------|
+| `identical` | 0 | standard output |
+| `different`, `diverged` | 1 | standard output |
+| `incomplete` | 2 | standard output |
+| `usage_error` | 2 | standard error |
+| `error` (`internal_error`) | 2 | standard error |
 ### Independent_Evaluator (`evaluation/spec-restoration-evaluator/`, own `package.json`)
 
 ```ts
@@ -2205,7 +2277,7 @@ PowerShell 7 is chosen because it can own a .NET `Mutex` in its own process, and
 | Conformance mutex | `[System.Threading.Mutex]` named `Local\ProjectPhoenixGroundTruthEvaluation`, `WaitOne(0)` | The same object the runner uses, so the runner needs no change and exits with 2 while a Run holds it (R24.4) |
 | Run-vs-Run lock | An **exclusive file handle** on `discovery/locks/discovery-run.lock`, opened with `FileShare.None`, zero wait (fail at once if another process holds it) | Chosen over a second named mutex because the `Local\` namespace is per logon session, so two Launchers started from two sessions would not exclude each other, while a file handle does. The OS closes the handle when the process ends, there is no "abandoned" state to handle, and no extra object has to be kept consistent. Cost: one lock file on the host disk (not mounted into any container) |
 
-**Scope of the guarantee (A11, R24.16, R24.19).** The `Local\` named-mutex namespace belongs to one Windows logon session. The exclusion between the Run and the conformance runner therefore holds for **one host and one logon session only**. A conformance runner or a Launcher started from another logon session, another user or another host is not excluded. The Run-vs-Run file handle does exclude two Launchers across sessions on the same host (it is a file lock), but that does not extend the mutex guarantee. This single-session scope is documented as a residual risk with status `unresolved` in the documentation, the Run_Manifest `residualRisks` and the open decisions.
+**Scope of the guarantee (A11, R24.16, R24.19).** The `Local\` named-mutex namespace belongs to one Windows logon session. The exclusion between the Run and the conformance runner therefore holds for **one host and one logon session only**. A conformance runner or a Launcher started from another logon session, another user or another host is not excluded. The Run-vs-Run file handle does exclude two Launchers across sessions on the same host (it is a file lock), but that does not extend the mutex guarantee. This single-session scope is documented as a residual risk with status `unresolved` in the documentation, the Run_Manifest `residualRisks` and the open decisions. (amended 2026-11-27, task 4.7 step A3) The Run_Manifest entry is the identifier `mutual_exclusion_single_session_scope` (seventh item of `residualRisks`, see item 10 of the access-denial design); it states the scope only and measures nothing.
 
 **Abandoned mutex (A12, R24.17, R24.18).** A previous owner that ended without releasing the mutex leaves it abandoned. The next `WaitOne` then returns the mutex to the caller and raises `System.Threading.AbandonedMutexException` in .NET; the caller owns the mutex. The Launcher catches that exception and handles it as a start-attempt failure, not as a normal acquisition:
 
@@ -2661,7 +2733,7 @@ Any other outcome, a failed `prepare()`, a failed chmod, a root or capability-by
 3. Inside `run`: (i) the `isStartupApproval` check and single-use consumption of the approval (a refusal after this point has consumed it; the process ends); (ii) `verifyGroundTruthAccessDenial(loopDeps.isolation, { allowedEnvNames derived from approval })`, with no record written and no provider call; (iii) `mayStartRun(approval.payloadAuditConfig, result.status)` after the brand and `runId` checks, where false is a refusal with no Run records; (iv) lease `check()` with the SAME RunLease instance of the approval (the proof is not repeated); (v) the first Run record `run_started`, then the `isolation_checks` record, from which the manifest fields `ground_truth_access_denial` and `isolationChecks[]` are built (one source).
 4. The module never re-reads the approval data, never reads `/run/config/*`, and reads only `/run/lease/isolation-attestation.json`. The payload_audit result and the access-denial result are produced by different modules and neither is evidence for the other.
 
-**10. Manifest mapping (no schema change).** `ground_truth_access_denial = { status, executedInThisRun: true, checks: ['read_denial','mount_inspection'] }`; `status` is `verified` only if all six checks are `verified`; `executedInThisRun` is a constant because a refused start writes no Manifest. `isolationChecks[]` holds the six entries in the fixed order. `residualRisks` (existing `{id, status}` items, always `unresolved` in the sealed manifest): `read_denial_positive_control_unverified`, `mount_inspection_source_kind_unmeasured`, `mount_inspection_run_binding_weak`, `mount_inspection_pre_start_snapshot`, `import_analysis_self_attestation`, `env_values_not_inspected`.
+**10. Manifest mapping (no schema change).** `ground_truth_access_denial = { status, executedInThisRun: true, checks: ['read_denial','mount_inspection'] }`; `status` is `verified` only if all six checks are `verified`; `executedInThisRun` is a constant because a refused start writes no Manifest. `isolationChecks[]` holds the six entries in the fixed order. `residualRisks` (existing `{id, status}` items, always `unresolved` in the sealed manifest): `read_denial_positive_control_unverified`, `mount_inspection_source_kind_unmeasured`, `mount_inspection_run_binding_weak`, `mount_inspection_pre_start_snapshot`, `import_analysis_self_attestation`, `env_values_not_inspected`. (amended 2026-11-27, task 4.7 step A3, human decision; R24.19) A seventh item is appended after them: `mutual_exclusion_single_session_scope`, always `unresolved` (the `Local\` mutex exclusion holds for one Windows logon session only; the exclusion across sessions is not measured and is never recorded as `verified` or `measured`). New Runs record seven items; a Run sealed earlier with six items stays accepted, because the schema above has no list of ids and no item count. No schema, `schemaVersion`, artifact format, mutex implementation or Verifier acceptance condition changes. Change management: reviewed at the M4 checkpoint (task 4.19), like the other amendments of 2026-11-27.
 
 **11. Open contradictions (OPEN; not resolved here, no requirement weakened).**
 - (A) R15.11 says a failed or incomplete access-rights verification must create no Run_Volume and no Run directory. The existing Launcher creates the Run_Volume (step before lease and container create) and creates the container and runs mount_inspection after that, and the runtime-side checks necessarily run in a container that already has the Run_Volume mounted. RESOLVED by the amendment of R15.11 (human decision of 2026-11-25): the verification is split into pre-volume checks, whose failure creates no Run_Volume, and in-Run checks, which need the Run_Volume or the container and whose failure starts no Discovery Loop and is handled by Requirements 12 and 24 (see the Run_Volume rule). A volume-less preflight container and the removal of an empty never-written volume are NOT adopted. The Launcher change, its tests and the Docker Desktop behavior remain TO VERIFY at task 4.9.

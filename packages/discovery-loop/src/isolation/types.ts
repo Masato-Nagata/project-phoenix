@@ -135,4 +135,5 @@ export const RESIDUAL_RISK_IDS: readonly string[] = Object.freeze([
   "mount_inspection_pre_start_snapshot",
   "import_analysis_self_attestation",
   "env_values_not_inspected",
+  "mutual_exclusion_single_session_scope",
 ]);

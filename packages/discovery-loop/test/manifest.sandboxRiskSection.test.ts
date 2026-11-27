@@ -96,10 +96,12 @@ describe("residualRisks", () => {
     "env_values_not_inspected",
   ];
 
-  it("is exactly the six existing identifiers, in a fixed order, each unresolved", () => {
-    expect(buildResidualRisks()).toEqual(SIX.map((id) => ({ id, status: "unresolved" })));
+  // (task 4.7 step A3, human decision of 2026-11-27, R24.19) the seventh identifier is appended; the six above keep their text, order and status
+  const SEVEN = [...SIX, "mutual_exclusion_single_session_scope"];
+  it("is the six existing identifiers in their fixed order, then the seventh of R24.19, each unresolved", () => {
+    expect(buildResidualRisks()).toEqual(SEVEN.map((id) => ({ id, status: "unresolved" })));
     expect(buildResidualRisks().every((r) => r.status === "unresolved")).toBe(true);
-    expect(new Set(buildResidualRisks().map((r) => r.id)).size).toBe(6);
+    expect(new Set(buildResidualRisks().map((r) => r.id)).size).toBe(7);
   });
 
   it("equals RESIDUAL_RISK_IDS of the isolation module (a new identifier there must be decided here too)", () => {
@@ -110,7 +112,7 @@ describe("residualRisks", () => {
     const a = buildResidualRisks();
     a[0]!.id = "changed" as never;
     a.pop();
-    expect(buildResidualRisks()).toEqual(SIX.map((id) => ({ id, status: "unresolved" })));
+    expect(buildResidualRisks()).toEqual(SEVEN.map((id) => ({ id, status: "unresolved" })));
     expect(buildResidualRisks()[0]).not.toBe(buildResidualRisks()[0]);
     expect(() => (RESIDUAL_RISK_ID_LIST as string[]).push("x")).toThrow();
   });

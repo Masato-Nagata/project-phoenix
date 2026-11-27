@@ -34,3 +34,5 @@ export type {
 export * from "./store/index.js";
 // Run configuration validation, stage A (task 4.1). Stage B is a later step of the same task.
 export * from "./config/index.js";
+// Reproducibility comparison of two Runs (R22.1, R22.7; M4 task 4.7, step A1).
+export * from "./reproducibility/index.js";
