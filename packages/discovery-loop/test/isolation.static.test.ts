@@ -22,7 +22,7 @@ const isoFiles = readdirSync(ISO).filter((f) => f.endsWith(".ts"));
 
 const FOREIGN = /ai-client|verifier|analyzer|config\/startup|startup\.js|mayStartRun|@phoenix\//;
 function foreignImports(code: string): string[] {
-  return importsOf(stripComments(code)).filter((s) => FOREIGN.test(s) || /^\.\.\/(?!schema\/types\.js$)/.test(s));
+  return importsOf(stripComments(code)).filter((s) => FOREIGN.test(s) || /^\.\.\/(?!(?:schema\/types|canonical\/canonicalJson)\.js$)/.test(s));
 }
 // Isolation-import rule. relPath is POSIX-style and relative to SRC. Returns the offending specifiers (empty = allowed).
 const ISOLATION_SPEC = /(^|\/)isolation(\/|$)/;
@@ -44,9 +44,10 @@ const importsFs = (code: string): boolean => importsOf(stripComments(code)).some
 
 describe("independence of the access-denial module", () => {
   it("lists the planned files", () => {
-    expect(isoFiles.sort()).toEqual(["attestation.ts", "classify.ts", "importScan.ts", "index.ts", "nodeDeps.ts", "probeSet.ts", "types.ts", "verify.ts", "violation.ts"]);
+    expect(isoFiles.sort()).toEqual(["attestation.ts", "bundleHash.ts", "classify.ts", "importScan.ts", "index.ts", "nodeDeps.ts", "probeSet.ts", "types.ts", "verify.ts", "violation.ts"]);
   });
-  it("imports nothing from ai-client, verifier, analyzer, config/startup.ts or mayStartRun (only ../schema/types.js outside the folder)", () => {
+  // (G2-C, 2026-11-27) bundleHash.ts uses the existing canonical JSON; that one module is the only addition to the allowed imports from outside the folder.
+  it("imports nothing from ai-client, verifier, analyzer, config/startup.ts or mayStartRun (only ../schema/types.js and ../canonical/canonicalJson.js outside the folder)", () => {
     for (const f of isoFiles) expect(foreignImports(readFileSync(join(ISO, f), "utf8")), f).toEqual([]);
   });
   it("positive control: the checker reports each foreign import", () => {
@@ -60,6 +61,8 @@ describe("independence of the access-denial module", () => {
       expect(foreignImports(bad).length, bad).toBeGreaterThan(0);
     }
     expect(foreignImports('import type { Json } from "../schema/types.js";\nimport { a } from "./classify.js";')).toEqual([]);
+    expect(foreignImports('import { canonicalJson } from "../canonical/canonicalJson.js";')).toEqual([]);
+    for (const other of ['import { x } from "../canonical/other.js";', 'import { x } from "../canonical/index.js";', 'import { x } from "../store/index.js";']) expect(foreignImports(other).length, other).toBeGreaterThan(0);
   });
   it("none of the other runtime sources, and no other package, imports the isolation module (orchestrator/ only the public barrel and types)", () => {
     for (const f of walk(SRC)) {

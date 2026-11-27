@@ -594,7 +594,7 @@ function Invoke-VolumeOwnerHelper {
 function Get-VolumeKind { param([ValidateSet('run', 'probe')][string]$Profile) if ($Profile -eq 'probe') { 'probe-diagnostic' } else { 'run' } }
 
 # Export procedure (task 2.21; design steps 2 to 9). Called after the container is stopped and the lease is revoked. The Run lock is
-# held by the caller. Returns Outcome (complete | incomplete), Step (of a failure), Disposition, Location.
+# held by the caller. Returns Outcome (complete | incomplete), Step (of a failure), Disposition (never a removal), Location.
 function Invoke-RunExport {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$RunId, [ValidateSet('run', 'probe')][string]$Profile = 'run', [string]$Summary)
@@ -631,10 +631,11 @@ function Invoke-RunExport {
         $again = Test-RunDirectory -Path $p.Final -RequireMarker
         return (& $fail 'final_verify' $p.Final $again.Mismatches 'the final location does not verify')
     }
-    # 8. remove the volume only now; a probe diagnostic volume is never removed by the Launcher (a human removes it, with approval)
+    # 8. (G2-B1, 2026-11-26) the export never removes a volume. The volume is still referenced by the stopped container of the Run, and Docker
+    # refuses to remove a referenced volume; Remove-RunVolume removes it after the provisional Launcher record and the container removal.
+    # Disposition here is therefore provisional for a Run (kept_for_diagnosis); a probe diagnostic volume is never removed by the Launcher.
     if ($Profile -eq 'probe') { return [pscustomobject]@{ Outcome = 'complete'; Step = $null; Disposition = 'probe_diagnostic_kept'; Location = $p.Final } }
-    $rm = Invoke-DockerCli -Arguments @('volume', 'rm', $p.Volume)
-    [pscustomobject]@{ Outcome = 'complete'; Step = $null; Disposition = $(if ($rm.ExitCode -eq 0) { 'removed_after_verified_export' } else { 'kept_for_diagnosis' }); Location = $p.Final }
+    [pscustomobject]@{ Outcome = 'complete'; Step = $null; Disposition = 'kept_for_diagnosis'; Location = $p.Final }
 }
 
 function Write-LauncherRecord {
@@ -707,6 +708,72 @@ function Remove-OwnRunContainer {
     [pscustomobject]@{ Outcome = 'removed'; Reason = $null }
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# Run_Volume removal and the cleanup record (G2-B1 and G2-B2, 2026-11-26; design.md, "Volume removal, the cleanup record, and abnormal ends").
+# The closed vocabulary of the keep reason, in the deterministic order of the decision (the first rule that applies wins).
+$script:VolumeKeepReasonOrder = @('profile_probe', 'stop_not_confirmed', 'export_incomplete', 'final_not_verified', 'run_not_normal', 'record_not_saved', 'container_not_removed', 'volume_kind_mismatch', 'rm_failed')
+
+function Get-VolumeKeepReasons { , @($script:VolumeKeepReasonOrder) }
+
+# The facts that make a Run a normal sealed end, known before the removal. The final Launcher exit code is NOT used (it is not known yet).
+function Test-RunNormalEnd {
+    param([bool]$Started, [AllowNull()][string]$EndCode, [AllowNull()][string]$Ended, $Report, $RuntimeReportRecord)
+    if (-not $Started -or -not [string]::IsNullOrEmpty($EndCode) -or $Ended -cne 'container_stopped' -or $null -eq $Report -or $null -eq $RuntimeReportRecord) { return $false }
+    $rx = $RuntimeReportRecord['runtimeExitCode']
+    $null -ne $rx -and [long]$rx -eq 0 -and $Report.Classification -ceq 'runtime_sealed_normal' -and $Report.Consistency -ceq 'consistent' -and $Report.CompleteEligible -eq $true -and $Report.LauncherExitCode -eq 0
+}
+
+# The final location of a complete export passes the reader acceptance again.
+function Test-ExportFinalVerified {
+    param($Export)
+    $null -ne $Export -and $Export.Outcome -ceq 'complete' -and (Test-Path -LiteralPath $Export.Location -PathType Container) -and [bool](Test-CompletedRun -Path $Export.Location)
+}
+
+# The first keep reason that applies, or $null. -Provisional decides rules 1 to 5 only (before the provisional record is written).
+function Get-VolumeKeepReason {
+    param([bool]$IsRun, [bool]$StopConfirmed, $Export, [bool]$FinalVerified, [bool]$Normal, [switch]$Provisional, [bool]$RecordSaved, [AllowNull()][string]$ContainerOutcome)
+    if (-not $IsRun) { return 'profile_probe' }
+    if (-not $StopConfirmed) { return 'stop_not_confirmed' }
+    if ($null -eq $Export -or $Export.Outcome -cne 'complete') { return 'export_incomplete' }
+    if (-not $FinalVerified) { return 'final_not_verified' }
+    if (-not $Normal) { return 'run_not_normal' }
+    if ($Provisional) { return $null }
+    if (-not $RecordSaved) { return 'record_not_saved' }
+    if (@('removed', 'absent') -cnotcontains $ContainerOutcome) { return 'container_not_removed' }
+    $null
+}
+
+# The identity of the Run_Volume: its name, its role label, its run-id label, and its volume-kind label equal the expected values. A volume that
+# does not exist, or an inspect that fails, is not confirmed (false). No Docker text is kept.
+function Test-RunVolumeIdentity {
+    param([Parameter(Mandatory)][string]$Volume, [Parameter(Mandatory)][string]$RunId)
+    try {
+        $r = Invoke-DockerCli -Arguments @('volume', 'inspect', '--format', '{{.Name}}|{{index .Labels "phoenix.discovery.role"}}|{{index .Labels "phoenix.discovery.run-id"}}|{{index .Labels "phoenix.discovery.volume-kind"}}', $Volume)
+        if ($r.ExitCode -ne 0) { return $false }
+        $f = ([string]$r.Output).Trim().Split('|')
+        $f.Count -eq 4 -and $f[0] -ceq $Volume -and $f[1] -ceq 'run-volume' -and $f[2] -ceq $RunId -and $f[3] -ceq 'run'
+    } catch { $false }
+}
+
+# Removes the Run_Volume of a normal `run` Run only when every condition holds; otherwise keeps it with the reason. Result: Outcome (removed | kept), Reason
+# (null when removed). `docker volume rm` is called without a force option, and only after every other condition was confirmed. `removed` is returned only
+# after that call succeeded.
+function Remove-RunVolume {
+    param(
+        [Parameter(Mandatory)][string]$RunId, [Parameter(Mandatory)][string]$Volume, [bool]$IsRun, [bool]$StopConfirmed, $Export, [Parameter(Mandatory)][string]$FinalPath,
+        [bool]$Normal, [bool]$RecordSaved, [AllowNull()][string]$ContainerOutcome
+    )
+    $kept = { param($reason) [pscustomobject]@{ Outcome = 'kept'; Reason = $reason } }
+    $finalOk = $false
+    if ($IsRun -and $StopConfirmed -and $null -ne $Export -and $Export.Outcome -ceq 'complete') { try { $finalOk = Test-ExportFinalVerified -Export ([pscustomobject]@{ Outcome = $Export.Outcome; Location = $FinalPath }) } catch { $finalOk = $false } }
+    $why = Get-VolumeKeepReason -IsRun $IsRun -StopConfirmed $StopConfirmed -Export $Export -FinalVerified $finalOk -Normal $Normal -RecordSaved $RecordSaved -ContainerOutcome $ContainerOutcome
+    if ($null -ne $why) { return (& $kept $why) }
+    if (-not (Test-RunVolumeIdentity -Volume $Volume -RunId $RunId)) { return (& $kept 'volume_kind_mismatch') }
+    $rm = $null
+    try { $rm = Invoke-DockerCli -Arguments @('volume', 'rm', $Volume) } catch { return (& $kept 'rm_failed') }
+    if ($rm.ExitCode -ne 0) { return (& $kept 'rm_failed') }
+    [pscustomobject]@{ Outcome = 'removed'; Reason = $null }
+}
 # ---------------------------------------------------------------------------------------------------------------------
 # Integration helpers (task 4.9-C2). Every code below is a closed Launcher code; nothing carries a path, a nonce, or text of Docker or the runtime.
 $script:RuntimeReportMaxBytes = 8192
@@ -894,7 +961,7 @@ function Invoke-DiscoveryStart {
     }
 
     $runId = $null; $lease = $null; $container = $null; $containerId = $null; $exportResult = $null; $stopConfirmed = $false; $wait = $null; $endCode = $null
-    $started = $false; $report = $null; $runFinal = $null; $locks = $null
+    $started = $false; $report = $null; $runFinal = $null; $locks = $null; $recordFailed = $false
     try {
         $locks = Enter-DiscoveryLocks -MutexName $MutexName -LockPath $LockPath
         if (-not $locks.Ok) { & $Log "refused: $($locks.Code)"; return (& $result 2 $locks.Code) }
@@ -945,6 +1012,7 @@ function Invoke-DiscoveryStart {
                 $endCode = 'volume_owner_failed'
                 $record['volumeOwner']['detail'] = $owner.Detail
                 $record['volumeDisposition'] = 'kept_for_diagnosis'
+                $record['volumeCleanup'] = [ordered]@{ outcome = 'kept'; reason = 'export_incomplete' }
                 try { Write-ReasonFile -Directory $p.Export -Step 'volume_owner' -RunId $runId -Detail $owner.Detail } catch { }
                 try { [void](Write-LauncherRecord -RepoRoot $RepoRoot -RunId $runId -Record $record -Outcome 'incomplete') } catch { }
                 & $Log "refused: volume_owner_failed ($($owner.Detail))"
@@ -1002,10 +1070,11 @@ function Invoke-DiscoveryStart {
             elseif ($wait.Ended -ne 'container_stopped') { $endCode = 'error_end' }
         } finally {
             # Normal or error end (R24.11), in this order (2026-11-14): (1) the container has ended; (2) stop and confirm, revoke the lease;
-            # (3) export and check that the evidence is saved; (4) write the Launcher record (the diagnostic record); (5) remove this Run's own
-            # container only, and only if the stop is confirmed, the evidence is saved, the record is written, and its identity is confirmed;
-            # (6) the volume is never removed here (the export decides; a probe volume is kept); (7) release the conformance mutex and the
-            # Run lock. A container that is not confirmed stopped keeps both held until this process ends.
+            # (3) export (it removes no volume) and check that the evidence is saved; (4) write the provisional Launcher record (the diagnostic
+            # record; volumeCleanup pending or kept); (5) remove this Run's own container only, and only if the stop is confirmed, the evidence is
+            # saved, the record is written, and its identity is confirmed; (6) (G2-B1) remove the Run_Volume with Remove-RunVolume only when every
+            # removal condition holds (a probe volume is always kept); (7) write the final Launcher record; (8) release the conformance mutex and
+            # the Run lock. A container that is not confirmed stopped keeps both held until this process ends, and that rule has priority.
             # (task 4.9-C2) after (2): the runtime report of a started Run; the input file handles are released (outer finally) only when the stop is confirmed.
             if ($null -ne $container) { $stopConfirmed = Stop-ContainerConfirmed -Container $container; $record['containerStopConfirmed'] = $stopConfirmed }
             if ($Profile -eq 'run' -and $started -and $stopConfirmed) {
@@ -1014,17 +1083,16 @@ function Invoke-DiscoveryStart {
             }
             if ($null -ne $guard) { $record['inputFileHandles'] = $(if ($null -eq $container -or $stopConfirmed) { 'released_after_stop' } else { 'kept_stop_not_confirmed' }) }
             if ($null -ne $lease) { try { Revoke-RunLease -Lease $lease } catch { } }
-            $recordPath = $null; $recordOutcome = $null
+            $recordPath = $null; $recordOutcome = $null; $containerOutcome = $null; $recordFailed = $false; $normalEnd = $false
+            $isRun = ($Profile -eq 'run'); $stopOk = ($null -eq $container -or $stopConfirmed)
             try {
                 if ($null -ne $lease -and $null -ne $container -and $stopConfirmed) {
                     if ($Profile -eq 'run') { $exportResult = Invoke-RunExport -RepoRoot $RepoRoot -RunId $runId -Profile $Profile -Summary (Get-ReasonSummary -LauncherCode $endCode -Report $report) }
                     else { $exportResult = Invoke-RunExport -RepoRoot $RepoRoot -RunId $runId -Profile $Profile }
                     $record['export'] = [ordered]@{ outcome = $exportResult.Outcome; step = $exportResult.Step }
-                    $record['volumeDisposition'] = $exportResult.Disposition
                     if ($Profile -eq 'probe') { $record['volumeRemoval'] = 'requires_human_approval' }
                     $recordOutcome = $exportResult.Outcome
                 } elseif ($null -ne $runId -and $null -ne $lease) {
-                    $record['volumeDisposition'] = 'kept_for_diagnosis'
                     $recordOutcome = 'incomplete'
                 }
                 if ($Profile -eq 'run' -and $started -and $null -eq $endCode) {
@@ -1032,24 +1100,41 @@ function Invoke-DiscoveryStart {
                     $record['launcherResult'] = [ordered]@{ code = $runFinal.Code; exitCode = [long]$runFinal.ExitCode; purposeAssessment = 'not_assessed' }
                 }
                 if ($null -ne $recordOutcome) {
+                    # (G2-B1) the provisional record: the volume is kept (provisionally) and the cleanup is `pending`, or `kept` when a rule 1 to 5 already applies
+                    $normalEnd = Test-RunNormalEnd -Started $started -EndCode $endCode -Ended $(if ($null -ne $wait) { $wait.Ended } else { $null }) -Report $report -RuntimeReportRecord $record['runtimeReport']
+                    $why = Get-VolumeKeepReason -IsRun $isRun -StopConfirmed $stopOk -Export $exportResult -FinalVerified (Test-ExportFinalVerified -Export $exportResult) -Normal $normalEnd -Provisional
+                    $record['volumeDisposition'] = 'kept_for_diagnosis'
+                    $record['volumeCleanup'] = $(if ($null -ne $why) { [ordered]@{ outcome = 'kept'; reason = $why } } else { [ordered]@{ outcome = 'pending'; reason = $null } })
                     if ($null -ne $container) { $record['containerRemoval'] = [ordered]@{ outcome = 'pending' } }
                     $recordPath = Write-LauncherRecord -RepoRoot $RepoRoot -RunId $runId -Record $record -Outcome $recordOutcome
                 }
-            } catch { & $Log "error: the export or the Launcher record failed: $($_.Exception.Message)" }
+            } catch { $recordFailed = $true; & $Log "error: the export or the Launcher record failed: $($_.Exception.Message)" }
             try {
                 if ($null -ne $container) {
                     $saved = Test-EvidenceSaved -Export $exportResult -RecordPath $recordPath
                     $removal = Remove-OwnRunContainer -ContainerId $containerId -RunId $runId -StopConfirmed $stopConfirmed -EvidenceSaved $saved
+                    $containerOutcome = $removal.Outcome
                     $record['containerRemoval'] = [ordered]@{ outcome = $removal.Outcome; reason = $removal.Reason }
                     if ($removal.Outcome -eq 'kept') { & $Log "warning: container kept ($($removal.Reason)): $container" }
-                    if ($null -ne $recordPath) { Write-TextAtomically -Path $recordPath -Text ((ConvertTo-CanonicalJson -Value $record) + "`n") }
                 }
             } catch { & $Log "error: the container removal step failed: $($_.Exception.Message)" }
+            try {
+                # (G2-B1) the volume is removed only now (after the provisional record and the container removal), then the final record is written
+                if ($null -ne $recordOutcome -and $record.Contains('volumeCleanup')) {
+                    $vc = Remove-RunVolume -RunId $runId -Volume $p.Volume -IsRun $isRun -StopConfirmed $stopOk -Export $exportResult -FinalPath $p.Final -Normal $normalEnd -RecordSaved ($null -ne $recordPath) -ContainerOutcome $containerOutcome
+                    $record['volumeCleanup'] = [ordered]@{ outcome = $vc.Outcome; reason = $vc.Reason }
+                    $record['volumeDisposition'] = $(if ($vc.Outcome -ceq 'removed') { 'removed_after_verified_export' } else { 'kept_for_diagnosis' })
+                    if ($vc.Outcome -ceq 'kept') { & $Log "warning: volume kept ($($vc.Reason)): $($p.Volume)" }
+                }
+                if ($null -ne $recordOutcome) {
+                    if ($null -ne $recordPath) { Write-TextAtomically -Path $recordPath -Text ((ConvertTo-CanonicalJson -Value $record) + "`n") }
+                    else { $recordFailed = $true }
+                }
+            } catch { $recordFailed = $true; & $Log "error: the volume removal or the final Launcher record failed: $($_.Exception.Message)" }
             finally {
                 if ($null -eq $container -or $stopConfirmed) { Exit-ConformanceMutex -Locks $locks; Exit-RunLock -Locks $locks }
                 else { & $Log 'error: the container is not confirmed stopped; the conformance mutex and the Run lock are released only when this process ends' }
-            }
-        }
+            }        }
     } finally {
         # The input file handles: released on every path, except while a container of this Run is not confirmed stopped (then they stay
         # held, like the locks, for as long as this process lives; the operating system closes them when the process ends).
@@ -1063,9 +1148,12 @@ function Invoke-DiscoveryStart {
             try { [void](Save-UnstoppedRunResources -RunId $runId -Guard $guard -Locks $locks) } catch { & $Log 'error: the resources of the unstopped Run could not be retained' }
         }
     }
-    if ($null -ne $runFinal) { return (& $result $runFinal.ExitCode $runFinal.Code @{ RunId = $runId; Export = $exportResult; Report = $report }) }
-    if ($null -ne $exportResult -and $exportResult.Outcome -eq 'complete' -and $endCode -eq 'ended') { return (& $result 0 'complete' @{ RunId = $runId; Export = $exportResult }) }
-    & $result 1 $(if ($endCode) { $endCode } else { 'incomplete' }) @{ RunId = $runId; Export = $exportResult; Report = $report }
+    $final = if ($null -ne $runFinal) { & $result $runFinal.ExitCode $runFinal.Code @{ RunId = $runId; Export = $exportResult; Report = $report } }
+             elseif ($null -ne $exportResult -and $exportResult.Outcome -eq 'complete' -and $endCode -eq 'ended') { & $result 0 'complete' @{ RunId = $runId; Export = $exportResult } }
+             else { & $result 1 $(if ($endCode) { $endCode } else { 'incomplete' }) @{ RunId = $runId; Export = $exportResult; Report = $report } }
+    # (G2-B1) a Launcher record that could not be saved is never a normal end; an end that was already an error keeps its own code
+    if ($recordFailed -and $final.ExitCode -eq 0) { return (& $result 1 'launcher_record_not_saved' @{ RunId = $runId; Export = $exportResult; Report = $report }) }
+    $final
 }
 # ---------------------------------------------------------------------------------------------------------------------
 # launcher-facts.json version 2 and exclusive file creation (task 4.9-C1; the facts file is read by packages/discovery-loop/src/runtimeFacts/
@@ -1225,4 +1313,4 @@ function Write-LauncherFactsFile {
     if (-not $v.Ok) { return [pscustomobject]@{ Ok = $false; Code = 'facts_verify_failed'; Sha256 = $null } }
     [pscustomobject]@{ Ok = $true; Code = $null; Sha256 = $w.Sha256 }
 }
-Export-ModuleMember -Function Get-LauncherConstants, Invoke-DockerCli, Set-DockerCliInvoker, Set-LauncherTimeHooks, Enter-RunLock, Enter-DiscoveryLocks, Exit-ConformanceMutex, Exit-RunLock, New-DiscoveryRunId, Test-RunIdFormat, Get-RunPaths, Test-RunIdFree, Write-TextAtomically, Get-AtomicReplaceSettings, Get-LastAtomicReplace, Test-TransientReplaceDenial, Write-ReasonFile, New-LeaseNonce, New-RunLease, Step-LeaseHeartbeat, Revoke-RunLease, Stop-LeftoverRuntimeContainers, Test-ContainerRunning, Stop-ContainerConfirmed, Set-InterruptedRuns, Get-ContainerName, New-ContainerCreateArgs, Get-ExpectedMountTargets, Get-MountInspection, Test-LaunchGate, Invoke-RunExport, Invoke-VolumeOwnerHelper, Get-VolumeKind, Get-RunVolumes, Write-LauncherRecord, Wait-RuntimeContainer, ConvertTo-FlatList, Test-EvidenceSaved, Remove-OwnRunContainer, Invoke-DiscoveryStart, Get-LauncherFactsContract, Test-LauncherFactsValues, New-LauncherFactsText, Test-LauncherFactsText, Test-LauncherFactsBytes, Write-FileExclusive, Write-LauncherFactsFile, Invoke-BoundedProcess, Invoke-DockerCliCapture, Test-PropagationDelayValue, Get-CreatedContainerImage, ConvertTo-RuntimeReportRecord, Get-RuntimeExitReport, Get-ReasonSummary, Get-RunOutcome, Test-UnstoppedRunRetained, Get-UnstoppedRunRetainedCount
+Export-ModuleMember -Function Get-LauncherConstants, Invoke-DockerCli, Set-DockerCliInvoker, Set-LauncherTimeHooks, Enter-RunLock, Enter-DiscoveryLocks, Exit-ConformanceMutex, Exit-RunLock, New-DiscoveryRunId, Test-RunIdFormat, Get-RunPaths, Test-RunIdFree, Write-TextAtomically, Get-AtomicReplaceSettings, Get-LastAtomicReplace, Test-TransientReplaceDenial, Write-ReasonFile, New-LeaseNonce, New-RunLease, Step-LeaseHeartbeat, Revoke-RunLease, Stop-LeftoverRuntimeContainers, Test-ContainerRunning, Stop-ContainerConfirmed, Set-InterruptedRuns, Get-ContainerName, New-ContainerCreateArgs, Get-ExpectedMountTargets, Get-MountInspection, Test-LaunchGate, Invoke-RunExport, Invoke-VolumeOwnerHelper, Get-VolumeKind, Get-RunVolumes, Write-LauncherRecord, Wait-RuntimeContainer, ConvertTo-FlatList, Test-EvidenceSaved, Remove-OwnRunContainer, Invoke-DiscoveryStart, Get-LauncherFactsContract, Test-LauncherFactsValues, New-LauncherFactsText, Test-LauncherFactsText, Test-LauncherFactsBytes, Write-FileExclusive, Write-LauncherFactsFile, Invoke-BoundedProcess, Invoke-DockerCliCapture, Test-PropagationDelayValue, Get-CreatedContainerImage, ConvertTo-RuntimeReportRecord, Get-RuntimeExitReport, Get-ReasonSummary, Get-RunOutcome, Test-UnstoppedRunRetained, Get-UnstoppedRunRetainedCount, Remove-RunVolume, Get-VolumeKeepReason, Get-VolumeKeepReasons, Test-RunNormalEnd, Test-ExportFinalVerified, Test-RunVolumeIdentity

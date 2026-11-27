@@ -39,13 +39,35 @@ export interface IsolationDeps {
   readonly attestation: {
     read(): Promise<{ readonly kind: "ok"; readonly json: unknown } | { readonly kind: "missing" | "unreadable" | "unparsable" }>;
   };
-  readonly bundle: { files(): Promise<readonly { readonly rel: string; readonly text: string }[] | undefined> };
+  readonly bundle: {
+    files(): Promise<readonly { readonly rel: string; readonly text: string }[] | undefined>;
+    /**
+     * One walk that gives the text for the import scan AND the `bundleSha256` of the raw bytes (design.md, item 7a). The signal is aborted when the
+     * call of verify.ts times out: after that, no new file access is started. Optional so that a port without it (a test fake) still measures the
+     * import scan; the production adapter always has it. A failure never carries a hash.
+     */
+    snapshot?(signal: AbortSignal): Promise<BundleSnapshot>;
+  };
 }
 
 /** Data only. Every field is `readonly string` or `readonly string[]`; there is no boolean, enum, optional or waiver field (R15.14). */
 export interface IsolationExpectation {
   readonly allowedEnvNames: readonly string[];
 }
+
+/** Failure codes of the `bundleSha256` walk (design.md, item 7a). Timeout and abort use the existing code `timeout`. */
+export type BundleFailureCode =
+  | "bundle_path_invalid"
+  | "bundle_duplicate"
+  | "bundle_changed"
+  | "bundle_limit_exceeded"
+  | "bundle_empty_root"
+  | "bundle_read_failed"
+  | "bundle_unsupported_entry";
+
+export type BundleSnapshot =
+  | { readonly ok: true; readonly files: readonly { readonly rel: string; readonly text: string }[]; readonly bundleSha256: string }
+  | { readonly ok: false; readonly code: BundleFailureCode | "timeout" };
 
 export type CheckId = "import_analysis" | "read_denial" | "mount_inspection" | "uid" | "rootfs_readonly" | "env_names";
 
@@ -69,7 +91,8 @@ export type FailureCode =
   | "rootfs_writable"
   | "rootfs_inconclusive"
   | "rootfs_stale_probe"
-  | "env_unexpected";
+  | "env_unexpected"
+  | BundleFailureCode;
 
 export interface IsolationCheck {
   readonly id: CheckId;

@@ -13,6 +13,10 @@ function New-FakeDocker {
         Containers = @{}
         VolumeRoot = (Join-Path $Root 'fake-volumes')
         FailCopy = $false; FailVolumeRm = $false; StopFails = $false; FailVolumeCreate = $false
+        # (G2-B2) a hook that runs after a successful volume removal: param($name, $state)
+        OnVolumeRm = $null
+        # (G2-B2) a hook that runs at the start of every call, before it is answered: param($callText, $state)
+        OnCall = $null
         ExtraMount = $null; ExtraNetwork = $null
         RunPolls = 3; ExitCodeOnEnd = '0'
         OnStart = $null
@@ -30,6 +34,7 @@ function New-FakeDocker {
         param([string[]]$Arguments, $Capture)
         $s = $state
         [void]$s.Calls.Add(($Arguments -join ' '))
+        if ($null -ne $s.OnCall) { & $s.OnCall ($Arguments -join ' ') $s }
         if ($null -ne $s.ThrowOn -and ($Arguments -join ' ') -like $s.ThrowOn) { throw 'fake: injected failure' }
         $ok = { param($out = '') [pscustomobject]@{ ExitCode = 0; Output = [string]$out; Error = '' } }
         $no = { param($err = 'error') [pscustomobject]@{ ExitCode = 1; Output = ''; Error = [string]$err } }
@@ -53,7 +58,17 @@ function New-FakeDocker {
             }
             'volume' {
                 switch ($Arguments[1]) {
-                    'inspect' { if ($s.Volumes.ContainsKey($Arguments[2])) { return (& $ok '[]') } else { return (& $no 'no such volume') } }
+                    'inspect' {
+                        $vn = $Arguments[-1]
+                        if (-not $s.Volumes.ContainsKey($vn)) { return (& $no 'no such volume') }
+                        # (G2-B2) the identity format of the Launcher: name|role|run-id|volume-kind (an absent label is an empty field)
+                        if ((& $argAfter '--format') -like '{{.Name}}|*') {
+                            $vl = $s.VolumeLabels[$vn]
+                            $lab = { param($k) if ($null -ne $vl -and $vl.ContainsKey($k)) { [string]$vl[$k] } else { '' } }
+                            return (& $ok ("$vn|" + (& $lab 'phoenix.discovery.role') + '|' + (& $lab 'phoenix.discovery.run-id') + '|' + (& $lab 'phoenix.discovery.volume-kind')))
+                        }
+                        return (& $ok '[]')
+                    }
                     'ls' {
                         $names = @($s.Volumes.Keys | Where-Object { $_ -like 'phoenix-run-*' })
                         if ($Arguments -contains '--format') { return (& $ok (($names | ForEach-Object { $l = $s.VolumeLabels[$_]; $k = if ($null -ne $l -and $l.ContainsKey('phoenix.discovery.volume-kind')) { $l['phoenix.discovery.volume-kind'] } else { '' }; "$_|$k" }) -join "`n")) }
@@ -65,7 +80,16 @@ function New-FakeDocker {
                         $vl = @{}; foreach ($l in @(& $allAfter '--label')) { $kv = $l.Split('=', 2); $vl[$kv[0]] = $kv[1] }; $s.VolumeLabels[$name] = $vl
                         return (& $ok $name)
                     }
-                    'rm' { if ($s.FailVolumeRm) { return (& $no 'volume in use') }; $name = $Arguments[2]; if ($s.Volumes.ContainsKey($name)) { Remove-Item -LiteralPath $s.Volumes[$name] -Recurse -Force; $s.Volumes.Remove($name) }; return (& $ok $name) }
+                    'rm' {
+                        if ($s.FailVolumeRm) { return (& $no 'volume in use') }
+                        $name = $Arguments[-1]
+                        # (G2-B2) like Docker: a volume that any container references, a stopped one included, is not removed (the helper containers of `run --rm` are not kept in Containers)
+                        $users = @($s.Containers.Keys | Where-Object { @($s.Containers[$_].Mounts | Where-Object { $_.Type -eq 'volume' -and $_.Source -eq $name }).Count -gt 0 })
+                        if ($users.Count -gt 0) { return (& $no 'volume in use') }
+                        if ($s.Volumes.ContainsKey($name)) { Remove-Item -LiteralPath $s.Volumes[$name] -Recurse -Force; $s.Volumes.Remove($name) }
+                        if ($null -ne $s.OnVolumeRm) { & $s.OnVolumeRm $name $s }
+                        return (& $ok $name)
+                    }
                 }
             }
             'run' {

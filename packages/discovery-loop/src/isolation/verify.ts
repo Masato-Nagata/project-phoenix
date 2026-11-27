@@ -18,6 +18,7 @@ import {
   CHECK_ORDER,
   MOUNT_NOT_MEASURED,
   type AccessDenialResult,
+  type BundleSnapshot,
   type CheckId,
   type FailureCode,
   type IsolationCheck,
@@ -69,7 +70,8 @@ type Guarded<T> =
 
 const noop = (): void => undefined;
 
-async function guard<T>(call: () => Promise<T> | T): Promise<Guarded<T>> {
+/** onTimeout runs once when the wait ends by the timer (used to abort a walk that is still running); it never changes the result. */
+async function guard<T>(call: () => Promise<T> | T, onTimeout?: () => void): Promise<Guarded<T>> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const pending: Promise<unknown> = Promise.resolve().then(call);
@@ -78,7 +80,14 @@ async function guard<T>(call: () => Promise<T> | T): Promise<Guarded<T>> {
       timer = setTimeout(() => resolve("__timeout__"), PORT_TIMEOUT_MS);
     });
     const r = await Promise.race([pending, timeout]);
-    if (r === "__timeout__") return { kind: "failed", code: "timeout", pending };
+    if (r === "__timeout__") {
+      try {
+        onTimeout?.();
+      } catch {
+        /* an abort handler never changes the result */
+      }
+      return { kind: "failed", code: "timeout", pending };
+    }
     return { kind: "value", value: r as T };
   } catch {
     return { kind: "failed", code: "port_failed" };
@@ -130,15 +139,45 @@ const failedCheck = (id: CheckId, measuredBy: "runtime" | "launcher", reason: Fa
 
 // ------------------------------------------------------------------------------------------------------------------------------------
 // import_analysis
+/** The codes that the bundle walk may give (	imeout is the abort of the walk). */
+const BUNDLE_CODES: ReadonlySet<string> = new Set(['timeout', 'bundle_path_invalid', 'bundle_duplicate', 'bundle_changed', 'bundle_limit_exceeded', 'bundle_empty_root', 'bundle_read_failed', 'bundle_unsupported_entry']);
+
 async function checkImportAnalysis(deps: IsolationDeps): Promise<IsolationCheck> {
   if (!importScanSelfCheck()) return failedCheck("import_analysis", "runtime", "control_failed");
-  const g = await guard(() => deps.bundle.files());
-  if (g.kind === "failed") return failedCheck("import_analysis", "runtime", g.code);
-  const files = g.value;
+  // One walk gives the text and the `bundleSha256` (design.md, item 7a). A port without `snapshot` (a test fake) gives the text only: then no
+  // `bundleSha256` is recorded. After a timeout the walk is told to stop, and its end is awaited for a bounded time (the handles are closed).
+  let snapshotFn: ((signal: AbortSignal) => Promise<BundleSnapshot>) | undefined;
+  try {
+    const f = deps.bundle.snapshot;
+    if (typeof f === "function") snapshotFn = f.bind(deps.bundle);
+  } catch {
+    return failedCheck("import_analysis", "runtime", "port_failed");
+  }
+  let files: unknown;
+  let bundleSha256: string | undefined;
+  if (snapshotFn !== undefined) {
+    const call = snapshotFn;
+    const ac = new AbortController();
+    const g = await guard(() => call(ac.signal), () => ac.abort());
+    if (g.kind === "failed") {
+      await settle(g.pending, SETTLE_GRACE_MS);
+      return failedCheck("import_analysis", "runtime", g.code);
+    }
+    const s: unknown = g.value;
+    if (typeof s !== "object" || s === null) return failedCheck("import_analysis", "runtime", "not_measured");
+    const o = s as { ok?: unknown; code?: unknown; files?: unknown; bundleSha256?: unknown };
+    if (o.ok === false) return failedCheck("import_analysis", "runtime", typeof o.code === "string" && BUNDLE_CODES.has(o.code) ? (o.code as FailureCode) : "not_measured");
+    if (o.ok !== true || typeof o.bundleSha256 !== "string" || !/^[0-9a-f]{64}$/.test(o.bundleSha256)) return failedCheck("import_analysis", "runtime", "not_measured");
+    files = o.files;
+    bundleSha256 = o.bundleSha256;
+  } else {
+    const g = await guard(() => deps.bundle.files());
+    if (g.kind === "failed") return failedCheck("import_analysis", "runtime", g.code);
+    files = g.value;
+  }
   if (!Array.isArray(files) || !files.every((f) => typeof f === "object" && f !== null && typeof f.rel === "string" && typeof f.text === "string")) {
     return failedCheck("import_analysis", "runtime", "not_measured");
-  }
-  const r = scanBundle(files);
+  }  const r = scanBundle(files);
   const base = {
     filesTotal: r.filesTotal,
     filesScanned: r.filesScanned,
@@ -151,7 +190,8 @@ async function checkImportAnalysis(deps: IsolationDeps): Promise<IsolationCheck>
   if (r.filesScanned === 0) return failedCheck("import_analysis", "runtime", "not_measured", base);
   if (r.findings.some((f) => f.code === "forbidden_import")) return failedCheck("import_analysis", "runtime", "forbidden_import", base);
   if (r.findings.length > 0) return failedCheck("import_analysis", "runtime", "unclassified_syntax", base);
-  return done("import_analysis", true, "runtime", base);
+  // the hash is recorded only when the whole check is verified (a failed check never carries it)
+  return done("import_analysis", true, "runtime", bundleSha256 === undefined ? base : { ...base, bundleSha256 });
 }
 
 // ------------------------------------------------------------------------------------------------------------------------------------

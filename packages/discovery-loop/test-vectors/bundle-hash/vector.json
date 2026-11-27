@@ -1,0 +1,217 @@
+{
+  "kind": "bundle-hash-vector",
+  "version": 1,
+  "hashRule": "dist-bundle-sha256-v1",
+  "note": "SYNTHETIC fixture tree. The expected values are computed by the independent PowerShell implementation (tests/discovery-loop/test_bundle_hash_vector.ps1: Get-FileHash and ConvertTo-CanonicalJson), NOT by the TypeScript code. Files in a node_modules directory are not entered; the directory is listed as skipped.",
+  "tree": {
+    "packages/ai-client/dist": [
+      {
+        "path": "index.js",
+        "base64": "ZXhwb3J0IGNvbnN0IGFpQ2xpZW50ID0gMTsK"
+      },
+      {
+        "path": "node_modules/dep/index.js",
+        "base64": "ZXhwb3J0IGNvbnN0IHNraXBwZWQgPSAxOwo="
+      }
+    ],
+    "packages/analyzer/dist": [
+      {
+        "path": "index.js",
+        "base64": "ZXhwb3J0IGNvbnN0IGFuYWx5emVyID0gMTsK"
+      },
+      {
+        "path": "B.js",
+        "base64": "ZXhwb3J0IGNvbnN0IHVwcGVyID0gMTsK"
+      },
+      {
+        "path": "a.js",
+        "base64": "ZXhwb3J0IGNvbnN0IGEgPSAxOwo="
+      },
+      {
+        "path": "a/b.js",
+        "base64": "ZXhwb3J0IGNvbnN0IGFiID0gMTsK"
+      },
+      {
+        "path": "a-b.js",
+        "base64": "ZXhwb3J0IGNvbnN0IGRhc2ggPSAxOwo="
+      },
+      {
+        "path": "a+b.js",
+        "base64": "ZXhwb3J0IGNvbnN0IHBsdXMgPSAxOwo="
+      },
+      {
+        "path": "a_b.js",
+        "base64": "ZXhwb3J0IGNvbnN0IHVuZGVyc2NvcmUgPSAxOwo="
+      },
+      {
+        "path": "a@b.js",
+        "base64": "ZXhwb3J0IGNvbnN0IGF0ID0gMTsK"
+      },
+      {
+        "path": "a.b.js",
+        "base64": "ZXhwb3J0IGNvbnN0IGRvdCA9IDE7Cg=="
+      },
+      {
+        "path": "0.js",
+        "base64": "ZXhwb3J0IGNvbnN0IHplcm8gPSAxOwo="
+      }
+    ],
+    "packages/discovery-loop/dist": [
+      {
+        "path": "index.js",
+        "base64": "ZXhwb3J0IGNvbnN0IGxvb3AgPSAxOwo="
+      },
+      {
+        "path": "data.json",
+        "base64": "eyJrIjoxfQo="
+      },
+      {
+        "path": "types.d.ts",
+        "base64": "ZXhwb3J0IGRlY2xhcmUgY29uc3QgbG9vcDogbnVtYmVyOwo="
+      },
+      {
+        "path": "index.js.map",
+        "base64": "eyJ2ZXJzaW9uIjozfQo="
+      },
+      {
+        "path": "node_modules/pkg/index.js",
+        "base64": "ZXhwb3J0IGNvbnN0IHNraXBwZWQgPSAyOwo="
+      }
+    ],
+    "packages/verifier/dist": [
+      {
+        "path": "index.js",
+        "base64": "ZXhwb3J0IGNvbnN0IHZlcmlmaWVyID0gMTsK"
+      },
+      {
+        "path": "bin/native.node",
+        "base64": "AP8BAg=="
+      },
+      {
+        "path": "bin/mod.wasm",
+        "base64": "AGFzbQEAAAA="
+      },
+      {
+        "path": "bad-a.js",
+        "base64": "Y//+"
+      },
+      {
+        "path": "bad-b.js",
+        "base64": "Y/7/"
+      },
+      {
+        "path": "empty.js",
+        "base64": ""
+      },
+      {
+        "path": "crlf.js",
+        "base64": "YQ0KYgo="
+      }
+    ]
+  },
+  "expected": {
+    "roots": [
+      "packages/ai-client/dist",
+      "packages/analyzer/dist",
+      "packages/discovery-loop/dist",
+      "packages/verifier/dist"
+    ],
+    "skippedDirectories": [
+      "packages/ai-client/dist/node_modules",
+      "packages/discovery-loop/dist/node_modules"
+    ],
+    "files": [
+      {
+        "path": "packages/ai-client/dist/index.js",
+        "sha256": "caf38925826e027560d52b4b7a81b59ed76e0939d6d5e748a0fba72c7211eb60"
+      },
+      {
+        "path": "packages/analyzer/dist/0.js",
+        "sha256": "66150371ebecb011404f515e852a76eb1cb41254f6b8e01c6bc4cb4d739e9464"
+      },
+      {
+        "path": "packages/analyzer/dist/B.js",
+        "sha256": "7d51042e4129d0c739c9ab97a0c2902e109e210f6f4e91c623b3b9f3de830116"
+      },
+      {
+        "path": "packages/analyzer/dist/a+b.js",
+        "sha256": "e71639757528a7c1c1d2b1597453b5be8329d7d0807c50abb5f715ca07d5a4f3"
+      },
+      {
+        "path": "packages/analyzer/dist/a-b.js",
+        "sha256": "ed1d6c45e42b19326d83b838b162f6ca239c6a1285aa2e3ea6a581e41a06a995"
+      },
+      {
+        "path": "packages/analyzer/dist/a.b.js",
+        "sha256": "ea17405c747382703f9167ffdce25afbff31ae7915d0b1d47c2350122d65ab80"
+      },
+      {
+        "path": "packages/analyzer/dist/a.js",
+        "sha256": "037ecd1db38c230c248787e60fd7bfc0cb0101b187b59535b6e7483be762d350"
+      },
+      {
+        "path": "packages/analyzer/dist/a/b.js",
+        "sha256": "1a7ab90330c0e48d6f69900081437dab9a09ee5afce548fe24e3153bda8c24a7"
+      },
+      {
+        "path": "packages/analyzer/dist/a@b.js",
+        "sha256": "70af605627e7042d1c8b8f759d61549b388912a485a14917d2c07101f37be365"
+      },
+      {
+        "path": "packages/analyzer/dist/a_b.js",
+        "sha256": "7332a9ba637815c6f928f3e1ef11f83d081572932472e0ad14951b2c3c0d4694"
+      },
+      {
+        "path": "packages/analyzer/dist/index.js",
+        "sha256": "09a5faf34ce03f70b2c4ccaa651564e8c736897a4bec412962bb6db97ea9e33f"
+      },
+      {
+        "path": "packages/discovery-loop/dist/data.json",
+        "sha256": "6a021504b02dc18c0b6bf8dfebdbdca579f0ab4d75eccb09ceeae89880a007ad"
+      },
+      {
+        "path": "packages/discovery-loop/dist/index.js",
+        "sha256": "96930feb0a1f898bc79d1585747e97bbd2d0798cdf241d55247427ab62b00f7d"
+      },
+      {
+        "path": "packages/discovery-loop/dist/index.js.map",
+        "sha256": "fcef7b4fb29d3eab7ba6209e5d1db8ef29330a6072c8d4169351108f914261db"
+      },
+      {
+        "path": "packages/discovery-loop/dist/types.d.ts",
+        "sha256": "a641d51ea40135a0420ccc395b059f70744a44c2f3e55c2fdf430a05f0a24d6e"
+      },
+      {
+        "path": "packages/verifier/dist/bad-a.js",
+        "sha256": "35ee9193572e210deb4c60d1c4b829bc2fe78abb7b5153e63a9d63458ed72bfb"
+      },
+      {
+        "path": "packages/verifier/dist/bad-b.js",
+        "sha256": "f92480e1473d6294c602f031ee823bd3f6b4326ba2ccf745cbdc57043af0372e"
+      },
+      {
+        "path": "packages/verifier/dist/bin/mod.wasm",
+        "sha256": "93a44bbb96c751218e4c00d479e4c14358122a389acca16205b1e4d0dc5f9476"
+      },
+      {
+        "path": "packages/verifier/dist/bin/native.node",
+        "sha256": "2f87beacb6a71f75e3243ce005faf5d99405e02b5e729c7c9c216ef2e2a0544a"
+      },
+      {
+        "path": "packages/verifier/dist/crlf.js",
+        "sha256": "953bba9ac9726eaea07e844abcf144a0afe998039257c7a88b6665819597f39d"
+      },
+      {
+        "path": "packages/verifier/dist/empty.js",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "packages/verifier/dist/index.js",
+        "sha256": "5b099c3e37b3d148f4efc77f31f1c48794c1d412738631d707411199a8da027c"
+      }
+    ],
+    "canonicalJson": "{\"files\":[{\"path\":\"packages/ai-client/dist/index.js\",\"sha256\":\"caf38925826e027560d52b4b7a81b59ed76e0939d6d5e748a0fba72c7211eb60\"},{\"path\":\"packages/analyzer/dist/0.js\",\"sha256\":\"66150371ebecb011404f515e852a76eb1cb41254f6b8e01c6bc4cb4d739e9464\"},{\"path\":\"packages/analyzer/dist/B.js\",\"sha256\":\"7d51042e4129d0c739c9ab97a0c2902e109e210f6f4e91c623b3b9f3de830116\"},{\"path\":\"packages/analyzer/dist/a+b.js\",\"sha256\":\"e71639757528a7c1c1d2b1597453b5be8329d7d0807c50abb5f715ca07d5a4f3\"},{\"path\":\"packages/analyzer/dist/a-b.js\",\"sha256\":\"ed1d6c45e42b19326d83b838b162f6ca239c6a1285aa2e3ea6a581e41a06a995\"},{\"path\":\"packages/analyzer/dist/a.b.js\",\"sha256\":\"ea17405c747382703f9167ffdce25afbff31ae7915d0b1d47c2350122d65ab80\"},{\"path\":\"packages/analyzer/dist/a.js\",\"sha256\":\"037ecd1db38c230c248787e60fd7bfc0cb0101b187b59535b6e7483be762d350\"},{\"path\":\"packages/analyzer/dist/a/b.js\",\"sha256\":\"1a7ab90330c0e48d6f69900081437dab9a09ee5afce548fe24e3153bda8c24a7\"},{\"path\":\"packages/analyzer/dist/a@b.js\",\"sha256\":\"70af605627e7042d1c8b8f759d61549b388912a485a14917d2c07101f37be365\"},{\"path\":\"packages/analyzer/dist/a_b.js\",\"sha256\":\"7332a9ba637815c6f928f3e1ef11f83d081572932472e0ad14951b2c3c0d4694\"},{\"path\":\"packages/analyzer/dist/index.js\",\"sha256\":\"09a5faf34ce03f70b2c4ccaa651564e8c736897a4bec412962bb6db97ea9e33f\"},{\"path\":\"packages/discovery-loop/dist/data.json\",\"sha256\":\"6a021504b02dc18c0b6bf8dfebdbdca579f0ab4d75eccb09ceeae89880a007ad\"},{\"path\":\"packages/discovery-loop/dist/index.js\",\"sha256\":\"96930feb0a1f898bc79d1585747e97bbd2d0798cdf241d55247427ab62b00f7d\"},{\"path\":\"packages/discovery-loop/dist/index.js.map\",\"sha256\":\"fcef7b4fb29d3eab7ba6209e5d1db8ef29330a6072c8d4169351108f914261db\"},{\"path\":\"packages/discovery-loop/dist/types.d.ts\",\"sha256\":\"a641d51ea40135a0420ccc395b059f70744a44c2f3e55c2fdf430a05f0a24d6e\"},{\"path\":\"packages/verifier/dist/bad-a.js\",\"sha256\":\"35ee9193572e210deb4c60d1c4b829bc2fe78abb7b5153e63a9d63458ed72bfb\"},{\"path\":\"packages/verifier/dist/bad-b.js\",\"sha256\":\"f92480e1473d6294c602f031ee823bd3f6b4326ba2ccf745cbdc57043af0372e\"},{\"path\":\"packages/verifier/dist/bin/mod.wasm\",\"sha256\":\"93a44bbb96c751218e4c00d479e4c14358122a389acca16205b1e4d0dc5f9476\"},{\"path\":\"packages/verifier/dist/bin/native.node\",\"sha256\":\"2f87beacb6a71f75e3243ce005faf5d99405e02b5e729c7c9c216ef2e2a0544a\"},{\"path\":\"packages/verifier/dist/crlf.js\",\"sha256\":\"953bba9ac9726eaea07e844abcf144a0afe998039257c7a88b6665819597f39d\"},{\"path\":\"packages/verifier/dist/empty.js\",\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"},{\"path\":\"packages/verifier/dist/index.js\",\"sha256\":\"5b099c3e37b3d148f4efc77f31f1c48794c1d412738631d707411199a8da027c\"}],\"hashRule\":\"dist-bundle-sha256-v1\",\"roots\":[\"packages/ai-client/dist\",\"packages/analyzer/dist\",\"packages/discovery-loop/dist\",\"packages/verifier/dist\"],\"skippedDirectories\":[\"packages/ai-client/dist/node_modules\",\"packages/discovery-loop/dist/node_modules\"]}",
+    "canonicalJsonBytes": 2905,
+    "bundleSha256": "0cd877394cd142809d1984dec4aaf936dd4b29b78e4ca70726f3d4b2f80795bb"
+  }
+}

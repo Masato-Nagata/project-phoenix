@@ -204,6 +204,27 @@ switch ($Mode) {
     }
 }
 '@
+# The pwsh child process of the G2-B2 kill tests (states A, B, C): the Launcher process ends at once at a chosen point.
+$script:KillChild = @'
+param([string]$Root, [string]$Tools, [string]$Lib, [string]$MutexName, [string]$KillAt)
+$ErrorActionPreference = 'Stop'
+. (Join-Path $Lib 'fakeDocker.ps1')
+foreach ($m in 'DiscoveryCommon', 'LeaseTiming', 'ApprovalStore', 'InputFileGuard', 'RuntimeReport', 'DiscoveryLauncher') { Import-Module (Join-Path $Tools "$m.psm1") -Force -DisableNameChecking }
+$fake = New-FakeDocker -Root $Root
+Set-DockerCliInvoker -Invoker $fake.Invoker
+$script:now = 0L
+Set-LauncherTimeHooks -NowMs { $script:now } -SleepMs { param($ms) $script:now += $ms }
+$fake.State.OnStart = { param($name, $s) $c = $s.Containers[$name]; $vol = ($c.Mounts | Where-Object { $_.Destination -eq '/run/out' }).Source; [void](New-TestSealedRun -Dir $s.Volumes[$vol]) }
+# The Launcher process ends at once (no finally block runs), as a kill would end it. The state of the fake Docker is printed first.
+$script:die = { param($s) $cn = @($s.Containers.Keys | Where-Object { $_ -like 'phoenix-discovery-*' }).Count; $vn = @($s.Volumes.Keys | Where-Object { $_ -like 'phoenix-run-*' }).Count; [Console]::Out.WriteLine("container_exists=$($cn -gt 0)"); [Console]::Out.WriteLine("volume_exists=$($vn -gt 0)"); [Console]::Out.Flush(); [Environment]::Exit(42) }
+switch ($KillAt) {
+    'before_container_removal' { $fake.State.OnCall = { param($call, $s) if ($call -like 'rm id-*') { & $script:die $s } } }
+    'before_volume_removal' { $fake.State.OnCall = { param($call, $s) if ($call -like 'volume inspect --format*') { & $script:die $s } } }
+    'after_volume_removal' { $fake.State.OnVolumeRm = { param($name, $s) & $script:die $s } }
+}
+$r = Invoke-DiscoveryStart -RepoRoot $Root -Profile 'run' -MutexName $MutexName -LockPath (Join-Path $Root 'discovery/locks/discovery-run.lock') -Log { param($m) } -AuditConfig 'fixture'
+[Console]::Out.WriteLine('not_killed')
+'@
 Invoke-TestMain {
     Write-Host '=== Launcher (tasks 2.18, 2.21, 2.22, 2.23) ===' -ForegroundColor Cyan
 
@@ -586,7 +607,8 @@ public static class PhoenixTestAbandon {
     }
     $c = New-ExportCase
     $r = Invoke-RunExport -RepoRoot $c.Root -RunId $c.Id
-    Test-Case 'export: positive control: complete, accepted by the reader, volume removed' ($r.Outcome -eq 'complete' -and (Test-CompletedRun -Path $c.Paths.Final) -and $r.Disposition -eq 'removed_after_verified_export')
+    # (G2-B1, 2026-11-26) before: the export removed the volume ($r.Disposition -eq 'removed_after_verified_export'). Now the export removes no volume (Remove-RunVolume does, after the container); the Run is still complete and accepted.
+    Test-Case 'export: positive control: complete, accepted by the reader, and the export itself removes no volume (provisional kept_for_diagnosis)' ($r.Outcome -eq 'complete' -and (Test-CompletedRun -Path $c.Paths.Final) -and $r.Disposition -eq 'kept_for_diagnosis' -and $c.Fake.State.Volumes.ContainsKey($c.Paths.Volume) -and @($c.Fake.State.Calls | Where-Object { $_ -like 'volume rm*' }).Count -eq 0)
     $neg = @(
         @{ Name = 'one modified file'; Damage = { param($v) [IO.File]::WriteAllText((Join-Path $v 'records.jsonl'), ([IO.File]::ReadAllText((Join-Path $v 'records.jsonl'))).Replace('"n":1', '"n":7')) }; Step = 'verify' },
         @{ Name = 'one unlisted file'; Damage = { param($v) [IO.File]::WriteAllText((Join-Path $v 'extra.txt'), 'x') }; Step = 'verify' },
@@ -613,10 +635,22 @@ public static class PhoenixTestAbandon {
     $r = Invoke-RunExport -RepoRoot $c.Root -RunId $c.Id
     [IO.File]::WriteAllText((Join-Path $c.Paths.Final 'COMPLETE'), ('0' * 64))
     Test-Case 'reader: a marker hash that differs from the Run_Manifest hash is not accepted' (-not (Test-CompletedRun -Path $c.Paths.Final))
+    # (G2-C, 2026-11-27) before: 'disposition: a failed volume removal keeps the Run complete and says kept_for_diagnosis' with the expectation
+    # ($r.Outcome -eq 'complete' -and $r.Disposition -eq 'kept_for_diagnosis' -and (Test-CompletedRun -Path $c.Paths.Final)). Since G2-B1 the export
+    # makes no volume removal, so that test no longer tested a removal. It now tests the duty of the export under the failure setting, with a
+    # control that the setting is live: the export is complete and accepted, makes no `volume rm` call, keeps the volume, and its result and the
+    # final artifact equal those of an export without the setting (unlike the positive control above, the removal is set to fail). The real failed
+    # removal is tested through the Launcher ('G2 volume removal fails: ... rm_failed').
     $c = New-ExportCase
     $c.Fake.State.FailVolumeRm = $true
+    $rmBefore = @($c.Fake.State.Calls | Where-Object { $_ -like 'volume rm*' }).Count
     $r = Invoke-RunExport -RepoRoot $c.Root -RunId $c.Id
-    Test-Case 'disposition: a failed volume removal keeps the Run complete and says kept_for_diagnosis' ($r.Outcome -eq 'complete' -and $r.Disposition -eq 'kept_for_diagnosis' -and (Test-CompletedRun -Path $c.Paths.Final))
+    $rmAfterExport = @($c.Fake.State.Calls | Where-Object { $_ -like 'volume rm*' }).Count   # counted before the direct call below
+    $live = Invoke-DockerCli -Arguments @('volume', 'rm', 'phoenix-run-control-absent')   # still the fake of $c (the next case installs its own)
+    $plain = New-ExportCase
+    $rp = Invoke-RunExport -RepoRoot $plain.Root -RunId $plain.Id
+    $sameArtifact = (Get-Sha256HexOfFile -Path (Join-Path $c.Paths.Final 'manifest.json')) -ceq (Get-Sha256HexOfFile -Path (Join-Path $plain.Paths.Final 'manifest.json'))
+    Test-Case 'export under a failing volume removal: complete, accepted, no volume rm call, the volume kept, and the same result as without the setting (the setting is live: a direct volume rm fails)' ($r.Outcome -eq 'complete' -and $r.Step -eq $null -and $r.Disposition -eq 'kept_for_diagnosis' -and (Test-CompletedRun -Path $c.Paths.Final) -and ($rmAfterExport - $rmBefore) -eq 0 -and $c.Fake.State.Volumes.ContainsKey($c.Paths.Volume) -and $rp.Outcome -eq $r.Outcome -and $rp.Disposition -eq $r.Disposition -and $sameArtifact -and $live.ExitCode -ne 0) "rmBefore=$rmBefore rmAfterExport=$rmAfterExport live=$($live.ExitCode)"
 
     # the Launcher killed before the marker: the export holds the copy, no marker; the next start marks it interrupted
     $c = New-ExportCase
@@ -626,6 +660,152 @@ public static class PhoenixTestAbandon {
     $rf = Join-Path $c.Paths.Export 'REASON.json'
     Test-Case 'killed before the marker: no reader accepts the export, the next start writes interrupted, and the volume is kept' (-not (Test-CompletedRun -Path $c.Paths.Export) -and ($marked -contains $c.Id) -and (ConvertFrom-JsonStrict -Text ([IO.File]::ReadAllText($rf)))['step'] -ceq 'interrupted' -and $c.Fake.State.Volumes.ContainsKey($c.Paths.Volume))
 
+    # ================================================================ G2-B2 (2026-11-26): the Run_Volume is removed behind the container removal (fake Docker only)
+    # The fake Docker refuses `volume rm` while any container, a stopped one included, references the volume.
+    function Test-RunLockHeld { param([string]$Root) $ls = Enter-RunLock -LockPath (Join-Path $Root 'discovery/locks/discovery-run.lock'); if ($null -eq $ls) { return $true }; $ls.Dispose(); $false }
+    function Get-G2Calls { param($Fake, [string]$Pattern) , @($Fake.State.Calls | Where-Object { $_ -like $Pattern }) }
+    function Invoke-G2Run {
+        param([scriptblock]$Setup, [bool]$Seal = $true, [string]$Profile = 'run')
+        $root = New-TestRepo; $fake = Install-Fake $root; $script:g2Root = $root
+        if ($Seal) { $fake.State.OnStart = { param($name, $s) $c = $s.Containers[$name]; $vol = ($c.Mounts | Where-Object { $_.Destination -eq '/run/out' }).Source; [void](New-TestSealedRun -Dir $s.Volumes[$vol]) } }
+        if ($Setup) { & $Setup $fake }
+        $res = if ($Profile -eq 'run') { Start-C2 -Root $root -Audit 'fixture' } else { Start-Test -Root $root -Profile $Profile }
+        $pp = Get-RunPaths -RepoRoot $root -RunId $res.RunId
+        [pscustomobject]@{ Root = $root; Fake = $fake; Res = $res; P = $pp; Rr = (Get-C2Record $root $res.RunId) }
+    }
+    # the volume is kept with this reason, no volume was removed, and the record says so (RmCalls: the number of `volume rm` calls that were made)
+    function Test-G2Kept {
+        param($G, [string]$Reason, [int]$RmCalls = 0)
+        if ($null -eq $G.Rr) { return $false }
+        $rec = $G.Rr.Rec
+        $rec['volumeDisposition'] -ceq 'kept_for_diagnosis' -and $rec['volumeCleanup']['outcome'] -ceq 'kept' -and $rec['volumeCleanup']['reason'] -ceq $Reason -and
+            $G.Fake.State.Volumes.ContainsKey($G.P.Volume) -and (Get-G2Calls $G.Fake 'volume rm*').Count -eq $RmCalls -and $G.Rr.Text.Contains('"volumeCleanup":{"outcome":"kept","reason":"' + $Reason + '"}')
+    }
+    $utf8b = [System.Text.UTF8Encoding]::new($false)
+
+    # ---- the deterministic keep-reason order and the closed vocabulary (no Docker)
+    $vocab = 'profile_probe,export_incomplete,stop_not_confirmed,record_not_saved,container_not_removed,run_not_normal,final_not_verified,volume_kind_mismatch,rm_failed'
+    $order = (Get-VolumeKeepReasons)
+    Test-Case 'G2 reasons: the closed vocabulary is exactly the nine codes (in the order of the decision)' ((@($order | Sort-Object) -join ',') -ceq ((($vocab -split ',') | Sort-Object) -join ',') -and ($order -join ',') -ceq 'profile_probe,stop_not_confirmed,export_incomplete,final_not_verified,run_not_normal,record_not_saved,container_not_removed,volume_kind_mismatch,rm_failed')
+    $okExp = [pscustomobject]@{ Outcome = 'complete'; Location = 'x' }; $badExp = [pscustomobject]@{ Outcome = 'incomplete'; Location = 'x' }
+    $r1 = Get-VolumeKeepReason -IsRun $false -StopConfirmed $false -Export $null -FinalVerified $false -Normal $false -RecordSaved $false -ContainerOutcome 'kept'
+    $r2 = Get-VolumeKeepReason -IsRun $true -StopConfirmed $false -Export $null -FinalVerified $false -Normal $false -RecordSaved $false -ContainerOutcome 'kept'
+    $r3 = Get-VolumeKeepReason -IsRun $true -StopConfirmed $true -Export $badExp -FinalVerified $false -Normal $false -RecordSaved $false -ContainerOutcome 'kept'
+    $r3b = Get-VolumeKeepReason -IsRun $true -StopConfirmed $true -Export $null -FinalVerified $false -Normal $false -RecordSaved $false -ContainerOutcome 'kept'
+    $r4 = Get-VolumeKeepReason -IsRun $true -StopConfirmed $true -Export $okExp -FinalVerified $false -Normal $false -RecordSaved $false -ContainerOutcome 'kept'
+    $r5 = Get-VolumeKeepReason -IsRun $true -StopConfirmed $true -Export $okExp -FinalVerified $true -Normal $false -RecordSaved $false -ContainerOutcome 'kept'
+    $r6 = Get-VolumeKeepReason -IsRun $true -StopConfirmed $true -Export $okExp -FinalVerified $true -Normal $true -RecordSaved $false -ContainerOutcome 'kept'
+    $r7 = Get-VolumeKeepReason -IsRun $true -StopConfirmed $true -Export $okExp -FinalVerified $true -Normal $true -RecordSaved $true -ContainerOutcome 'kept'
+    $r7b = Get-VolumeKeepReason -IsRun $true -StopConfirmed $true -Export $okExp -FinalVerified $true -Normal $true -RecordSaved $true -ContainerOutcome $null
+    $rOkRemoved = Get-VolumeKeepReason -IsRun $true -StopConfirmed $true -Export $okExp -FinalVerified $true -Normal $true -RecordSaved $true -ContainerOutcome 'removed'
+    $rOkAbsent = Get-VolumeKeepReason -IsRun $true -StopConfirmed $true -Export $okExp -FinalVerified $true -Normal $true -RecordSaved $true -ContainerOutcome 'absent'
+    $rProv = Get-VolumeKeepReason -IsRun $true -StopConfirmed $true -Export $okExp -FinalVerified $true -Normal $true -Provisional
+    Test-Case 'G2 reasons: with every condition wrong the first rule wins, and each rule shows up when the ones before it hold (probe, stop, export, final, normal, record, container)' ($r1 -ceq 'profile_probe' -and $r2 -ceq 'stop_not_confirmed' -and $r3 -ceq 'export_incomplete' -and $r3b -ceq 'export_incomplete' -and $r4 -ceq 'final_not_verified' -and $r5 -ceq 'run_not_normal' -and $r6 -ceq 'record_not_saved' -and $r7 -ceq 'container_not_removed' -and $r7b -ceq 'container_not_removed') "$r1 $r2 $r3 $r4 $r5 $r6 $r7"
+    Test-Case 'G2 reasons: no reason when the container is removed or absent (the record and the other conditions hold); the provisional decision stops after rule 5' ($null -eq $rOkRemoved -and $null -eq $rOkAbsent -and $null -eq $rProv)
+
+    # ---- a normal Run: the volume is removed after the container; the order, the locks, and the handles
+    $script:g2Seen = @{}
+    $g = Invoke-G2Run -Setup { param($f) $f.State.OnVolumeRm = { param($name, $s)
+                $rid = $name -replace '^phoenix-run-', ''
+                $script:g2Seen['Rec'] = Get-C2Record $script:g2Root $rid
+                $script:g2Seen['ContainerGone'] = (@($s.Containers.Keys | Where-Object { $_ -like 'phoenix-discovery-*' }).Count -eq 0)
+                $script:g2Seen['LockHeld'] = (Test-RunLockHeld $script:g2Root)
+                $script:g2Seen['InputsHeld'] = (Test-InputsHeld $script:g2Root) } }
+    $rec = $g.Rr.Rec; $seen = $script:g2Seen
+    Test-Case 'G2 normal Run: exit 0, complete, the volume is removed, and the final record says removed (volumeCleanup removed with a null reason, removed_after_verified_export, container removed)' ($g.Res.ExitCode -eq 0 -and $g.Res.Code -ceq 'complete' -and -not $g.Fake.State.Volumes.ContainsKey($g.P.Volume) -and $rec['volumeDisposition'] -ceq 'removed_after_verified_export' -and $g.Rr.Text.Contains('"volumeCleanup":{"outcome":"removed","reason":null}') -and $rec['containerRemoval']['outcome'] -ceq 'removed' -and (Test-CompletedRun -Path $g.P.Final)) "code=$($g.Res.Code)"
+    $iCopy = Get-CallIndex $g.Fake '*export-helper*'; $iCRm = Get-CallIndex $g.Fake 'rm id-*'; $iInsp = Get-CallIndex $g.Fake 'volume inspect --format*'; $iVRm = Get-CallIndex $g.Fake 'volume rm *'
+    Test-Case 'G2 order: export copy, then the removal of the container, then the identity check of the volume, then the volume removal (one volume rm call)' ($iCopy -ge 0 -and $iCopy -lt $iCRm -and $iCRm -lt $iInsp -and $iInsp -lt $iVRm -and (Get-G2Calls $g.Fake 'volume rm*').Count -eq 1) "$iCopy $iCRm $iInsp $iVRm"
+    Test-Case 'G2 order: when the volume is removed the provisional record is already saved (pending, kept_for_diagnosis, no final result yet) and the container is already gone' ($null -ne $seen['Rec'] -and $seen['Rec'].Rec['volumeCleanup']['outcome'] -ceq 'pending' -and $null -eq $seen['Rec'].Rec['volumeCleanup']['reason'] -and $seen['Rec'].Rec['volumeDisposition'] -ceq 'kept_for_diagnosis' -and $seen['Rec'].Rec['containerRemoval']['outcome'] -ceq 'pending' -and $seen['ContainerGone'] -eq $true)
+    Test-Case 'G2 locks: at the volume removal the Run lock and the input file handles are still held; after the final record both are released' ($seen['LockHeld'] -eq $true -and $seen['InputsHeld'] -eq $true -and -not (Test-RunLockHeld $g.Root) -and (Test-InputsReleased $g.Root))
+    $forceCalls = @($g.Fake.State.Calls | Where-Object { $_ -like 'volume rm*' -and ($_ -match '(^| )-f( |$)' -or $_ -match '--force') })
+    $rmDef = (Get-Command Remove-RunVolume).Definition; $exportDef = (Get-Command Invoke-RunExport).Definition
+    Test-Case 'G2 no force: the volume removal is a plain `volume rm <name>` (no -f, no --force) and the code has no force option' ($forceCalls.Count -eq 0 -and $g.Fake.State.Calls -contains "volume rm $($g.P.Volume)" -and -not ($rmDef -match "'-f'|'--force'"))
+    Test-Case 'G2 export: Invoke-RunExport has no volume removal any more (static) and the old order is refused (the removal of the old step 8 would be made while the container exists)' (-not ($exportDef -match "'volume',\s*'rm'") -and -not ($exportDef -match 'volume rm'))
+    # the negative control of the old order, on the fake itself: a volume that a stopped container references is not removed; after the container is removed it is
+    $nr = New-TestRepo; $nf = Install-Fake $nr
+    $nf.State.Volumes['phoenix-run-neg'] = (New-TempDir)
+    $nf.State.Containers['phoenix-discovery-neg'] = @{ Running = $false; ExitCode = '0'; Labels = @{}; Mounts = @([ordered]@{ Type = 'volume'; Source = 'phoenix-run-neg'; Destination = '/run/out'; RW = $true }); Networks = @(); Polls = $null }
+    $old1 = Invoke-DockerCli -Arguments @('volume', 'rm', 'phoenix-run-neg')
+    $stillThere = $nf.State.Volumes.ContainsKey('phoenix-run-neg')
+    [void](Invoke-DockerCli -Arguments @('rm', 'phoenix-discovery-neg'))
+    $new1 = Invoke-DockerCli -Arguments @('volume', 'rm', 'phoenix-run-neg')
+    Test-Case 'G2 negative control (fake Docker): the old order is refused (a stopped container still references the volume: exit 1, volume kept); after the container is removed the same call succeeds' ($old1.ExitCode -ne 0 -and $stillThere -and $new1.ExitCode -eq 0 -and -not $nf.State.Volumes.ContainsKey('phoenix-run-neg'))
+
+    # ---- keep cases
+    $g = Invoke-G2Run -Setup { param($f) $f.State.OnStart = { param($name, $s) $s.Containers[$name].Polls = $null }; $f.State.StopFails = $true }
+    Test-Case 'G2 stop not confirmed: the volume and the container are kept, no volume call at all (no identity check, no removal), reason stop_not_confirmed, the retention of the locks and the input handles still holds, and the exit is non-zero' ($g.Res.ExitCode -ne 0 -and (Test-G2Kept $g 'stop_not_confirmed') -and (Get-G2Calls $g.Fake 'volume inspect --format*').Count -eq 0 -and $g.Fake.State.Containers.ContainsKey((Get-ContainerName -RunId $g.Res.RunId)) -and (Get-G2Calls $g.Fake 'rm id-*').Count -eq 0 -and (Test-UnstoppedRunRetained -RunId $g.Res.RunId) -and (Test-InputsHeld $g.Root) -and (Test-RunLockHeld $g.Root)) "exit=$($g.Res.ExitCode) code=$($g.Res.Code)"
+    $g = Invoke-G2Run -Setup { param($f) $f.State.FailCopy = $true }
+    Test-Case 'G2 export failure (copy): the volume is kept (export_incomplete); the container is kept because the evidence is not saved; no volume call' ((Test-G2Kept $g 'export_incomplete') -and $g.Rr.Rec['export']['step'] -ceq 'copy' -and $g.Rr.Rec['containerRemoval']['outcome'] -ceq 'kept' -and $g.Rr.Rec['containerRemoval']['reason'] -ceq 'evidence_not_saved' -and (Get-G2Calls $g.Fake 'volume inspect --format*').Count -eq 0 -and $g.Res.ExitCode -ne 0)
+    $g = Invoke-G2Run -Seal $false
+    Test-Case 'G2 export verification failure (no manifest): the volume is kept (export_incomplete); the Reason_File is saved, so the container is removed under the existing rule; the Run is not complete' ((Test-G2Kept $g 'export_incomplete') -and $g.Rr.Rec['export']['step'] -ceq 'verify' -and (Test-Path -LiteralPath (Join-Path $g.P.Export 'REASON.json')) -and -not $g.Fake.State.Containers.ContainsKey((Get-ContainerName -RunId $g.Res.RunId)) -and $g.Res.ExitCode -ne 0)
+    $g = Invoke-G2Run -Setup { param($f) $f.State.OnCall = { param($call, $s) if ($call -like 'rm id-*') { $rid = $call.Substring('rm id-phoenix-discovery-'.Length); [IO.File]::WriteAllText((Join-Path $script:g2Root "discovery/runs/$rid/extra.txt"), 'x') } } }
+    Test-Case 'G2 final location fails the re-verification before the removal (an unlisted file appears after the export): the volume is kept (final_not_verified), nothing of the final location is changed or removed by the Launcher, no volume call' ((Test-G2Kept $g 'final_not_verified') -and (Test-Path -LiteralPath (Join-Path $g.P.Final 'extra.txt')) -and -not (Test-CompletedRun -Path $g.P.Final) -and (Test-Path -LiteralPath (Join-Path $g.P.Final 'COMPLETE')) -and (Get-G2Calls $g.Fake 'volume inspect --format*').Count -eq 0)
+    $g = Invoke-G2Run -Setup { param($f) $f.State.OnCreate = { param($name, $s) $rid = $name.Substring('phoenix-discovery-'.Length); foreach ($d in @('discovery/runs', 'discovery/runs/.incoming')) { $dd = Join-Path $script:g2Root $d; [void][IO.Directory]::CreateDirectory($dd); [void][IO.Directory]::CreateDirectory((Join-Path $dd "$rid.launcher.json.tmp")) } } }
+    Test-Case 'G2 provisional record cannot be saved: no record exists, the container is kept (evidence not saved), the volume is kept and is not inspected or removed, the exit status is 1 launcher_record_not_saved (not complete), and the verified final location is untouched' ($null -eq $g.Rr -and $g.Res.ExitCode -eq 1 -and $g.Res.Code -ceq 'launcher_record_not_saved' -and $g.Fake.State.Volumes.ContainsKey($g.P.Volume) -and (Get-G2Calls $g.Fake 'volume inspect --format*').Count -eq 0 -and (Get-G2Calls $g.Fake 'volume rm*').Count -eq 0 -and $g.Fake.State.Containers.ContainsKey((Get-ContainerName -RunId $g.Res.RunId)) -and (Test-CompletedRun -Path $g.P.Final)) "exit=$($g.Res.ExitCode) code=$($g.Res.Code)"
+    $g = Invoke-G2Run -Setup { param($f) $f.State.FailRm = $true }
+    Test-Case 'G2 container removal fails: the container is kept (rm_failed) and the volume is kept (container_not_removed); no identity check and no removal of the volume' ((Test-G2Kept $g 'container_not_removed') -and $g.Rr.Rec['containerRemoval']['outcome'] -ceq 'kept' -and $g.Rr.Rec['containerRemoval']['reason'] -ceq 'rm_failed' -and (Get-G2Calls $g.Fake 'volume inspect --format*').Count -eq 0)
+    $g = Invoke-G2Run -Setup { param($f) $f.State.OnStart = { param($name, $s) $c = $s.Containers[$name]; $vol = ($c.Mounts | Where-Object { $_.Destination -eq '/run/out' }).Source; [void](New-TestSealedRun -Dir $s.Volumes[$vol]); $s.VolumeLabels[$vol]['phoenix.discovery.run-id'] = 'run-20250101T000000Z-bbbbbbbbbbbb' } }
+    Test-Case 'G2 volume identity: a run-id label of another Run keeps the volume (volume_kind_mismatch), the identity check was made, no volume rm' ((Test-G2Kept $g 'volume_kind_mismatch') -and (Get-G2Calls $g.Fake 'volume inspect --format*').Count -eq 1)
+    $g = Invoke-G2Run -Setup { param($f) $f.State.OnStart = { param($name, $s) $c = $s.Containers[$name]; $vol = ($c.Mounts | Where-Object { $_.Destination -eq '/run/out' }).Source; [void](New-TestSealedRun -Dir $s.Volumes[$vol]); $s.VolumeLabels[$vol]['phoenix.discovery.volume-kind'] = 'probe-diagnostic' } }
+    Test-Case 'G2 volume identity: another volume-kind label keeps the volume (volume_kind_mismatch), no volume rm' ((Test-G2Kept $g 'volume_kind_mismatch') -and (Get-G2Calls $g.Fake 'volume inspect --format*').Count -eq 1)
+    $g = Invoke-G2Run -Setup { param($f) $f.State.OnStart = { param($name, $s) $c = $s.Containers[$name]; $vol = ($c.Mounts | Where-Object { $_.Destination -eq '/run/out' }).Source; [void](New-TestSealedRun -Dir $s.Volumes[$vol]); $s.VolumeLabels[$vol].Remove('phoenix.discovery.role') } }
+    Test-Case 'G2 volume identity: a missing role label keeps the volume (volume_kind_mismatch), no volume rm' ((Test-G2Kept $g 'volume_kind_mismatch') -and (Get-G2Calls $g.Fake 'volume inspect --format*').Count -eq 1)
+    $g = Invoke-G2Run -Setup { param($f) $f.State.OnCall = { param($call, $s) if ($call -like 'rm id-*') { [void]$s.Volumes.Remove('phoenix-run-' + $call.Substring('rm id-phoenix-discovery-'.Length)) } } }
+    $gone = -not $g.Fake.State.Volumes.ContainsKey($g.P.Volume)
+    Test-Case 'G2 volume already gone: the identity cannot be confirmed (volume_kind_mismatch); it is NEVER recorded as removed and no volume rm is made' ($gone -and $g.Rr.Rec['volumeCleanup']['outcome'] -ceq 'kept' -and $g.Rr.Rec['volumeCleanup']['reason'] -ceq 'volume_kind_mismatch' -and $g.Rr.Rec['volumeDisposition'] -ceq 'kept_for_diagnosis' -and (Get-G2Calls $g.Fake 'volume rm*').Count -eq 0)
+    $g = Invoke-G2Run -Setup { param($f) $f.State.FailVolumeRm = $true }
+    Test-Case 'G2 volume removal fails: the Run stays complete (exit 0), the volume is kept (rm_failed), one plain volume rm call, and no Docker text in the record' ($g.Res.ExitCode -eq 0 -and $g.Res.Code -ceq 'complete' -and (Test-G2Kept $g 'rm_failed' -RmCalls 1) -and -not $g.Rr.Text.Contains('in use') -and (Test-CompletedRun -Path $g.P.Final))
+    $g = Invoke-G2Run -Profile 'probe' -Seal $false -Setup { param($f) $f.State.OnStart = { param($name, $s) $c = $s.Containers[$name]; $vol = ($c.Mounts | Where-Object { $_.Destination -eq '/run/out' }).Source; [IO.File]::WriteAllText((Join-Path $s.Volumes[$vol] 'probe-result.json'), '{"ok":true}') } }
+    Test-Case 'G2 probe: the probe volume is kept (profile_probe), no volume inspect, no volume rm' ((Test-G2Kept $g 'profile_probe') -and (Get-G2Calls $g.Fake 'volume inspect --format*').Count -eq 0 -and $g.Rr.Rec['volumeRemoval'] -ceq 'requires_human_approval')
+    $g = Invoke-G2Run -Setup { param($f) $f.State.RuntimeStderr = $utf8b.GetBytes('{"phase":"run","sealed":true,"terminationReason":"error"}' + "`n") }
+    Test-Case 'G2 abnormal Run (export complete, sealed with termination error): the volume is kept (run_not_normal), the final location is kept and verified, the abnormal result (exit 1, runtime_sealed_abnormal) is unchanged, no volume rm' ($g.Res.ExitCode -eq 1 -and $g.Res.Code -ceq 'runtime_sealed_abnormal' -and (Test-G2Kept $g 'run_not_normal') -and (Test-CompletedRun -Path $g.P.Final) -and $g.Rr.Rec['containerRemoval']['outcome'] -ceq 'removed')
+    $g = Invoke-G2Run -Setup { param($f) $f.State.ExitCodeOnEnd = '1' }
+    Test-Case 'G2 abnormal Run (runtime exit code 1 with a complete export): the volume is kept (run_not_normal), the Launcher does not end as complete' ($g.Res.ExitCode -ne 0 -and (Test-G2Kept $g 'run_not_normal') -and (Test-CompletedRun -Path $g.P.Final))
+
+    # ---- the final record cannot be written (state D)
+    $script:g2Seen = @{}
+    $g = Invoke-G2Run -Setup { param($f) $f.State.OnVolumeRm = { param($name, $s) $rid = $name -replace '^phoenix-run-', ''; $rp = Join-Path $script:g2Root "discovery/runs/$rid.launcher.json"; $script:g2Seen['Bytes'] = [IO.File]::ReadAllBytes($rp); [void][IO.Directory]::CreateDirectory("$rp.tmp"); $script:g2Seen['Complete'] = Get-Sha256HexOfFile -Path (Join-Path $script:g2Root "discovery/runs/$rid/COMPLETE") } }
+    $recFile = Join-Path $g.P.Runs "$($g.Res.RunId).launcher.json"
+    $provText = $utf8b.GetString([byte[]]$script:g2Seen['Bytes'])
+    Test-Case 'G2 final record cannot be written: the Launcher does not end as complete (exit 1, launcher_record_not_saved), the provisional record stays byte-identical (pending, kept_for_diagnosis), and the removed volume is not created again' ($g.Res.ExitCode -eq 1 -and $g.Res.Code -ceq 'launcher_record_not_saved' -and (Test-BytesEqual ([IO.File]::ReadAllBytes($recFile)) ([byte[]]$script:g2Seen['Bytes'])) -and $provText.Contains('"volumeCleanup":{"outcome":"pending","reason":null}') -and $provText.Contains('"volumeDisposition":"kept_for_diagnosis"') -and -not $g.Fake.State.Volumes.ContainsKey($g.P.Volume) -and (Get-G2Calls $g.Fake 'volume create*').Count -eq 1) "exit=$($g.Res.ExitCode) code=$($g.Res.Code)"
+    Test-Case 'G2 final record cannot be written: the verified final location is unchanged and still accepted, and the locks and the input file handles are released' ((Test-CompletedRun -Path $g.P.Final) -and (Get-Sha256HexOfFile -Path (Join-Path $g.P.Final 'COMPLETE')) -ceq $script:g2Seen['Complete'] -and -not (Test-RunLockHeld $g.Root) -and (Test-InputsReleased $g.Root))
+
+    # ---- the Launcher ends at once (states A, B, C): the state on disk, and the existing recovery of the next start
+    $killDir = New-TempDir; $killScript = Join-Path $killDir 'kill-child.ps1'
+    [IO.File]::WriteAllText($killScript, $script:KillChild, $utf8)
+    $libDir2 = Join-Path $PSScriptRoot 'lib'
+    $readKv2 = { param($Out) $h = @{}; foreach ($ln in ($Out -split "`r?`n")) { if ($ln -match '^([a-z_0-9]+)=(.*)$') { $h[$Matches[1]] = $Matches[2] } }; $h }
+    $states = @(
+        @{ State = 'A (after the provisional record, before the container removal)'; At = 'before_container_removal'; Container = 'True'; Volume = 'True' },
+        @{ State = 'B (after the container removal, before the volume removal)'; At = 'before_volume_removal'; Container = 'False'; Volume = 'True' },
+        @{ State = 'C (after the volume removal, before the final record)'; At = 'after_volume_removal'; Container = 'False'; Volume = 'False' }
+    )
+    foreach ($ks in $states) {
+        $kRoot = New-TestRepo
+        $k = Invoke-ChildPwsh -ScriptPath $killScript -Arguments @('-Root', $kRoot, '-Tools', $script:ToolsDir, '-Lib', $libDir2, '-MutexName', (New-TestMutexName), '-KillAt', $ks.At) -TimeoutSec 300
+        $kv = & $readKv2 $k.Output
+        $recFiles = @(Get-ChildItem -LiteralPath (Join-Path $kRoot 'discovery/runs') -Filter '*.launcher.json' -ErrorAction SilentlyContinue)
+        $kid = if ($recFiles.Count -eq 1) { $recFiles[0].Name -replace '\.launcher\.json$', '' } else { 'run-00000000T000000Z-000000000000' }
+        $kr = if ($recFiles.Count -eq 1) { ConvertFrom-JsonStrict -Text ([IO.File]::ReadAllText($recFiles[0].FullName)) } else { $null }
+        $kp = Get-RunPaths -RepoRoot $kRoot -RunId $kid
+        Test-Case "G2 killed, state $($ks.State): the process ended at once (42); container exists = $($ks.Container), volume exists = $($ks.Volume); the provisional record is the only record (pending, kept_for_diagnosis, container removal pending); the final location is verified; the OS released the Run lock" ($k.ExitCode -eq 42 -and $kv['container_exists'] -ceq $ks.Container -and $kv['volume_exists'] -ceq $ks.Volume -and $null -ne $kr -and $kr['volumeCleanup']['outcome'] -ceq 'pending' -and $null -eq $kr['volumeCleanup']['reason'] -and $kr['volumeDisposition'] -ceq 'kept_for_diagnosis' -and $kr['containerRemoval']['outcome'] -ceq 'pending' -and (Test-CompletedRun -Path $kp.Final) -and -not (Test-RunLockHeld $kRoot)) "exit=$($k.ExitCode) $($k.Output -replace "`r?`n", ' ') $($k.Error)"
+        # the next start: the existing recovery. A kept volume of a verified final location is not marked; nothing is repaired, changed, or removed.
+        $kf = Install-Fake $kRoot
+        if ($ks.Volume -ceq 'True') { $kf.State.Volumes["phoenix-run-$kid"] = (New-TempDir); $kf.State.VolumeLabels["phoenix-run-$kid"] = @{ 'phoenix.discovery.volume-kind' = 'run' } }
+        if ($ks.Container -ceq 'True') { $kf.State.Containers["phoenix-discovery-$kid"] = @{ Running = $false; ExitCode = '0'; Labels = @{ 'phoenix.discovery.role' = 'runtime'; 'phoenix.discovery.run-id' = $kid }; Mounts = @(); Networks = @(); Polls = $null } }
+        $hashBefore = @((Get-Sha256HexOfFile -Path (Join-Path $kp.Final 'COMPLETE')), (Get-Sha256HexOfFile -Path (Join-Path $kp.Final 'manifest.json')), (Get-Sha256HexOfFile -Path (Join-Path $kRoot "discovery/runs/$kid.launcher.json"))) -join ','
+        $stoppedLeft = Stop-LeftoverRuntimeContainers
+        $markedK = Set-InterruptedRuns -RepoRoot $kRoot
+        $hashAfter = @((Get-Sha256HexOfFile -Path (Join-Path $kp.Final 'COMPLETE')), (Get-Sha256HexOfFile -Path (Join-Path $kp.Final 'manifest.json')), (Get-Sha256HexOfFile -Path (Join-Path $kRoot "discovery/runs/$kid.launcher.json"))) -join ','
+        Test-Case "G2 recovery after state $($ks.State): no Run is marked interrupted, no Reason_File is written, the final location and the earlier record are byte-identical, and nothing is removed (no rm, no volume rm; the kept volume and the stopped container stay for a human decision)" (@($markedK).Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $kp.Export 'REASON.json')) -and -not (Test-Path -LiteralPath (Join-Path $kp.Final 'REASON.json')) -and $hashBefore -ceq $hashAfter -and (Get-G2Calls $kf 'rm *').Count -eq 0 -and (Get-G2Calls $kf 'volume rm*').Count -eq 0 -and $kf.State.Volumes.ContainsKey("phoenix-run-$kid") -eq ($ks.Volume -ceq 'True') -and $kf.State.Containers.ContainsKey("phoenix-discovery-$kid") -eq ($ks.Container -ceq 'True'))
+    }
+    # a final location that no longer passes the reader acceptance follows the existing recovery (interrupted, volume kept)
+    $kRoot = New-TestRepo; $kf = Install-Fake $kRoot
+    $kid2 = New-DiscoveryRunId; $kp2 = Get-RunPaths -RepoRoot $kRoot -RunId $kid2
+    $kf.State.Volumes[$kp2.Volume] = (New-TempDir); $kf.State.VolumeLabels[$kp2.Volume] = @{ 'phoenix.discovery.volume-kind' = 'run' }
+    [void](New-TestSealedRun -Dir $kp2.Final); [IO.File]::WriteAllText((Join-Path $kp2.Final 'COMPLETE'), ('0' * 64))
+    $markedT = Set-InterruptedRuns -RepoRoot $kRoot
+    Test-Case 'G2 recovery: a final location that fails the reader acceptance is handled by the existing recovery (marked interrupted with a Reason_File in the Incoming_Export, volume kept, no removal)' (($markedT -contains $kid2) -and (Test-Path -LiteralPath (Join-Path $kp2.Export 'REASON.json')) -and $kf.State.Volumes.ContainsKey($kp2.Volume) -and (Get-G2Calls $kf 'volume rm*').Count -eq 0)
     # ---------------------------------------------------------------- heartbeat schedule (fake clock)
     $root = New-TestRepo
     $fake = Install-Fake $root
